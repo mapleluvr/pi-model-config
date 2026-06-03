@@ -1,10 +1,10 @@
 # Pi Model Config
 
-> 🧩 由 **DeepSeek** 开发的 Pi 可视化模型配置插件
+> 🧩 使用 **DeepSeek V4 Pro** 开发的 Pi 可视化模型配置插件
 
 [![pi-package](https://img.shields.io/badge/pi-package-blue)](https://pi.dev/packages)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![author](https://img.shields.io/badge/author-DeepSeek-orange)](https://deepseek.com)
+[![author](https://img.shields.io/badge/developed%20with-DeepSeek%20V4%20Pro-orange)](https://deepseek.com)
 
 可视化地管理 Pi Agent 的自定义模型提供商、定义模型参数，并自动保存到 `models.json`。
 
@@ -74,4 +74,4 @@ pi-model-config/
 
 ## 许可
 
-MIT — 由 DeepSeek 开发
+MIT — 使用 DeepSeek V4 Pro 开发

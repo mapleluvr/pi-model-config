@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Pi 可视化模型配置插件 — 管理自定义 Providers、Models、Payload 参数，支持自动拉取模型列表",
   "keywords": ["pi-package", "pi-extension", "model-config", "deepseek"],
-  "author": "DeepSeek",
+  "author": "使用 DeepSeek V4 Pro 开发",
   "license": "MIT",
   "repository": {
     "type": "git",
