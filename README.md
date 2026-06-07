@@ -17,6 +17,7 @@
 - 📊 **Pi 默认参数展示** — 编辑模型时展示 Pi Agent 的标准参数（contextWindow、maxTokens 等）供参考和修改
 - 💾 **自动保存** — 每次操作后自动写入 `models.json`，无需手动保存
 - 🚀 **启动加载** — Pi 启动时自动从 `models.json` 恢复所有 Providers
+- 🤖 **Subagent 模型配置** — 管理 `pi-subagents` 内置 agents 的 `model`、`thinking`、`fallbackModels` 覆盖配置
 
 ## 安装
 
@@ -55,15 +56,53 @@ cp -r pi-model-config .pi/extensions/model-config
 | `bool` | 选择 true/false | 无 |
 | `json` | 文本输入 | **JSON.parse() 合法性检测，非法时提示重试** |
 
+### Subagent 模型配置
+
+进入 `/model-config` 后选择「🤖 Subagent 模型配置」。该功能读写 Pi settings 中的 `subagents.agentOverrides`。**联动关系：`model-config` 只提供可视化编辑 UI；实际读取并应用这些 Subagent 模型覆盖配置的是 `pi-subagents` 插件/扩展。**
+
+```json
+{
+  "subagents": {
+    "agentOverrides": {
+      "reviewer": {
+        "model": "Mapleluv/gpt-5.5",
+        "thinking": "high",
+        "fallbackModels": ["openai/gpt-5-mini"]
+      }
+    }
+  }
+}
+```
+
+配置编辑方式：
+
+- 「编辑本项目配置」：创建/编辑当前项目 `.pi/settings.json` 的 `subagents.agentOverrides`。
+- 「编辑公共配置」：编辑公共配置 `~/.pi/agent/settings.json` 的 `subagents.agentOverrides`。
+- 只有用户明确选择公共配置时才会写公共 settings；默认不会因为项目配置缺失而隐式写公共配置。
+
+同步操作：
+
+- 「本项目配置 → 公共配置」：用项目 `subagents.agentOverrides` 覆盖公共配置的同名子树。
+- 「公共配置 → 本项目配置」：用公共 `subagents.agentOverrides` 覆盖项目配置的同名子树。
+
+两种同步都会在确认后执行，并且只覆盖 `subagents.agentOverrides` 子树，保留 settings 其他字段。
+
+`fallbackModels` 支持从模型选择器追加模型，也支持手动编辑逗号/换行分隔列表。追加时会自动去重并保留原顺序。
+
+支持的内置 agents：`context-builder`、`delegate`、`oracle`、`planner`、`researcher`、`reviewer`、`scout`、`worker`。
+
 ## 项目结构
 
 ```
 pi-model-config/
-├── index.ts       # 扩展入口 + TUI 流程 + 命令注册
-├── config.ts      # models.json 读写
-├── types.ts       # TypeScript 类型定义
-├── package.json   # 包元数据
-└── README.md      # 本文档
+├── index.ts                     # 扩展入口 + TUI 流程 + 命令注册
+├── config.ts                    # models.json 读写
+├── subagent-settings.ts         # subagents.agentOverrides 读写与 scope 解析
+├── types.ts                     # TypeScript 类型定义
+├── tests/
+│   └── subagent-settings.test.ts # Subagent settings 单元测试
+├── package.json                 # 包元数据
+└── README.md                    # 本文档
 ```
 
 ## 隐私声明

@@ -2,7 +2,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import type { ModelsConfig, ProviderConfig } from "./types";
+import type { ModelsConfig, ProviderConfig } from "./types.ts";
 
 /** 获取 models.json 的完整路径 */
 export function getModelsPath(): string {

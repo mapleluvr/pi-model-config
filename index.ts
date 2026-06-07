@@ -8,8 +8,23 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { getModelsPath, readModelsConfig, writeModelsConfig } from "./config";
-import type { ModelsConfig, ProviderConfig, ModelConfig, ExtraPayloadParam } from "./types";
+import { getModelsPath, readModelsConfig, writeModelsConfig } from "./config.ts";
+import type { ModelsConfig, ProviderConfig, ModelConfig, ExtraPayloadParam } from "./types.ts";
+import {
+  BUILTIN_SUBAGENT_NAMES,
+  SUBAGENT_THINKING_LEVELS,
+  clearManagedSubagentAgentFields,
+  deleteSubagentAgentOverride,
+  ensureSubagentAgentOverrides,
+  appendSubagentFallbackModel,
+  getActiveSubagentSettingsTargetForCwd,
+  pullUserSubagentOverridesToProject,
+  pushProjectSubagentOverridesToUser,
+  readSubagentAgentOverrides,
+  settingsHasSubagentAgentOverrides,
+  updateSubagentAgentOverride,
+  type SubagentAgentOverride,
+} from "./subagent-settings.ts";
 
 // ═══════════════════════════════════════════════════════
 // Helpers
@@ -792,6 +807,344 @@ async function manageModels(
 }
 
 // ═══════════════════════════════════════════════════════
+// Subagent Model Settings
+// ═══════════════════════════════════════════════════════
+
+function getCommandCwd(ctx: ExtensionCommandContext): string {
+  return (ctx as ExtensionCommandContext & { cwd?: string }).cwd || process.cwd();
+}
+
+function formatFallbackModels(models?: string[]): string {
+  return models && models.length > 0 ? models.join(", ") : "(未设置)";
+}
+
+function overrideSummary(agentName: string, override?: SubagentAgentOverride): string {
+  const model = override?.model || "(默认 Pi 当前模型)";
+  const thinking = override?.thinking ? ` thinking=${override.thinking}` : "";
+  const fallback = override?.fallbackModels?.length ? ` fallback=${override.fallbackModels.length}` : "";
+  return `✏️  [${agentName}] model=${model}${thinking}${fallback}`;
+}
+
+function availableModelItems(ctx: ExtensionCommandContext): string[] {
+  const registry = (ctx as ExtensionCommandContext & { modelRegistry?: { getAvailable?: () => any[] } }).modelRegistry;
+  const models = registry?.getAvailable?.() ?? [];
+  const seen = new Set<string>();
+  const items: string[] = [];
+  for (const model of models) {
+    const provider = typeof model?.provider === "string" ? model.provider : "";
+    const id = typeof model?.id === "string" ? model.id : "";
+    if (!provider || !id) continue;
+    const fullId = `${provider}/${id}`;
+    if (seen.has(fullId)) continue;
+    seen.add(fullId);
+    const name = typeof model?.name === "string" && model.name !== id ? ` — ${model.name}` : "";
+    items.push(`🤖 ${fullId}${name}`);
+  }
+  return items.sort((a, b) => a.localeCompare(b));
+}
+
+function parseSelectedModel(choice: string): string | undefined {
+  const match = choice.match(/^🤖\s+([^\s]+)(?:\s+—.*)?$/);
+  return match?.[1];
+}
+
+function parseFallbackInput(raw: string): string[] {
+  return raw
+    .split(/[\n,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function chooseModelOverride(
+  ctx: ExtensionCommandContext,
+  agentName: string,
+  current?: string,
+): Promise<string | undefined | "__clear__" | "__cancel__"> {
+  const items = [
+    ...(current ? [`当前: ${current}`] : []),
+    ...availableModelItems(ctx),
+    "✍️ 手动输入 model id",
+    "🚫 清除 model override",
+    "⬅️ 返回",
+  ];
+  const choice = await ctx.ui.select(`Subagent ${agentName} - 选择 Model`, items);
+  if (!choice || choice.startsWith("⬅️") || choice.startsWith("当前:")) return "__cancel__";
+  if (choice.startsWith("🚫")) return "__clear__";
+  if (choice.startsWith("✍️")) {
+    const manual = await promptText(
+      ctx,
+      `Subagent ${agentName} - 手动 model`,
+      "输入 model，建议使用 provider/model 格式，也可带 thinking suffix：\n例如 Mapleluv/gpt-5.5 或 anthropic/claude-sonnet-4:high",
+      current,
+    );
+    return manual || "__cancel__";
+  }
+  return parseSelectedModel(choice) ?? "__cancel__";
+}
+
+async function chooseFallbackModelToAppend(
+  ctx: ExtensionCommandContext,
+  agentName: string,
+): Promise<string | undefined> {
+  const items = [
+    ...availableModelItems(ctx),
+    "✍️ 手动输入 fallback model id",
+    "⬅️ 返回",
+  ];
+  const choice = await ctx.ui.select(`Subagent ${agentName} - 添加 fallback model`, items);
+  if (!choice || choice.startsWith("⬅️")) return undefined;
+  if (choice.startsWith("✍️")) {
+    return await promptText(
+      ctx,
+      `Subagent ${agentName} - 手动 fallback model`,
+      "输入 fallback model，建议使用 provider/model 格式：\n例如 Mapleluv/deepseek-v4-pro 或 openai/gpt-5-mini",
+    );
+  }
+  return parseSelectedModel(choice);
+}
+
+async function editSubagentAgentOverride(
+  ctx: ExtensionCommandContext,
+  settingsPath: string,
+  agentName: string,
+): Promise<void> {
+  while (true) {
+    const overrides = readSubagentAgentOverrides(settingsPath);
+    const current = overrides[agentName] ?? {};
+    const action = await ctx.ui.select(`Subagent: ${agentName}`, [
+      `📌 当前 model: ${current.model || "(默认 Pi 当前模型)"}`,
+      `🧠 当前 thinking: ${current.thinking || "(未设置)"}`,
+      `🧯 当前 fallbackModels: ${formatFallbackModels(current.fallbackModels)}`,
+      "🤖 设置 model",
+      "🧠 设置 thinking",
+      "🧯 设置 fallbackModels",
+      "🧹 清除 model/thinking/fallbackModels",
+      "🗑️ 删除整个 agent override",
+      "⬅️ 返回",
+    ]);
+    if (!action || action.startsWith("⬅️")) return;
+
+    if (action.startsWith("🤖")) {
+      const selected = await chooseModelOverride(ctx, agentName, current.model);
+      if (selected === "__cancel__") continue;
+      updateSubagentAgentOverride(settingsPath, agentName, {
+        model: selected === "__clear__" ? undefined : selected,
+      });
+      ctx.ui.notify(`已更新 ${agentName} model override`, "success");
+      continue;
+    }
+
+    if (action.startsWith("🧠 设置")) {
+      const choices = [
+        ...(current.thinking ? [`当前: ${current.thinking}`] : []),
+        ...SUBAGENT_THINKING_LEVELS.map((level) => `${level}${current.thinking === level ? " ← 当前" : ""}`),
+        "🚫 清除 thinking override",
+        "⬅️ 返回",
+      ];
+      const choice = await ctx.ui.select(`Subagent ${agentName} - Thinking`, choices);
+      if (!choice || choice.startsWith("⬅️") || choice.startsWith("当前:")) continue;
+      updateSubagentAgentOverride(settingsPath, agentName, {
+        thinking: choice.startsWith("🚫") ? undefined : choice.split(" ")[0],
+      });
+      ctx.ui.notify(`已更新 ${agentName} thinking override`, "success");
+      continue;
+    }
+
+    if (action.startsWith("🧯 设置")) {
+      const fallbackAction = await ctx.ui.select(`Subagent ${agentName} - fallbackModels`, [
+        "🤖 从模型选择器添加 fallback model",
+        "✏️ 手动编辑 fallbackModels",
+        "🚫 清除 fallbackModels",
+        "⬅️ 返回",
+      ]);
+      if (!fallbackAction || fallbackAction.startsWith("⬅️")) continue;
+      if (fallbackAction.startsWith("🤖")) {
+        const selected = await chooseFallbackModelToAppend(ctx, agentName);
+        if (!selected) continue;
+        const fallbackModels = appendSubagentFallbackModel(settingsPath, agentName, selected);
+        ctx.ui.notify(`已添加 ${agentName} fallback model：${selected}（共 ${fallbackModels.length} 个）`, "success");
+        continue;
+      }
+      if (fallbackAction.startsWith("🚫")) {
+        updateSubagentAgentOverride(settingsPath, agentName, { fallbackModels: undefined });
+        ctx.ui.notify(`已清除 ${agentName} fallbackModels`, "success");
+        continue;
+      }
+      const raw = await promptText(
+        ctx,
+        `Subagent ${agentName} - fallbackModels`,
+        "输入 fallback model 列表，用逗号或换行分隔：",
+        current.fallbackModels?.join("\n") || "",
+      );
+      if (raw === undefined) continue;
+      const fallbackModels = parseFallbackInput(raw);
+      updateSubagentAgentOverride(settingsPath, agentName, { fallbackModels });
+      ctx.ui.notify(`已更新 ${agentName} fallbackModels (${fallbackModels.length})`, "success");
+      continue;
+    }
+
+    if (action.startsWith("🧹")) {
+      const ok = await ctx.ui.confirm(
+        `清除 ${agentName} 管理字段`,
+        "清除 model、thinking、fallbackModels。若该 agent override 没有其他字段，将删除该 agent override。",
+      );
+      if (!ok) continue;
+      clearManagedSubagentAgentFields(settingsPath, agentName);
+      ctx.ui.notify(`已清除 ${agentName} 的 Subagent 模型相关字段`, "success");
+      continue;
+    }
+
+    if (action.startsWith("🗑️")) {
+      const ok = await ctx.ui.confirm(
+        `删除 ${agentName} override`,
+        "这会删除该 agent 在 subagents.agentOverrides 下的整个 override，包括非模型字段。确定？",
+      );
+      if (!ok) continue;
+      deleteSubagentAgentOverride(settingsPath, agentName);
+      ctx.ui.notify(`已删除 ${agentName} override`, "success");
+      continue;
+    }
+  }
+}
+
+async function syncProjectSubagentConfigToUser(ctx: ExtensionCommandContext, projectSettingsPath: string, userSettingsPath: string): Promise<void> {
+  if (!settingsHasSubagentAgentOverrides(projectSettingsPath)) {
+    ctx.ui.notify(
+      `当前项目没有 subagents.agentOverrides，无法覆盖公共配置。\n项目配置: ${projectSettingsPath}`,
+      "warning",
+    );
+    return;
+  }
+  const projectOverrides = readSubagentAgentOverrides(projectSettingsPath);
+  const count = Object.keys(projectOverrides).length;
+  const ok = await ctx.ui.confirm(
+    "项目配置覆盖公共配置？",
+    `将用当前项目配置覆盖公共配置中的 subagents.agentOverrides。\n\n` +
+    `来源: ${projectSettingsPath}\n` +
+    `目标: ${userSettingsPath}\n` +
+    `将复制 ${count} 个 agent override。\n\n` +
+    `只会覆盖目标文件的 subagents.agentOverrides，保留其他 settings 字段。`,
+  );
+  if (!ok) return;
+  try {
+    const copied = pushProjectSubagentOverridesToUser(projectSettingsPath, userSettingsPath);
+    ctx.ui.notify(`已用项目配置覆盖公共 Subagent 配置：${copied} 个 agent override`, "success");
+  } catch (err) {
+    ctx.ui.notify(`覆盖失败: ${err instanceof Error ? err.message : String(err)}`, "error");
+  }
+}
+
+async function syncUserSubagentConfigToProject(ctx: ExtensionCommandContext, userSettingsPath: string, projectSettingsPath: string): Promise<void> {
+  if (!settingsHasSubagentAgentOverrides(userSettingsPath)) {
+    ctx.ui.notify(
+      `公共配置没有 subagents.agentOverrides，无法抓取到本项目。\n公共配置: ${userSettingsPath}`,
+      "warning",
+    );
+    return;
+  }
+  const userOverrides = readSubagentAgentOverrides(userSettingsPath);
+  const count = Object.keys(userOverrides).length;
+  const ok = await ctx.ui.confirm(
+    "公共配置覆盖项目配置？",
+    `将用公共配置覆盖当前项目配置中的 subagents.agentOverrides。\n\n` +
+    `来源: ${userSettingsPath}\n` +
+    `目标: ${projectSettingsPath}\n` +
+    `将复制 ${count} 个 agent override。\n\n` +
+    `只会覆盖目标文件的 subagents.agentOverrides，保留其他 settings 字段。`,
+  );
+  if (!ok) return;
+  try {
+    const copied = pullUserSubagentOverridesToProject(userSettingsPath, projectSettingsPath);
+    ctx.ui.notify(`已抓取公共 Subagent 配置到本项目：${copied} 个 agent override`, "success");
+  } catch (err) {
+    ctx.ui.notify(`抓取失败: ${err instanceof Error ? err.message : String(err)}`, "error");
+  }
+}
+
+function settingsCountLabel(settingsPath: string): string {
+  if (!settingsHasSubagentAgentOverrides(settingsPath)) return "未创建";
+  return `${Object.keys(readSubagentAgentOverrides(settingsPath)).length} overrides`;
+}
+
+async function editSubagentSettingsFile(
+  ctx: ExtensionCommandContext,
+  settingsPath: string,
+  title: string,
+  createIfMissing: boolean,
+): Promise<void> {
+  if (createIfMissing) ensureSubagentAgentOverrides(settingsPath);
+  while (true) {
+    const overrides = readSubagentAgentOverrides(settingsPath);
+    const items = [
+      `📍 编辑目标: ${title} (${settingsPath})`,
+      ...BUILTIN_SUBAGENT_NAMES.map((agent) => overrideSummary(agent, overrides[agent])),
+      "⬅️ 返回 Subagent 配置菜单",
+    ];
+    const choice = await ctx.ui.select(`🤖 ${title}`, items);
+    if (!choice || choice.startsWith("⬅️")) return;
+    if (choice.startsWith("📍")) {
+      ctx.ui.notify(`当前编辑 ${title}\n路径: ${settingsPath}`, "info");
+      continue;
+    }
+    const match = choice.match(/^✏️\s+\[(.+?)\]/);
+    if (match) {
+      await editSubagentAgentOverride(ctx, settingsPath, match[1]!);
+    }
+  }
+}
+
+async function manageSubagentModelSettings(ctx: ExtensionCommandContext): Promise<void> {
+  while (true) {
+    const cwd = getCommandCwd(ctx);
+    const paths = getActiveSubagentSettingsTargetForCwd(cwd);
+    const items = [
+      `📍 路径信息（项目: ${paths.projectSettingsPath} / 公共: ${paths.userSettingsPath}）`,
+      `📝 编辑本项目配置 (${settingsCountLabel(paths.projectSettingsPath)})`,
+      `🌐 编辑公共配置 (${settingsCountLabel(paths.userSettingsPath)})`,
+      "⬆️ 本项目配置 → 公共配置",
+      "⬇️ 公共配置 → 本项目配置",
+      "⬅️ 返回主菜单",
+    ];
+
+    const choice = await ctx.ui.select("🤖 Subagent 模型配置", items);
+    if (!choice || choice.startsWith("⬅️")) return;
+
+    if (choice.startsWith("📍")) {
+      ctx.ui.notify(
+        `当前工作目录: ${cwd}\n` +
+        `项目配置: ${paths.projectSettingsPath}\n` +
+        `公共配置: ${paths.userSettingsPath}\n\n` +
+        `选择“编辑本项目配置”会创建/编辑项目 subagents.agentOverrides。\n` +
+        `选择“编辑公共配置”才会写入公共 settings。\n\n` +
+        `联动关系: model-config 负责可视化编辑；pi-subagents 负责读取并应用这些 Subagent 模型覆盖配置。`,
+        "info",
+      );
+      continue;
+    }
+
+    if (choice.startsWith("📝")) {
+      await editSubagentSettingsFile(ctx, paths.projectSettingsPath, "本项目 Subagent 配置", true);
+      continue;
+    }
+
+    if (choice.startsWith("🌐")) {
+      await editSubagentSettingsFile(ctx, paths.userSettingsPath, "公共 Subagent 配置", false);
+      continue;
+    }
+
+    if (choice.startsWith("⬆️")) {
+      await syncProjectSubagentConfigToUser(ctx, paths.projectSettingsPath, paths.userSettingsPath);
+      continue;
+    }
+
+    if (choice.startsWith("⬇️")) {
+      await syncUserSubagentConfigToProject(ctx, paths.userSettingsPath, paths.projectSettingsPath);
+      continue;
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════
 // Main Entry Point
 // ═══════════════════════════════════════════════════════
 
@@ -845,6 +1198,7 @@ export default async function (pi: ExtensionAPI) {
 
         const choice = await ctx.ui.select("🧩 模型配置编辑器", [
           `📁 管理 Providers (当前 ${pCount} providers, ${mCount} models)`,
+          `🤖 Subagent 模型配置`,
           `🔍 诊断：检查 models.json 状态`,
           `💡 提示：保存后关闭并重开 /model (Ctrl+L) 即可看到`,
           "❌ 退出",
@@ -854,6 +1208,10 @@ export default async function (pi: ExtensionAPI) {
 
         if (choice?.startsWith("📁")) {
           await manageProviders(ctx, config);
+        }
+
+        if (choice?.startsWith("🤖")) {
+          await manageSubagentModelSettings(ctx);
         }
 
         if (choice?.startsWith("🔍")) {
