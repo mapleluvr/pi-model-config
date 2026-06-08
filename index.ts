@@ -9,6 +9,7 @@
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { getModelsPath, readModelsConfig, writeModelsConfig } from "./config.ts";
+import { applyCompatBooleanChoice, type CompatBooleanChoice } from "./compat-settings.ts";
 import type { ModelsConfig, ProviderConfig, ModelConfig, ExtraPayloadParam } from "./types.ts";
 import {
   BUILTIN_SUBAGENT_NAMES,
@@ -610,8 +611,22 @@ async function editCompat(
 
     for (const f of boolFields) {
       if (choice.includes(f.label)) {
-        c[f.key] = !c[f.key];
-        if (c[f.key] === false) delete c[f.key];
+        const current = c[f.key];
+        const valueChoice = await ctx.ui.select(`Compat - ${parentId} - ${f.label}`, [
+          `${current === undefined ? "[当前] " : ""}不指定 / 使用默认值`,
+          `${current === false ? "[当前] " : ""}false`,
+          `${current === true ? "[当前] " : ""}true`,
+          "⬅️ 返回",
+        ]);
+        if (!valueChoice || valueChoice.startsWith("⬅️")) break;
+
+        const compatChoice: CompatBooleanChoice = valueChoice.includes("false")
+          ? "false"
+          : valueChoice.includes("true")
+            ? "true"
+            : "default";
+        Object.assign(c, applyCompatBooleanChoice(c, f.key, compatChoice));
+        if (compatChoice === "default") delete c[f.key];
         break;
       }
     }

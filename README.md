@@ -13,6 +13,7 @@
 - 🧩 **Provider 管理** — 添加、编辑、删除、复制自定义模型提供商
 - 🔍 **自动拉取模型列表** — 从 OpenAI 兼容 API 端点一键发现所有可用模型
 - 📦 **Model 管理** — 为每个 Provider 定义模型及其完整参数
+- 🧭 **兼容性选项** — Provider / Model 兼容性布尔项支持「默认 / false / true」三态编辑
 - ⚙️ **Payload 参数** — 为单个模型添加自定义 API 请求体参数（支持 JSON / String / Bool，带 JSON 合法性检测）
 - 📊 **Pi 默认参数展示** — 编辑模型时展示 Pi Agent 的标准参数（contextWindow、maxTokens 等）供参考和修改
 - 💾 **自动保存** — 每次操作后自动写入 `models.json`，无需手动保存
@@ -97,9 +98,11 @@ cp -r pi-model-config .pi/extensions/model-config
 pi-model-config/
 ├── index.ts                     # 扩展入口 + TUI 流程 + 命令注册
 ├── config.ts                    # models.json 读写
+├── compat-settings.ts           # 兼容性布尔选项三态写入逻辑
 ├── subagent-settings.ts         # subagents.agentOverrides 读写与 scope 解析
 ├── types.ts                     # TypeScript 类型定义
 ├── tests/
+│   ├── compat-settings.test.ts   # 兼容性三态布尔单元测试
 │   └── subagent-settings.test.ts # Subagent settings 单元测试
 ├── package.json                 # 包元数据
 └── README.md                    # 本文档
