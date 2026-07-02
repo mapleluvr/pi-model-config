@@ -11,6 +11,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { getModelsPath, readModelsConfig, writeModelsConfig } from "./config.ts";
 import { applyCompatBooleanChoice, type CompatBooleanChoice } from "./compat-settings.ts";
 import type { ModelsConfig, ProviderConfig, ModelConfig, ExtraPayloadParam } from "./types.ts";
+import { searchableSelect, type SearchableSelectOption } from "./searchable-select.ts";
 import {
   BUILTIN_SUBAGENT_NAMES,
   SUBAGENT_THINKING_LEVELS,
@@ -144,6 +145,49 @@ function modelSummary(m: ModelConfig): string {
   const ctx = m.contextWindow ? `${(m.contextWindow / 1000).toFixed(0)}k` : "?";
   const max = m.maxTokens ? `${(m.maxTokens / 1000).toFixed(0)}k` : "?";
   return `${name}${r}  ctx=${ctx}  max=${max}`;
+}
+
+const ACTION_ADD_MODEL = "__pi_model_config_action:add_model";
+const ACTION_BACK = "__pi_model_config_action:back";
+const ACTION_MANUAL_MODEL = "__pi_model_config_action:manual_model";
+const ACTION_CLEAR_MODEL = "__pi_model_config_action:clear_model";
+const ACTION_CURRENT_MODEL = "__pi_model_config_action:current_model";
+
+function providerModelOptions(models: ModelConfig[]): SearchableSelectOption[] {
+  return models.map((model, index) => ({
+    value: `model:${index}`,
+    label: `${index + 1}. 📋 ${model.id}`,
+    description: modelSummary(model),
+    searchText: [model.id, model.name, modelSummary(model)].filter(Boolean).join(" "),
+  }));
+}
+
+function availableModelOptions(ctx: ExtensionCommandContext, current?: string): SearchableSelectOption[] {
+  const registry = (ctx as ExtensionCommandContext & { modelRegistry?: { getAvailable?: () => any[] } }).modelRegistry;
+  const models = registry?.getAvailable?.() ?? [];
+  const seen = new Set<string>();
+  const options: SearchableSelectOption[] = [];
+
+  for (const model of models) {
+    const provider = typeof model?.provider === "string" ? model.provider : "";
+    const id = typeof model?.id === "string" ? model.id : "";
+    if (!provider || !id) continue;
+
+    const fullId = `${provider}/${id}`;
+    if (seen.has(fullId)) continue;
+    seen.add(fullId);
+
+    const name = typeof model?.name === "string" && model.name !== id ? model.name : "";
+    const description = [name, current === fullId ? "← 当前" : ""].filter(Boolean).join(" ");
+    options.push({
+      value: fullId,
+      label: `🤖 ${fullId}`,
+      description: description || undefined,
+      searchText: `${fullId} ${provider} ${id} ${name}`,
+    });
+  }
+
+  return options.sort((a, b) => a.value.localeCompare(b.value));
 }
 
 async function promptText(
@@ -771,14 +815,22 @@ async function manageModels(
   provider.models = models;
 
   while (true) {
-    const items: string[] = models.map((m, i) => `${i + 1}. 📋 ${modelSummary(m)}`);
-    items.push("➕ 添加新 Model");
-    items.push("⬅️ 返回");
+    const choice = await searchableSelect(
+      ctx,
+      `Models - ${providerId}`,
+      [
+        ...providerModelOptions(models),
+        { value: ACTION_ADD_MODEL, label: "➕ 添加新 Model", searchText: "add new model 添加 新增" },
+        { value: ACTION_BACK, label: "⬅️ 返回", searchText: "back return 返回" },
+      ],
+      {
+        maxVisible: 10,
+        hint: "输入 model id/name 搜索，↑/↓ 选择，Enter 操作，Esc 返回",
+      },
+    );
+    if (choice === undefined || choice === ACTION_BACK) return provider;
 
-    const choice = await ctx.ui.select(`Models - ${providerId}`, items);
-    if (choice === undefined || choice?.startsWith("⬅️")) return provider;
-
-    if (choice?.startsWith("➕")) {
+    if (choice === ACTION_ADD_MODEL) {
       const newModel = await editModel(ctx, providerId);
       if (newModel) {
         models.push(newModel);
@@ -787,36 +839,36 @@ async function manageModels(
       continue;
     }
 
-    const idxMatch = choice?.match(/^(\d+)\./);
-    if (idxMatch) {
-      const idx = parseInt(idxMatch[1]!, 10) - 1;
-      if (idx >= 0 && idx < models.length) {
-        const existing = models[idx]!;
-        const action = await ctx.ui.select(`Model: ${modelSummary(existing)}`, [
-          "✏️ 编辑", "📋 复制", "🗑️ 删除", "⬅️ 返回",
-        ]);
-        if (!action || action.startsWith("⬅️")) continue;
+    const idxMatch = choice.match(/^model:(\d+)$/);
+    if (!idxMatch) continue;
 
-        if (action.startsWith("🗑️")) {
-          const ok = await ctx.ui.confirm("确认删除", `删除 Model "${existing.id}"？`);
-          if (ok) { models.splice(idx, 1); persistConfig(config, ctx); }
-          continue;
-        }
-        if (action.startsWith("📋")) {
-          models.push({ ...existing, id: existing.id + "-copy", name: (existing.name || existing.id) + " (Copy)" });
-          persistConfig(config, ctx);
-          continue;
-        }
-        if (action.startsWith("✏️")) {
-          const updated = await editModel(ctx, providerId, existing);
-          if (updated) {
-            if (updated.id !== existing.id) models.splice(idx, 1);
-            models[idx] = updated;
-            persistConfig(config, ctx);
-          }
-          continue;
-        }
+    const idx = parseInt(idxMatch[1]!, 10);
+    if (idx < 0 || idx >= models.length) continue;
+
+    const existing = models[idx]!;
+    const action = await ctx.ui.select(`Model: ${modelSummary(existing)}`, [
+      "✏️ 编辑", "📋 复制", "🗑️ 删除", "⬅️ 返回",
+    ]);
+    if (!action || action.startsWith("⬅️")) continue;
+
+    if (action.startsWith("🗑️")) {
+      const ok = await ctx.ui.confirm("确认删除", `删除 Model "${existing.id}"？`);
+      if (ok) { models.splice(idx, 1); persistConfig(config, ctx); }
+      continue;
+    }
+    if (action.startsWith("📋")) {
+      models.push({ ...existing, id: existing.id + "-copy", name: (existing.name || existing.id) + " (Copy)" });
+      persistConfig(config, ctx);
+      continue;
+    }
+    if (action.startsWith("✏️")) {
+      const updated = await editModel(ctx, providerId, existing);
+      if (updated) {
+        if (updated.id !== existing.id) models.splice(idx, 1);
+        models[idx] = updated;
+        persistConfig(config, ctx);
       }
+      continue;
     }
   }
 }
@@ -840,29 +892,6 @@ function overrideSummary(agentName: string, override?: SubagentAgentOverride): s
   return `✏️  [${agentName}] model=${model}${thinking}${fallback}`;
 }
 
-function availableModelItems(ctx: ExtensionCommandContext): string[] {
-  const registry = (ctx as ExtensionCommandContext & { modelRegistry?: { getAvailable?: () => any[] } }).modelRegistry;
-  const models = registry?.getAvailable?.() ?? [];
-  const seen = new Set<string>();
-  const items: string[] = [];
-  for (const model of models) {
-    const provider = typeof model?.provider === "string" ? model.provider : "";
-    const id = typeof model?.id === "string" ? model.id : "";
-    if (!provider || !id) continue;
-    const fullId = `${provider}/${id}`;
-    if (seen.has(fullId)) continue;
-    seen.add(fullId);
-    const name = typeof model?.name === "string" && model.name !== id ? ` — ${model.name}` : "";
-    items.push(`🤖 ${fullId}${name}`);
-  }
-  return items.sort((a, b) => a.localeCompare(b));
-}
-
-function parseSelectedModel(choice: string): string | undefined {
-  const match = choice.match(/^🤖\s+([^\s]+)(?:\s+—.*)?$/);
-  return match?.[1];
-}
-
 function parseFallbackInput(raw: string): string[] {
   return raw
     .split(/[\n,]+/)
@@ -875,17 +904,36 @@ async function chooseModelOverride(
   agentName: string,
   current?: string,
 ): Promise<string | undefined | "__clear__" | "__cancel__"> {
-  const items = [
-    ...(current ? [`当前: ${current}`] : []),
-    ...availableModelItems(ctx),
-    "✍️ 手动输入 model id",
-    "🚫 清除 model override",
-    "⬅️ 返回",
-  ];
-  const choice = await ctx.ui.select(`Subagent ${agentName} - 选择 Model`, items);
-  if (!choice || choice.startsWith("⬅️") || choice.startsWith("当前:")) return "__cancel__";
-  if (choice.startsWith("🚫")) return "__clear__";
-  if (choice.startsWith("✍️")) {
+  const modelOptions = availableModelOptions(ctx, current);
+  const currentOption: SearchableSelectOption[] = current && !modelOptions.some((option) => option.value === current)
+    ? [{
+      value: ACTION_CURRENT_MODEL,
+      label: `当前: ${current}`,
+      description: "当前 override，不变",
+      searchText: current,
+    }]
+    : [];
+
+  const choice = await searchableSelect(
+    ctx,
+    `Subagent ${agentName} - 选择 Model`,
+    [
+      ...currentOption,
+      ...modelOptions,
+      { value: ACTION_MANUAL_MODEL, label: "✍️ 手动输入 model id", searchText: "manual input 手动 输入" },
+      { value: ACTION_CLEAR_MODEL, label: "🚫 清除 model override", searchText: "clear remove 清除 删除" },
+      { value: ACTION_BACK, label: "⬅️ 返回", searchText: "back return 返回" },
+    ],
+    {
+      maxVisible: 10,
+      initialValue: current,
+      hint: "输入 provider/model 或模型名搜索，↑/↓ 选择，Enter 确认，Esc 返回",
+    },
+  );
+
+  if (!choice || choice === ACTION_BACK || choice === ACTION_CURRENT_MODEL) return "__cancel__";
+  if (choice === ACTION_CLEAR_MODEL) return "__clear__";
+  if (choice === ACTION_MANUAL_MODEL) {
     const manual = await promptText(
       ctx,
       `Subagent ${agentName} - 手动 model`,
@@ -894,28 +942,36 @@ async function chooseModelOverride(
     );
     return manual || "__cancel__";
   }
-  return parseSelectedModel(choice) ?? "__cancel__";
+  return choice;
 }
 
 async function chooseFallbackModelToAppend(
   ctx: ExtensionCommandContext,
   agentName: string,
 ): Promise<string | undefined> {
-  const items = [
-    ...availableModelItems(ctx),
-    "✍️ 手动输入 fallback model id",
-    "⬅️ 返回",
-  ];
-  const choice = await ctx.ui.select(`Subagent ${agentName} - 添加 fallback model`, items);
-  if (!choice || choice.startsWith("⬅️")) return undefined;
-  if (choice.startsWith("✍️")) {
+  const choice = await searchableSelect(
+    ctx,
+    `Subagent ${agentName} - 添加 fallback model`,
+    [
+      ...availableModelOptions(ctx),
+      { value: ACTION_MANUAL_MODEL, label: "✍️ 手动输入 fallback model id", searchText: "manual input 手动 输入 fallback" },
+      { value: ACTION_BACK, label: "⬅️ 返回", searchText: "back return 返回" },
+    ],
+    {
+      maxVisible: 10,
+      hint: "输入 provider/model 或模型名搜索，↑/↓ 选择，Enter 添加，Esc 返回",
+    },
+  );
+
+  if (!choice || choice === ACTION_BACK) return undefined;
+  if (choice === ACTION_MANUAL_MODEL) {
     return await promptText(
       ctx,
       `Subagent ${agentName} - 手动 fallback model`,
       "输入 fallback model，建议使用 provider/model 格式：\n例如 Mapleluv/deepseek-v4-pro 或 openai/gpt-5-mini",
     );
   }
-  return parseSelectedModel(choice);
+  return choice;
 }
 
 async function editSubagentAgentOverride(

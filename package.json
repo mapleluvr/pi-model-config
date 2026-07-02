@@ -3,7 +3,12 @@
   "version": "1.0.0",
   "description": "Pi 可视化模型配置插件 — 管理自定义 Providers、Models、Payload 参数，支持自动拉取模型列表",
   "type": "module",
-  "keywords": ["pi-package", "pi-extension", "model-config", "deepseek"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "model-config",
+    "deepseek"
+  ],
   "author": "使用 DeepSeek V4 Pro 开发",
   "license": "MIT",
   "repository": {
@@ -12,9 +17,14 @@
   },
   "scripts": {
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "check": "node --experimental-strip-types --check index.ts && node --experimental-strip-types --check subagent-settings.ts && node --experimental-strip-types --check compat-settings.ts"
+    "check": "node --experimental-strip-types --check index.ts && node --experimental-strip-types --check subagent-settings.ts && node --experimental-strip-types --check compat-settings.ts && node --experimental-strip-types --check searchable-select.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "0.79.1"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }
