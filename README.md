@@ -1,6 +1,6 @@
 # Pi Model Config
 
-> 使用 **DeepSeek V4 Pro** 开发的 Pi 可视化模型配置插件
+> 面向 nicobailon/pi-subagents 和 原生 Pi 的可视化模型配置插件
 
 [![pi-package](https://img.shields.io/badge/pi-package-blue)](https://pi.dev/packages)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
