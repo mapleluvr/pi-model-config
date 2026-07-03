@@ -7,6 +7,7 @@ const PROJECT_ROOT = path.resolve(import.meta.dirname, "..");
 const BANNED_EMOJI_PATTERN = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}]/u;
 const SCANNED_PATHS = [
   "README.md",
+  "README-CN.md",
   "compat-settings.ts",
   "index.ts",
   "searchable-multi-select.ts",
