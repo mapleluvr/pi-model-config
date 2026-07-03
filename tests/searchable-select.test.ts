@@ -13,19 +13,19 @@ import {
 const modelOptions: SearchableSelectOption[] = [
   {
     value: "anthropic/claude-sonnet-4",
-    label: "🤖 anthropic/claude-sonnet-4",
+    label: "Model anthropic/claude-sonnet-4",
     description: "Claude Sonnet 4",
     searchText: "anthropic claude sonnet 4",
   },
   {
     value: "openai/gpt-5-mini",
-    label: "🤖 openai/gpt-5-mini",
+    label: "Model openai/gpt-5-mini",
     description: "GPT-5 Mini",
     searchText: "openai gpt 5 mini",
   },
   {
     value: "Mapleluv/deepseek-v4-pro",
-    label: "🤖 Mapleluv/deepseek-v4-pro",
+    label: "Model Mapleluv/deepseek-v4-pro",
     description: "DeepSeek V4 Pro",
     searchText: "Mapleluv deepseek v4 pro",
   },
@@ -67,7 +67,7 @@ test("renders current option and search match counts without exceeding width", (
   const line = renderSearchableOptionLine(
     {
       value: "openai/gpt-5-mini",
-      label: "🤖 openai/gpt-5-mini",
+      label: "Model openai/gpt-5-mini",
       description: "GPT-5 Mini ← 当前",
     },
     {

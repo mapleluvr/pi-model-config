@@ -10,6 +10,9 @@ import {
   getProjectSettingsPath,
   ensureSubagentAgentOverrides,
   appendSubagentFallbackModel,
+  clearAllManagedSubagentAgentFields,
+  clearManagedSubagentModelFields,
+  clearManagedSubagentToolFields,
   pullUserSubagentOverridesToProject,
   readSubagentAgentOverrides,
   updateSubagentAgentOverride,
@@ -141,7 +144,117 @@ test("updates one agent override in the active settings file and preserves unrel
   });
 });
 
-test("removes an agent override when all managed fields are cleared and no unmanaged fields remain", () => {
+test("updates tools allowlist and explicit disabled-tools override", () => {
+  const dir = makeTempDir();
+  const settingsPath = path.join(dir, "settings.json");
+  writeJson(settingsPath, {
+    subagents: {
+      agentOverrides: {
+        worker: { model: "old/worker" },
+        reviewer: { tools: ["read"] },
+      },
+    },
+  });
+
+  updateSubagentAgentOverride(settingsPath, "worker", {
+    tools: ["read", "bash", "edit"],
+  });
+  updateSubagentAgentOverride(settingsPath, "reviewer", {
+    tools: false,
+  });
+
+  assert.deepEqual(readJson(settingsPath), {
+    subagents: {
+      agentOverrides: {
+        worker: { model: "old/worker", tools: ["read", "bash", "edit"] },
+        reviewer: { tools: false },
+      },
+    },
+  });
+});
+
+test("clears model fields without clearing tools override", () => {
+  const dir = makeTempDir();
+  const settingsPath = path.join(dir, "settings.json");
+  writeJson(settingsPath, {
+    subagents: {
+      agentOverrides: {
+        worker: {
+          model: "old/worker",
+          thinking: "high",
+          fallbackModels: ["fallback/one"],
+          tools: ["read", "bash"],
+        },
+      },
+    },
+  });
+
+  clearManagedSubagentModelFields(settingsPath, "worker");
+
+  assert.deepEqual(readJson(settingsPath), {
+    subagents: {
+      agentOverrides: {
+        worker: { tools: ["read", "bash"] },
+      },
+    },
+  });
+});
+
+test("clears tools override without clearing model fields", () => {
+  const dir = makeTempDir();
+  const settingsPath = path.join(dir, "settings.json");
+  writeJson(settingsPath, {
+    subagents: {
+      agentOverrides: {
+        worker: {
+          model: "old/worker",
+          thinking: "medium",
+          tools: ["read", "bash"],
+        },
+      },
+    },
+  });
+
+  clearManagedSubagentToolFields(settingsPath, "worker");
+
+  assert.deepEqual(readJson(settingsPath), {
+    subagents: {
+      agentOverrides: {
+        worker: { model: "old/worker", thinking: "medium" },
+      },
+    },
+  });
+});
+
+test("clears all managed subagent fields including tools", () => {
+  const dir = makeTempDir();
+  const settingsPath = path.join(dir, "settings.json");
+  writeJson(settingsPath, {
+    subagents: {
+      agentOverrides: {
+        worker: {
+          model: "old/worker",
+          thinking: "medium",
+          fallbackModels: ["fallback/one"],
+          tools: ["read", "bash"],
+        },
+        reviewer: { model: "keep/reviewer" },
+      },
+    },
+  });
+
+  clearAllManagedSubagentAgentFields(settingsPath, "worker");
+
+  assert.deepEqual(readJson(settingsPath), {
+    subagents: {
+      agentOverrides: {
+        reviewer: { model: "keep/reviewer" },
+      },
+    },
+  });
+});
+
+test("removes an agent override when all managed model fields are cleared and no unmanaged fields remain", () => {
   const dir = makeTempDir();
   const settingsPath = path.join(dir, "settings.json");
   writeJson(settingsPath, {

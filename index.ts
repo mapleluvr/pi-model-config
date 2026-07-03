@@ -12,10 +12,18 @@ import { getModelsPath, readModelsConfig, writeModelsConfig } from "./config.ts"
 import { applyCompatBooleanChoice, type CompatBooleanChoice } from "./compat-settings.ts";
 import type { ModelsConfig, ProviderConfig, ModelConfig, ExtraPayloadParam } from "./types.ts";
 import { searchableSelect, type SearchableSelectOption } from "./searchable-select.ts";
+import { searchableMultiSelect } from "./searchable-multi-select.ts";
+import { buildToolSelectionOptions, normalizeToolList } from "./tool-options.ts";
+import {
+  formatSubagentOverrideSummary,
+  formatToolsOverride,
+  getInitialToolsSelection,
+} from "./subagent-ui.ts";
 import {
   BUILTIN_SUBAGENT_NAMES,
   SUBAGENT_THINKING_LEVELS,
-  clearManagedSubagentAgentFields,
+  clearManagedSubagentModelFields,
+  clearManagedSubagentToolFields,
   deleteSubagentAgentOverride,
   ensureSubagentAgentOverrides,
   appendSubagentFallbackModel,
@@ -65,7 +73,7 @@ async function fetchModelsFromProvider(
   }
   // !cmd 格式暂不在 fetch 时展开（安全问题），使用原始 key
 
-  ctx.ui.notify(`🔍 正在拉取模型列表...\n${baseUrl}`, "info");
+  ctx.ui.notify(`正在拉取模型列表...\n${baseUrl}`, "info");
 
   let lastError: string | null = null;
 
@@ -114,7 +122,7 @@ async function fetchModelsFromProvider(
       }));
 
       ctx.ui.notify(
-        `✅ 成功拉取 ${result.length} 个模型\n` +
+        `成功拉取 ${result.length} 个模型\n` +
         `来源: ${endpoint}\n` +
         result.slice(0, 10).map((m) => m.id).join(", ") +
         (result.length > 10 ? `... 等 ${result.length - 10} 个` : ""),
@@ -128,7 +136,7 @@ async function fetchModelsFromProvider(
     }
   }
 
-  ctx.ui.notify(`❌ 拉取失败: ${lastError}`, "error");
+  ctx.ui.notify(`拉取失败: ${lastError}`, "error");
   return null;
 }
 
@@ -141,7 +149,7 @@ function providerSummary(p: ProviderConfig): string {
 
 function modelSummary(m: ModelConfig): string {
   const name = m.name || m.id;
-  const r = m.reasoning ? " 🧠" : "";
+  const r = m.reasoning ? " reasoning" : "";
   const ctx = m.contextWindow ? `${(m.contextWindow / 1000).toFixed(0)}k` : "?";
   const max = m.maxTokens ? `${(m.maxTokens / 1000).toFixed(0)}k` : "?";
   return `${name}${r}  ctx=${ctx}  max=${max}`;
@@ -156,7 +164,7 @@ const ACTION_CURRENT_MODEL = "__pi_model_config_action:current_model";
 function providerModelOptions(models: ModelConfig[]): SearchableSelectOption[] {
   return models.map((model, index) => ({
     value: `model:${index}`,
-    label: `${index + 1}. 📋 ${model.id}`,
+    label: `${index + 1}. Model ${model.id}`,
     description: modelSummary(model),
     searchText: [model.id, model.name, modelSummary(model)].filter(Boolean).join(" "),
   }));
@@ -181,7 +189,7 @@ function availableModelOptions(ctx: ExtensionCommandContext, current?: string): 
     const description = [name, current === fullId ? "← 当前" : ""].filter(Boolean).join(" ");
     options.push({
       value: fullId,
-      label: `🤖 ${fullId}`,
+      label: `Model ${fullId}`,
       description: description || undefined,
       searchText: `${fullId} ${provider} ${id} ${name}`,
     });
@@ -226,8 +234,8 @@ function persistConfig(config: ModelsConfig, ctx?: ExtensionCommandContext): voi
   for (const p of Object.values(config.providers)) mCount += (p.models || []).length;
 
   ctx?.ui.notify(
-    `✅ 已保存 ${pCount} Providers / ${mCount} Models → ${getModelsPath()}\n` +
-    `💡 请关闭并重新打开 /model (Ctrl+L) 查看新模型`,
+    `已保存 ${pCount} Providers / ${mCount} Models → ${getModelsPath()}\n` +
+    `请关闭并重新打开 /model (Ctrl+L) 查看新模型`,
     "success",
   );
 }
@@ -468,13 +476,13 @@ async function editExtraPayload(
 
   while (true) {
     const items: string[] = params.map((p, i) => `${i + 1}. ${paramLabel(p)}`);
-    items.push("➕ 添加参数");
-    items.push("⬅️ 完成");
+    items.push("添加参数");
+    items.push("完成");
 
     const choice = await ctx.ui.select(`Payload 参数 - ${modelId} (${params.length} 个)`, items);
-    if (choice === undefined || choice?.startsWith("⬅️")) break;
+    if (choice === undefined || choice === "完成") break;
 
-    if (choice?.startsWith("➕")) {
+    if (choice?.startsWith("添加")) {
       // 输入 key
       const key = await promptText(ctx, `Payload - ${modelId}`, "参数键名（如 temperature, top_p）：");
       if (!key) continue;
@@ -555,17 +563,17 @@ async function editExtraPayload(
         const param = params[idx]!;
         const action = await ctx.ui.select(
           `Payload: ${paramLabel(param)}`,
-          ["✏️ 修改", "🗑️ 删除", "⬅️ 返回"],
+          ["修改", "删除", "返回"],
         );
-        if (!action || action.startsWith("⬅️")) continue;
+        if (!action || action.startsWith("返回")) continue;
 
-        if (action.startsWith("🗑️")) {
+        if (action.startsWith("删除")) {
           params.splice(idx, 1);
           ctx.ui.notify(`参数 "${param.key}" 已删除`, "info");
           continue;
         }
 
-        if (action.startsWith("✏️")) {
+        if (action.startsWith("修改")) {
           // 修改值（保持类型不变，但允许在 JSON 类型时重新验证）
           if (param.type === "bool") {
             const boolChoice = await ctx.ui.select(
@@ -643,15 +651,15 @@ async function editCompat(
   while (true) {
     const items = boolFields.map((f) => {
       const val = c[f.key];
-      return `${val === true ? "[✓]" : val === false ? "[✗]" : "[·]"} ${f.label}`;
+      return `${val === true ? "[yes]" : val === false ? "[no]" : "[-]"} ${f.label}`;
     });
     if (c.maxTokensField) items.push(`maxTokensField = ${c.maxTokensField}`);
     if (c.thinkingFormat) items.push(`thinkingFormat = ${c.thinkingFormat}`);
     if (c.cacheControlFormat) items.push(`cacheControlFormat = ${c.cacheControlFormat}`);
-    items.push("✅ 完成");
+    items.push("完成");
 
     const choice = await ctx.ui.select(`Compat - ${parentId}`, items);
-    if (choice === undefined || choice === "✅ 完成") break;
+    if (choice === undefined || choice === "完成") break;
 
     for (const f of boolFields) {
       if (choice.includes(f.label)) {
@@ -660,9 +668,9 @@ async function editCompat(
           `${current === undefined ? "[当前] " : ""}不指定 / 使用默认值`,
           `${current === false ? "[当前] " : ""}false`,
           `${current === true ? "[当前] " : ""}true`,
-          "⬅️ 返回",
+          "返回",
         ]);
-        if (!valueChoice || valueChoice.startsWith("⬅️")) break;
+        if (!valueChoice || valueChoice.startsWith("返回")) break;
 
         const compatChoice: CompatBooleanChoice = valueChoice.includes("false")
           ? "false"
@@ -711,15 +719,15 @@ async function manageProviders(
     const pids = Object.keys(config.providers);
     const items: string[] = pids.map((pid) => {
       const p = config.providers[pid]!;
-      return `✏️  [${pid}] ${providerSummary(p)}`;
+      return `编辑 [${pid}] ${providerSummary(p)}`;
     });
-    items.push("➕ 添加新 Provider");
-    items.push("⬅️ 返回主菜单");
+    items.push("添加新 Provider");
+    items.push("返回主菜单");
 
-    const choice = await ctx.ui.select("📁 Provider 管理", items);
-    if (choice === undefined || choice?.startsWith("⬅️")) return;
+    const choice = await ctx.ui.select("Provider 管理", items);
+    if (choice === undefined || choice?.startsWith("返回")) return;
 
-    if (choice?.startsWith("➕")) {
+    if (choice?.startsWith("添加")) {
       const result = await editProvider(ctx);
       if (result) {
         config.providers[result.providerId] = result.config;
@@ -728,23 +736,23 @@ async function manageProviders(
       continue;
     }
 
-    const match = choice?.match(/^✏️\s+\[(.+?)\]/);
+    const match = choice?.match(/^编辑\s+\[(.+?)\]/);
     if (match) {
       const pid = match[1]!;
       const existing = config.providers[pid];
       if (!existing) continue;
 
       const action = await ctx.ui.select(`Provider: ${pid}`, [
-        "✏️ 编辑设置",
-        "📦 管理 Models",
-        "🔍 自动拉取 Model 列表（从 API 发现）",
-        "📋 复制 Provider",
-        "🗑️ 删除 Provider",
-        "⬅️ 返回",
+        "编辑设置",
+        "管理 Models",
+        "自动拉取 Model 列表（从 API 发现）",
+        "复制 Provider",
+        "删除 Provider",
+        "返回",
       ]);
-      if (!action || action.startsWith("⬅️")) continue;
+      if (!action || action.startsWith("返回")) continue;
 
-      if (action.startsWith("🗑️")) {
+      if (action.startsWith("删除")) {
         const ok = await ctx.ui.confirm("确认删除", `删除 Provider "${pid}" 及其所有 Models？`);
         if (ok) {
           delete config.providers[pid];
@@ -752,7 +760,7 @@ async function manageProviders(
         }
         continue;
       }
-      if (action.startsWith("📋")) {
+      if (action.startsWith("复制")) {
         const newId = await promptText(ctx, "复制 Provider", "输入新 ID", `${pid}-copy`);
         if (newId) {
           config.providers[newId] = JSON.parse(JSON.stringify(existing));
@@ -760,12 +768,12 @@ async function manageProviders(
         }
         continue;
       }
-      if (action.startsWith("📦")) {
+      if (action.startsWith("管理")) {
         const updated = await manageModels(ctx, pid, existing, config);
         config.providers[pid] = updated;
         continue;
       }
-      if (action.startsWith("🔍")) {
+      if (action.startsWith("自动拉取")) {
         // 自动拉取模型列表
         const fetched = await fetchModelsFromProvider(ctx, pid, existing);
         if (fetched && fetched.length > 0) {
@@ -787,7 +795,7 @@ async function manageProviders(
         }
         continue;
       }
-      if (action.startsWith("✏️")) {
+      if (action.startsWith("编辑")) {
         const editInput = { ...existing, _providerId: pid } as any;
         const result = await editProvider(ctx, editInput);
         if (result) {
@@ -820,8 +828,8 @@ async function manageModels(
       `Models - ${providerId}`,
       [
         ...providerModelOptions(models),
-        { value: ACTION_ADD_MODEL, label: "➕ 添加新 Model", searchText: "add new model 添加 新增" },
-        { value: ACTION_BACK, label: "⬅️ 返回", searchText: "back return 返回" },
+        { value: ACTION_ADD_MODEL, label: "添加新 Model", searchText: "add new model 添加 新增" },
+        { value: ACTION_BACK, label: "返回", searchText: "back return 返回" },
       ],
       {
         maxVisible: 10,
@@ -847,21 +855,21 @@ async function manageModels(
 
     const existing = models[idx]!;
     const action = await ctx.ui.select(`Model: ${modelSummary(existing)}`, [
-      "✏️ 编辑", "📋 复制", "🗑️ 删除", "⬅️ 返回",
+      "编辑", "复制", "删除", "返回",
     ]);
-    if (!action || action.startsWith("⬅️")) continue;
+    if (!action || action.startsWith("返回")) continue;
 
-    if (action.startsWith("🗑️")) {
+    if (action.startsWith("删除")) {
       const ok = await ctx.ui.confirm("确认删除", `删除 Model "${existing.id}"？`);
       if (ok) { models.splice(idx, 1); persistConfig(config, ctx); }
       continue;
     }
-    if (action.startsWith("📋")) {
+    if (action.startsWith("复制")) {
       models.push({ ...existing, id: existing.id + "-copy", name: (existing.name || existing.id) + " (Copy)" });
       persistConfig(config, ctx);
       continue;
     }
-    if (action.startsWith("✏️")) {
+    if (action.startsWith("编辑")) {
       const updated = await editModel(ctx, providerId, existing);
       if (updated) {
         if (updated.id !== existing.id) models.splice(idx, 1);
@@ -886,10 +894,7 @@ function formatFallbackModels(models?: string[]): string {
 }
 
 function overrideSummary(agentName: string, override?: SubagentAgentOverride): string {
-  const model = override?.model || "(默认 Pi 当前模型)";
-  const thinking = override?.thinking ? ` thinking=${override.thinking}` : "";
-  const fallback = override?.fallbackModels?.length ? ` fallback=${override.fallbackModels.length}` : "";
-  return `✏️  [${agentName}] model=${model}${thinking}${fallback}`;
+  return formatSubagentOverrideSummary(agentName, override);
 }
 
 function parseFallbackInput(raw: string): string[] {
@@ -920,9 +925,9 @@ async function chooseModelOverride(
     [
       ...currentOption,
       ...modelOptions,
-      { value: ACTION_MANUAL_MODEL, label: "✍️ 手动输入 model id", searchText: "manual input 手动 输入" },
-      { value: ACTION_CLEAR_MODEL, label: "🚫 清除 model override", searchText: "clear remove 清除 删除" },
-      { value: ACTION_BACK, label: "⬅️ 返回", searchText: "back return 返回" },
+      { value: ACTION_MANUAL_MODEL, label: "手动输入 model id", searchText: "manual input 手动 输入" },
+      { value: ACTION_CLEAR_MODEL, label: "清除 model override", searchText: "clear remove 清除 删除" },
+      { value: ACTION_BACK, label: "返回", searchText: "back return 返回" },
     ],
     {
       maxVisible: 10,
@@ -954,8 +959,8 @@ async function chooseFallbackModelToAppend(
     `Subagent ${agentName} - 添加 fallback model`,
     [
       ...availableModelOptions(ctx),
-      { value: ACTION_MANUAL_MODEL, label: "✍️ 手动输入 fallback model id", searchText: "manual input 手动 输入 fallback" },
-      { value: ACTION_BACK, label: "⬅️ 返回", searchText: "back return 返回" },
+      { value: ACTION_MANUAL_MODEL, label: "手动输入 fallback model id", searchText: "manual input 手动 输入 fallback" },
+      { value: ACTION_BACK, label: "返回", searchText: "back return 返回" },
     ],
     {
       maxVisible: 10,
@@ -974,7 +979,120 @@ async function chooseFallbackModelToAppend(
   return choice;
 }
 
+async function confirmSubagentToolIfNeeded(ctx: ExtensionCommandContext, tools: string[]): Promise<boolean> {
+  if (!tools.includes("subagent")) return true;
+  return await ctx.ui.confirm(
+    "允许 subagent 工具？",
+    "你正在允许子 agent 使用 subagent 工具。这会授权 nested fanout 能力。确定要保存吗？",
+  );
+}
+
+async function editSubagentToolsOverride(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  settingsPath: string,
+  agentName: string,
+  current: SubagentAgentOverride,
+): Promise<void> {
+  const parentToolNames = pi.getActiveTools();
+  const toolOptions = buildToolSelectionOptions(parentToolNames, pi.getAllTools());
+
+  while (true) {
+    const latest = readSubagentAgentOverrides(settingsPath)[agentName] ?? current;
+    const action = await ctx.ui.select(`Subagent ${agentName} - tools`, [
+      `当前: ${formatToolsOverride(latest.tools)}`,
+      "设置 allowlist（从母 Agent 当前工具选择）",
+      "使用母 Agent 当前工具列表",
+      "手动输入工具列表",
+      "使用 agent 默认 tools（删除 override）",
+      "禁用所有 tools",
+      "返回",
+    ]);
+
+    if (!action || action.startsWith("返回")) return;
+    if (action.startsWith("当前")) {
+      ctx.ui.notify(formatToolsOverride(latest.tools), "info");
+      continue;
+    }
+
+    if (action.startsWith("设置 allowlist")) {
+      if (toolOptions.length === 0) {
+        ctx.ui.notify("母 Agent 当前没有可枚举的 active tools。请使用手动输入工具列表。", "warning");
+        continue;
+      }
+
+      const selected = await searchableMultiSelect(
+        ctx,
+        `Subagent ${agentName} - tools allowlist`,
+        toolOptions,
+        getInitialToolsSelection(parentToolNames, latest.tools),
+        {
+          maxVisible: 10,
+          hint: "输入关键字过滤，空格切换，a 全选，n 清空，Enter 保存，Esc 取消",
+        },
+      );
+      if (selected === undefined) continue;
+      if (selected.length === 0) {
+        ctx.ui.notify("未选择任何工具。如需禁用全部工具，请选择“禁用所有 tools”。", "warning");
+        continue;
+      }
+      if (!await confirmSubagentToolIfNeeded(ctx, selected)) continue;
+      updateSubagentAgentOverride(settingsPath, agentName, { tools: selected });
+      ctx.ui.notify(`已更新 ${agentName} tools allowlist (${selected.length})`, "success");
+      continue;
+    }
+
+    if (action.startsWith("使用母 Agent 当前工具列表")) {
+      if (parentToolNames.length === 0) {
+        ctx.ui.notify("母 Agent 当前 active tools 为空，未更新。", "warning");
+        continue;
+      }
+      if (!await confirmSubagentToolIfNeeded(ctx, parentToolNames)) continue;
+      updateSubagentAgentOverride(settingsPath, agentName, { tools: parentToolNames });
+      ctx.ui.notify(`已将 ${agentName} tools 设置为母 Agent 当前工具列表 (${parentToolNames.length})`, "success");
+      continue;
+    }
+
+    if (action.startsWith("手动输入")) {
+      const raw = await promptText(
+        ctx,
+        `Subagent ${agentName} - 手动 tools`,
+        "输入 tools 列表，用逗号、空格或换行分隔。MCP direct tool 使用 mcp: 前缀。",
+        Array.isArray(latest.tools) ? latest.tools.join("\n") : parentToolNames.join("\n"),
+      );
+      if (raw === undefined) continue;
+      const tools = normalizeToolList(raw);
+      if (tools.length === 0) {
+        ctx.ui.notify("未输入任何工具。如需禁用全部工具，请选择“禁用所有 tools”。", "warning");
+        continue;
+      }
+      if (!await confirmSubagentToolIfNeeded(ctx, tools)) continue;
+      updateSubagentAgentOverride(settingsPath, agentName, { tools });
+      ctx.ui.notify(`已更新 ${agentName} tools allowlist (${tools.length})`, "success");
+      continue;
+    }
+
+    if (action.startsWith("使用 agent 默认")) {
+      clearManagedSubagentToolFields(settingsPath, agentName);
+      ctx.ui.notify(`已删除 ${agentName} tools override，将使用 agent 默认 tools`, "success");
+      continue;
+    }
+
+    if (action.startsWith("禁用所有")) {
+      const ok = await ctx.ui.confirm(
+        `禁用 ${agentName} 所有 tools？`,
+        "这会写入 tools=false，使该 subagent 没有显式可用工具。确定？",
+      );
+      if (!ok) continue;
+      updateSubagentAgentOverride(settingsPath, agentName, { tools: false });
+      ctx.ui.notify(`已禁用 ${agentName} 的所有 tools`, "success");
+      continue;
+    }
+  }
+}
+
 async function editSubagentAgentOverride(
+  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   settingsPath: string,
   agentName: string,
@@ -983,19 +1101,22 @@ async function editSubagentAgentOverride(
     const overrides = readSubagentAgentOverrides(settingsPath);
     const current = overrides[agentName] ?? {};
     const action = await ctx.ui.select(`Subagent: ${agentName}`, [
-      `📌 当前 model: ${current.model || "(默认 Pi 当前模型)"}`,
-      `🧠 当前 thinking: ${current.thinking || "(未设置)"}`,
-      `🧯 当前 fallbackModels: ${formatFallbackModels(current.fallbackModels)}`,
-      "🤖 设置 model",
-      "🧠 设置 thinking",
-      "🧯 设置 fallbackModels",
-      "🧹 清除 model/thinking/fallbackModels",
-      "🗑️ 删除整个 agent override",
-      "⬅️ 返回",
+      `当前 model: ${current.model || "(默认 Pi 当前模型)"}`,
+      `当前 thinking: ${current.thinking || "(未设置)"}`,
+      `当前 fallbackModels: ${formatFallbackModels(current.fallbackModels)}`,
+      `当前 tools: ${formatToolsOverride(current.tools)}`,
+      "设置 model",
+      "设置 thinking",
+      "设置 fallbackModels",
+      "设置 tools allowlist",
+      "清除 model/thinking/fallbackModels",
+      "清除 tools override",
+      "删除整个 agent override",
+      "返回",
     ]);
-    if (!action || action.startsWith("⬅️")) return;
+    if (!action || action.startsWith("返回")) return;
 
-    if (action.startsWith("🤖")) {
+    if (action.startsWith("设置 model")) {
       const selected = await chooseModelOverride(ctx, agentName, current.model);
       if (selected === "__cancel__") continue;
       updateSubagentAgentOverride(settingsPath, agentName, {
@@ -1005,38 +1126,38 @@ async function editSubagentAgentOverride(
       continue;
     }
 
-    if (action.startsWith("🧠 设置")) {
+    if (action.startsWith("设置 thinking")) {
       const choices = [
         ...(current.thinking ? [`当前: ${current.thinking}`] : []),
         ...SUBAGENT_THINKING_LEVELS.map((level) => `${level}${current.thinking === level ? " ← 当前" : ""}`),
-        "🚫 清除 thinking override",
-        "⬅️ 返回",
+        "清除 thinking override",
+        "返回",
       ];
       const choice = await ctx.ui.select(`Subagent ${agentName} - Thinking`, choices);
-      if (!choice || choice.startsWith("⬅️") || choice.startsWith("当前:")) continue;
+      if (!choice || choice.startsWith("返回") || choice.startsWith("当前:")) continue;
       updateSubagentAgentOverride(settingsPath, agentName, {
-        thinking: choice.startsWith("🚫") ? undefined : choice.split(" ")[0],
+        thinking: choice.startsWith("清除") ? undefined : choice.split(" ")[0],
       });
       ctx.ui.notify(`已更新 ${agentName} thinking override`, "success");
       continue;
     }
 
-    if (action.startsWith("🧯 设置")) {
+    if (action.startsWith("设置 fallbackModels")) {
       const fallbackAction = await ctx.ui.select(`Subagent ${agentName} - fallbackModels`, [
-        "🤖 从模型选择器添加 fallback model",
-        "✏️ 手动编辑 fallbackModels",
-        "🚫 清除 fallbackModels",
-        "⬅️ 返回",
+        "从模型选择器添加 fallback model",
+        "手动编辑 fallbackModels",
+        "清除 fallbackModels",
+        "返回",
       ]);
-      if (!fallbackAction || fallbackAction.startsWith("⬅️")) continue;
-      if (fallbackAction.startsWith("🤖")) {
+      if (!fallbackAction || fallbackAction.startsWith("返回")) continue;
+      if (fallbackAction.startsWith("从模型选择器")) {
         const selected = await chooseFallbackModelToAppend(ctx, agentName);
         if (!selected) continue;
         const fallbackModels = appendSubagentFallbackModel(settingsPath, agentName, selected);
         ctx.ui.notify(`已添加 ${agentName} fallback model：${selected}（共 ${fallbackModels.length} 个）`, "success");
         continue;
       }
-      if (fallbackAction.startsWith("🚫")) {
+      if (fallbackAction.startsWith("清除")) {
         updateSubagentAgentOverride(settingsPath, agentName, { fallbackModels: undefined });
         ctx.ui.notify(`已清除 ${agentName} fallbackModels`, "success");
         continue;
@@ -1054,18 +1175,29 @@ async function editSubagentAgentOverride(
       continue;
     }
 
-    if (action.startsWith("🧹")) {
+    if (action.startsWith("设置 tools")) {
+      await editSubagentToolsOverride(pi, ctx, settingsPath, agentName, current);
+      continue;
+    }
+
+    if (action.startsWith("清除 model/thinking/fallbackModels")) {
       const ok = await ctx.ui.confirm(
-        `清除 ${agentName} 管理字段`,
+        `清除 ${agentName} 模型相关字段`,
         "清除 model、thinking、fallbackModels。若该 agent override 没有其他字段，将删除该 agent override。",
       );
       if (!ok) continue;
-      clearManagedSubagentAgentFields(settingsPath, agentName);
+      clearManagedSubagentModelFields(settingsPath, agentName);
       ctx.ui.notify(`已清除 ${agentName} 的 Subagent 模型相关字段`, "success");
       continue;
     }
 
-    if (action.startsWith("🗑️")) {
+    if (action.startsWith("清除 tools")) {
+      clearManagedSubagentToolFields(settingsPath, agentName);
+      ctx.ui.notify(`已删除 ${agentName} tools override，将使用 agent 默认 tools`, "success");
+      continue;
+    }
+
+    if (action.startsWith("删除")) {
       const ok = await ctx.ui.confirm(
         `删除 ${agentName} override`,
         "这会删除该 agent 在 subagents.agentOverrides 下的整个 override，包括非模型字段。确定？",
@@ -1138,6 +1270,7 @@ function settingsCountLabel(settingsPath: string): string {
 }
 
 async function editSubagentSettingsFile(
+  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   settingsPath: string,
   title: string,
@@ -1147,40 +1280,40 @@ async function editSubagentSettingsFile(
   while (true) {
     const overrides = readSubagentAgentOverrides(settingsPath);
     const items = [
-      `📍 编辑目标: ${title} (${settingsPath})`,
+      `编辑目标: ${title} (${settingsPath})`,
       ...BUILTIN_SUBAGENT_NAMES.map((agent) => overrideSummary(agent, overrides[agent])),
-      "⬅️ 返回 Subagent 配置菜单",
+      "返回 Subagent 配置菜单",
     ];
-    const choice = await ctx.ui.select(`🤖 ${title}`, items);
-    if (!choice || choice.startsWith("⬅️")) return;
-    if (choice.startsWith("📍")) {
+    const choice = await ctx.ui.select(title, items);
+    if (!choice || choice.startsWith("返回")) return;
+    if (choice.startsWith("编辑目标")) {
       ctx.ui.notify(`当前编辑 ${title}\n路径: ${settingsPath}`, "info");
       continue;
     }
-    const match = choice.match(/^✏️\s+\[(.+?)\]/);
+    const match = choice.match(/^编辑\s+\[(.+?)\]/);
     if (match) {
-      await editSubagentAgentOverride(ctx, settingsPath, match[1]!);
+      await editSubagentAgentOverride(pi, ctx, settingsPath, match[1]!);
     }
   }
 }
 
-async function manageSubagentModelSettings(ctx: ExtensionCommandContext): Promise<void> {
+async function manageSubagentModelSettings(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
   while (true) {
     const cwd = getCommandCwd(ctx);
     const paths = getActiveSubagentSettingsTargetForCwd(cwd);
     const items = [
-      `📍 路径信息（项目: ${paths.projectSettingsPath} / 公共: ${paths.userSettingsPath}）`,
-      `📝 编辑本项目配置 (${settingsCountLabel(paths.projectSettingsPath)})`,
-      `🌐 编辑公共配置 (${settingsCountLabel(paths.userSettingsPath)})`,
-      "⬆️ 本项目配置 → 公共配置",
-      "⬇️ 公共配置 → 本项目配置",
-      "⬅️ 返回主菜单",
+      `路径信息（项目: ${paths.projectSettingsPath} / 公共: ${paths.userSettingsPath}）`,
+      `编辑本项目配置 (${settingsCountLabel(paths.projectSettingsPath)})`,
+      `编辑公共配置 (${settingsCountLabel(paths.userSettingsPath)})`,
+      "本项目配置 -> 公共配置",
+      "公共配置 -> 本项目配置",
+      "返回主菜单",
     ];
 
-    const choice = await ctx.ui.select("🤖 Subagent 模型配置", items);
-    if (!choice || choice.startsWith("⬅️")) return;
+    const choice = await ctx.ui.select("Subagent 配置", items);
+    if (!choice || choice.startsWith("返回")) return;
 
-    if (choice.startsWith("📍")) {
+    if (choice.startsWith("路径")) {
       ctx.ui.notify(
         `当前工作目录: ${cwd}\n` +
         `项目配置: ${paths.projectSettingsPath}\n` +
@@ -1193,22 +1326,22 @@ async function manageSubagentModelSettings(ctx: ExtensionCommandContext): Promis
       continue;
     }
 
-    if (choice.startsWith("📝")) {
-      await editSubagentSettingsFile(ctx, paths.projectSettingsPath, "本项目 Subagent 配置", true);
+    if (choice.startsWith("编辑本项目")) {
+      await editSubagentSettingsFile(pi, ctx, paths.projectSettingsPath, "本项目 Subagent 配置", true);
       continue;
     }
 
-    if (choice.startsWith("🌐")) {
-      await editSubagentSettingsFile(ctx, paths.userSettingsPath, "公共 Subagent 配置", false);
+    if (choice.startsWith("编辑公共")) {
+      await editSubagentSettingsFile(pi, ctx, paths.userSettingsPath, "公共 Subagent 配置", false);
       continue;
     }
 
-    if (choice.startsWith("⬆️")) {
+    if (choice.startsWith("本项目配置")) {
       await syncProjectSubagentConfigToUser(ctx, paths.projectSettingsPath, paths.userSettingsPath);
       continue;
     }
 
-    if (choice.startsWith("⬇️")) {
+    if (choice.startsWith("公共配置")) {
       await syncUserSubagentConfigToProject(ctx, paths.userSettingsPath, paths.projectSettingsPath);
       continue;
     }
@@ -1267,25 +1400,25 @@ export default async function (pi: ExtensionAPI) {
         let mCount = 0;
         for (const p of Object.values(config.providers)) mCount += (p.models || []).length;
 
-        const choice = await ctx.ui.select("🧩 模型配置编辑器", [
-          `📁 管理 Providers (当前 ${pCount} providers, ${mCount} models)`,
-          `🤖 Subagent 模型配置`,
-          `🔍 诊断：检查 models.json 状态`,
-          `💡 提示：保存后关闭并重开 /model (Ctrl+L) 即可看到`,
-          "❌ 退出",
+        const choice = await ctx.ui.select("模型配置编辑器", [
+          `管理 Providers (当前 ${pCount} providers, ${mCount} models)`,
+          `Subagent 配置`,
+          `诊断：检查 models.json 状态`,
+          `提示：保存后关闭并重开 /model (Ctrl+L) 即可看到`,
+          "退出",
         ]);
 
-        if (choice === undefined || choice?.startsWith("❌")) break;
+        if (choice === undefined || choice?.startsWith("退出")) break;
 
-        if (choice?.startsWith("📁")) {
+        if (choice?.startsWith("管理 Providers")) {
           await manageProviders(ctx, config);
         }
 
-        if (choice?.startsWith("🤖")) {
-          await manageSubagentModelSettings(ctx);
+        if (choice?.startsWith("Subagent")) {
+          await manageSubagentModelSettings(pi, ctx);
         }
 
-        if (choice?.startsWith("🔍")) {
+        if (choice?.startsWith("诊断")) {
           // 诊断命令：检查 models.json 是否存在且格式正确
           const path = getModelsPath();
           const fs = await import("node:fs");
@@ -1293,16 +1426,16 @@ export default async function (pi: ExtensionAPI) {
           const size = exists ? `${(fs.statSync(path).size / 1024).toFixed(1)} KB` : "N/A";
 
           ctx.ui.notify(
-            `📁 文件路径: ${path}\n` +
-            `📏 存在: ${exists ? "是" : "否"} | 大小: ${size}\n` +
-            `📊 Providers: ${pCount} | Models: ${mCount}`,
+            `文件路径: ${path}\n` +
+            `存在: ${exists ? "是" : "否"} | 大小: ${size}\n` +
+            `Providers: ${pCount} | Models: ${mCount}`,
             "info",
           );
         }
 
         if (choice?.includes("提示")) {
           ctx.ui.notify(
-            "💡 工作流程：\n" +
+            "工作流程：\n" +
             "1. 添加 Provider → 自动保存到 models.json\n" +
             "2. 为 Provider 添加 Models → 自动保存\n" +
             "3. 关闭 /model 对话框 → 重新打开 (Ctrl+L)\n" +
@@ -1318,7 +1451,7 @@ export default async function (pi: ExtensionAPI) {
   if (loadedCount > 0) {
     pi.on("session_start", async (_event, ctx) => {
       ctx.ui.notify(
-        `📦 已加载 ${loadedCount} 个自定义 Provider（/model-config 管理 · Ctrl+L 切换）`,
+        `已加载 ${loadedCount} 个自定义 Provider（/model-config 管理 · Ctrl+L 切换）`,
         "info",
       );
     });

@@ -21,6 +21,7 @@ export interface SubagentAgentOverride {
   model?: string;
   thinking?: string;
   fallbackModels?: string[];
+  tools?: string[] | false;
   [key: string]: unknown;
 }
 
@@ -41,9 +42,15 @@ export interface SubagentOverrideChanges {
   model?: string;
   thinking?: string;
   fallbackModels?: string[];
+  tools?: string[] | false;
 }
 
-const MANAGED_AGENT_OVERRIDE_FIELDS = ["model", "thinking", "fallbackModels"] as const;
+const MANAGED_MODEL_OVERRIDE_FIELDS = ["model", "thinking", "fallbackModels"] as const;
+const MANAGED_TOOL_OVERRIDE_FIELDS = ["tools"] as const;
+const MANAGED_AGENT_OVERRIDE_FIELDS = [
+  ...MANAGED_MODEL_OVERRIDE_FIELDS,
+  ...MANAGED_TOOL_OVERRIDE_FIELDS,
+] as const;
 
 export function getUserSettingsPath(): string {
   const agentDir = process.env.PI_CODING_AGENT_DIR
@@ -202,13 +209,30 @@ export function deleteSubagentAgentOverride(settingsPath: string, agentName: str
   writeJsonObject(settingsPath, settings);
 }
 
-export function clearManagedSubagentAgentFields(settingsPath: string, agentName: string): void {
+export function clearManagedSubagentModelFields(settingsPath: string, agentName: string): void {
   updateSubagentAgentOverride(settingsPath, agentName, {
     model: undefined,
     thinking: undefined,
     fallbackModels: undefined,
   });
 }
+
+export function clearManagedSubagentToolFields(settingsPath: string, agentName: string): void {
+  updateSubagentAgentOverride(settingsPath, agentName, {
+    tools: undefined,
+  });
+}
+
+export function clearAllManagedSubagentAgentFields(settingsPath: string, agentName: string): void {
+  updateSubagentAgentOverride(settingsPath, agentName, {
+    model: undefined,
+    thinking: undefined,
+    fallbackModels: undefined,
+    tools: undefined,
+  });
+}
+
+export const clearManagedSubagentAgentFields = clearManagedSubagentModelFields;
 
 export function appendSubagentFallbackModel(settingsPath: string, agentName: string, model: string): string[] {
   const settings = readJsonObject(settingsPath);
