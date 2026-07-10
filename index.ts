@@ -4,11 +4,11 @@
  * - Pi 的 /model 命令直接从 ~/.pi/agent/models.json 读取自定义模型
  * - 每次打开 /model 时自动重新加载该文件（无需 /reload）
  * - 本插件负责：可视化编辑 → 写入 models.json → 通知用户重开 /model
- * - 启动时也用 pi.registerProvider() 预加载，作为双保险
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { getModelsPath, readModelsConfig, writeModelsConfig } from "./config.ts";
+import { getModelPayload, mergePayloadIntoRequest } from "./payload-config.ts";
 import { applyCompatBooleanChoice, type CompatBooleanChoice } from "./compat-settings.ts";
 import type { ModelsConfig, ProviderConfig, ModelConfig, ExtraPayloadParam } from "./types.ts";
 import { searchableSelect, type SearchableSelectOption } from "./searchable-select.ts";
@@ -1353,41 +1353,13 @@ async function manageSubagentModelSettings(pi: ExtensionAPI, ctx: ExtensionComma
 // ═══════════════════════════════════════════════════════
 
 export default async function (pi: ExtensionAPI) {
-  // ── 启动：从 models.json 加载并注册 ──
-  const initialConfig = readModelsConfig();
-  let loadedCount = 0;
-
-  for (const [pid, p] of Object.entries(initialConfig.providers)) {
-    try {
-      pi.registerProvider(pid, {
-        name: p.name,
-        baseUrl: p.baseUrl,
-        api: (p.api as any) || "openai-completions",
-        apiKey: p.apiKey,
-        headers: p.headers,
-        authHeader: p.authHeader,
-        models: (p.models || []).map((m) => ({
-          id: m.id,
-          name: m.name || m.id,
-          reasoning: m.reasoning || false,
-          input: m.input || ["text"],
-          contextWindow: m.contextWindow || 128000,
-          maxTokens: m.maxTokens || 16384,
-          cost: m.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          ...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
-          ...(m.compat ? { compat: m.compat } : {}),
-          ...(m.api ? { api: m.api as any } : {}),
-          ...(m.baseUrl ? { baseUrl: m.baseUrl } : {}),
-          ...(m.headers ? { headers: m.headers } : {}),
-        })),
-        ...(p.compat ? { compat: p.compat } : {}),
-        ...(p.modelOverrides ? { modelOverrides: p.modelOverrides } : {}),
-      });
-      loadedCount++;
-    } catch (err) {
-      console.error(`[model-config] Startup register "${pid}" failed:`, err);
-    }
-  }
+  pi.on("before_provider_request", (event, ctx) => {
+    const model = ctx.model;
+    if (!model) return undefined;
+    const extraPayload = getModelPayload(model.provider, model.id);
+    if (!extraPayload) return undefined;
+    return mergePayloadIntoRequest(event.payload, extraPayload);
+  });
 
   // ── /model-config 命令 ──
   pi.registerCommand("model-config", {
@@ -1447,13 +1419,4 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
-  // ── 启动通知 ──
-  if (loadedCount > 0) {
-    pi.on("session_start", async (_event, ctx) => {
-      ctx.ui.notify(
-        `已加载 ${loadedCount} 个自定义 Provider（/model-config 管理 · Ctrl+L 切换）`,
-        "info",
-      );
-    });
-  }
 }
