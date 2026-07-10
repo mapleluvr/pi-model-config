@@ -1,6 +1,8 @@
 import type { ModelConfig, ModelCostTier, ProviderConfig } from "./types.ts";
 
-type ConfigPatch<T extends Record<string, unknown>> = Partial<T> & Record<string, unknown>;
+type ConfigPatch<T extends Record<string, unknown>> = {
+  [Key in keyof T]?: T[Key] | null;
+} & Record<string, unknown>;
 
 function mergeDefined<T extends Record<string, unknown>>(existing: T | undefined, changes: ConfigPatch<T>): T {
   const next: Record<string, unknown> = { ...(existing ?? {}) };

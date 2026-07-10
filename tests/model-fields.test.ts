@@ -27,12 +27,24 @@ test("model merge retains native values, thinking max, compat, and existing cost
   assert.deepEqual(result.compat, { supportsTemperature: true });
 });
 
+test("model merge retains omitted or undefined native fields and clears explicit null fields", () => {
+  const existing = { id: "model", headers: { "X-Keep": "1" }, nativeFlag: true };
+  assert.deepEqual(mergeModelConfig(existing, {}), existing);
+  assert.deepEqual(mergeModelConfig(existing, { nativeFlag: undefined }), existing);
+  assert.deepEqual(mergeModelConfig(existing, { nativeFlag: null }), {
+    id: "model", headers: { "X-Keep": "1" },
+  });
+});
+
 test("cost tiers require a positive integer threshold and non-negative finite rates", () => {
   assert.deepEqual(validateCostTier({ inputTokensAbove: 272000, input: 10, output: 45, cacheRead: 1, cacheWrite: 12.5 }), {
     inputTokensAbove: 272000, input: 10, output: 45, cacheRead: 1, cacheWrite: 12.5,
   });
   assert.equal(validateCostTier({ inputTokensAbove: 0, input: 1, output: 1, cacheRead: 1, cacheWrite: 1 }), undefined);
+  assert.equal(validateCostTier({ inputTokensAbove: 100.5, input: 1, output: 1, cacheRead: 1, cacheWrite: 1 }), undefined);
   assert.equal(validateCostTier({ inputTokensAbove: 100, input: -1, output: 1, cacheRead: 1, cacheWrite: 1 }), undefined);
+  assert.equal(validateCostTier({ inputTokensAbove: 100, input: Number.NaN, output: 1, cacheRead: 1, cacheWrite: 1 }), undefined);
+  assert.equal(validateCostTier({ inputTokensAbove: 100, input: 1, output: Infinity, cacheRead: 1, cacheWrite: 1 }), undefined);
 });
 
 test("replaces only tiers while retaining base cost rates", () => {
