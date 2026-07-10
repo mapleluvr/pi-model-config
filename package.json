@@ -20,7 +20,8 @@
     "check": "node --experimental-strip-types --check index.ts && node --experimental-strip-types --check subagent-settings.ts && node --experimental-strip-types --check compat-settings.ts && node --experimental-strip-types --check searchable-select.ts && node --experimental-strip-types --check searchable-multi-select.ts && node --experimental-strip-types --check tool-options.ts && node --experimental-strip-types --check subagent-ui.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-tui": "0.79.1"
+    "@earendil-works/pi-tui": "0.79.1",
+    "jsonc-parser": "^3.3.1"
   },
   "pi": {
     "extensions": [

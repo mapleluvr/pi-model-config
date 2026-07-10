@@ -2,9 +2,19 @@
 
 export interface ModelsConfig {
   providers: Record<string, ProviderConfig>;
+  [key: string]: unknown;
+}
+
+export interface ModelCostTier {
+  inputTokensAbove: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
 }
 
 export interface ProviderConfig {
+  [key: string]: unknown;
   /** Display name for the provider in UI */
   name?: string;
   /** API endpoint URL */
@@ -26,6 +36,7 @@ export interface ProviderConfig {
 }
 
 export interface ModelConfig {
+  [key: string]: unknown;
   /** Model identifier (passed to the API) */
   id: string;
   /** Human-readable model label */
@@ -37,7 +48,7 @@ export interface ModelConfig {
   /** Whether the model supports extended thinking */
   reasoning?: boolean;
   /** Maps pi thinking levels to provider/model-specific values */
-  thinkingLevelMap?: Record<string, string | null>;
+  thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
   /** Supported input types */
   input?: ("text" | "image")[];
   /** Maximum context window size in tokens */
@@ -50,23 +61,12 @@ export interface ModelConfig {
     output: number;
     cacheRead: number;
     cacheWrite: number;
+    tiers?: ModelCostTier[];
   };
   /** Custom headers for this specific model */
   headers?: Record<string, string>;
   /** Model-level compatibility settings */
   compat?: CompatConfig;
-  /** 自定义 Payload 参数 — 附加到 API 请求体的键值对 */
-  extraPayload?: ExtraPayloadParam[];
-}
-
-/** 单个自定义 Payload 参数 */
-export interface ExtraPayloadParam {
-  /** 参数键名 */
-  key: string;
-  /** 值类型 */
-  type: "json" | "string" | "bool";
-  /** 参数值（以字符串形式存储，bool 为 "true"/"false"，json 为合法 JSON 字符串） */
-  value: string;
 }
 
 /** Compatibility settings for OpenAI / Anthropic APIs */
@@ -106,5 +106,5 @@ export const API_TYPES = [
 ] as const;
 
 /** Thinking level keys */
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];

@@ -1,53 +1,55 @@
 // ── models.json 配置读写 ──
 import * as fs from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { parse, type ParseError } from "jsonc-parser";
 import type { ModelsConfig, ProviderConfig } from "./types.ts";
+
+export class ModelsConfigError extends Error {
+  public readonly filePath: string;
+
+  constructor(filePath: string, message: string) {
+    super(`Failed to read models.json at ${filePath}: ${message}`);
+    this.name = "ModelsConfigError";
+    this.filePath = filePath;
+  }
+}
 
 /** 获取 models.json 的完整路径 */
 export function getModelsPath(): string {
-  const agentDir = process.env.PI_CODING_AGENT_DIR
-    || path.join(os.homedir(), ".pi", "agent");
+  const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
   return path.join(agentDir, "models.json");
 }
 
-/** 读取 models.json */
-export function readModelsConfig(): ModelsConfig {
-  const filePath = getModelsPath();
-  try {
-    if (fs.existsSync(filePath)) {
-      const raw = fs.readFileSync(filePath, "utf-8");
-      const parsed = JSON.parse(raw);
-      return {
-        providers: parsed.providers || {},
-      };
-    }
-  } catch (err) {
-    console.error(`[model-config] Failed to read models.json: ${err}`);
+function parseModelsDocument(filePath: string, raw: string): ModelsConfig {
+  const errors: ParseError[] = [];
+  const parsed = parse(raw, errors, { allowTrailingComma: true, disallowComments: false });
+  if (errors.length > 0) {
+    throw new ModelsConfigError(filePath, errors.map((error) => `offset ${error.offset}: ${error.error}`).join("; "));
   }
-  return { providers: {} };
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ModelsConfigError(filePath, "root must be a JSON object");
+  }
+  const root = parsed as Record<string, unknown>;
+  if (root.providers !== undefined && (!root.providers || typeof root.providers !== "object" || Array.isArray(root.providers))) {
+    throw new ModelsConfigError(filePath, "providers must be a JSON object when present");
+  }
+  return { ...root, providers: (root.providers as Record<string, ProviderConfig> | undefined) ?? {} } as ModelsConfig;
 }
 
-/** 写入 models.json (合并已有配置) */
-export function writeModelsConfig(config: ModelsConfig): void {
-  const filePath = getModelsPath();
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  // 先读取已有文件，保留未知字段
-  let existing: any = {};
-  try {
-    if (fs.existsSync(filePath)) {
-      existing = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-    }
-  } catch {
-    // 忽略
-  }
+/** 读取 models.json */
+export function readModelsConfig(filePath = getModelsPath()): ModelsConfig {
+  if (!fs.existsSync(filePath)) return { providers: {} };
+  const raw = fs.readFileSync(filePath, "utf8");
+  if (!raw.trim()) return { providers: {} };
+  return parseModelsDocument(filePath, raw);
+}
 
-  // 合并：保留 existing 中除 providers 之外的字段
-  const merged: any = { ...existing, providers: config.providers };
-  fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), "utf-8");
+/** 写入 models.json */
+export function writeModelsConfig(config: ModelsConfig, filePath = getModelsPath()): void {
+  if (fs.existsSync(filePath)) parseModelsDocument(filePath, fs.readFileSync(filePath, "utf8"));
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
 /** 添加或更新一个 provider */
@@ -66,12 +68,10 @@ export function deleteProvider(providerId: string): void {
 
 /** 列出所有 provider id */
 export function listProviderIds(): string[] {
-  const config = readModelsConfig();
-  return Object.keys(config.providers);
+  return Object.keys(readModelsConfig().providers);
 }
 
 /** 获取指定 provider 配置 */
 export function getProvider(providerId: string): ProviderConfig | undefined {
-  const config = readModelsConfig();
-  return config.providers[providerId];
+  return readModelsConfig().providers[providerId];
 }
