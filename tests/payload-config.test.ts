@@ -4,8 +4,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-  getModelPayload, mergePayloadIntoRequest, modelPayloadKey, moveModelPayload,
-  readPayloadConfig, removeModelPayload, removeProviderPayloads, setModelPayload,
+  copyModelPayload, copyProviderPayloads, getModelPayload, mergePayloadIntoRequest,
+  modelPayloadKey, moveModelPayload, moveProviderPayloads, readPayloadConfig,
+  removeModelPayload, removeProviderPayloads, setModelPayload,
 } from "../payload-config.ts";
 
 function withAgentDir(run: (agentDir: string) => void): void {
@@ -27,7 +28,36 @@ test("stores payloads by exact provider/model identity without cross-model leaka
   assert.deepEqual(getModelPayload("local", "model-a"), { temperature: 0.2 });
   assert.deepEqual(getModelPayload("local", "model-b"), { top_p: 0.9 });
   assert.equal(getModelPayload("other", "model-a"), undefined);
-  assert.equal(modelPayloadKey("local", "model-a"), "local/model-a");
+  assert.equal(modelPayloadKey("local", "model-a"), '["local","model-a"]');
+}));
+
+test("keeps slash-containing provider and model identities unambiguous during cleanup", () => withAgentDir(() => {
+  setModelPayload("alpha", "beta/model", { owner: "alpha" });
+  setModelPayload("alpha/beta", "model", { owner: "alpha/beta" });
+
+  assert.notEqual(modelPayloadKey("alpha", "beta/model"), modelPayloadKey("alpha/beta", "model"));
+  assert.deepEqual(getModelPayload("alpha", "beta/model"), { owner: "alpha" });
+  assert.deepEqual(getModelPayload("alpha/beta", "model"), { owner: "alpha/beta" });
+
+  removeProviderPayloads("alpha");
+  assert.equal(getModelPayload("alpha", "beta/model"), undefined);
+  assert.deepEqual(getModelPayload("alpha/beta", "model"), { owner: "alpha/beta" });
+}));
+
+test("reads and migrates slash-free-provider legacy keys without exposing them to slash providers", () => withAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "model-config-payloads.json");
+  fs.writeFileSync(filePath, `${JSON.stringify({
+    version: 1,
+    extraPayloads: { "alpha/beta/model": { legacy: true } },
+  }, null, 2)}\n`);
+
+  assert.deepEqual(getModelPayload("alpha", "beta/model"), { legacy: true });
+  assert.equal(getModelPayload("alpha/beta", "model"), undefined);
+
+  moveModelPayload("alpha", "beta/model", "alpha/beta", "model");
+  assert.equal(getModelPayload("alpha", "beta/model"), undefined);
+  assert.deepEqual(getModelPayload("alpha/beta", "model"), { legacy: true });
+  assert.equal(Object.hasOwn(readPayloadConfig().extraPayloads, "alpha/beta/model"), false);
 }));
 
 test("moves and removes payload identities", () => withAgentDir(() => {
@@ -41,7 +71,7 @@ test("moves and removes payload identities", () => withAgentDir(() => {
   setModelPayload("local", "two", { b: 2 });
   setModelPayload("other", "one", { c: 3 });
   removeProviderPayloads("local");
-  assert.deepEqual(readPayloadConfig().extraPayloads, { "other/one": { c: 3 } });
+  assert.deepEqual(readPayloadConfig().extraPayloads, { [modelPayloadKey("other", "one")]: { c: 3 } });
 }));
 
 test("does not migrate a payload until the caller has committed the native identity", () => withAgentDir(() => {
@@ -51,6 +81,31 @@ test("does not migrate a payload until the caller has committed the native ident
   moveModelPayload("local", "old", "local", "new");
   assert.equal(getModelPayload("local", "old"), undefined);
   assert.deepEqual(getModelPayload("local", "new"), { seed: 7 });
+}));
+
+test("copies model and provider payloads without removing their source identities", () => withAgentDir(() => {
+  setModelPayload("source/provider", "model/one", { seed: 7 });
+  setModelPayload("source/provider", "model/two", { temperature: 0.2 });
+
+  copyModelPayload("source/provider", "model/one", "source/provider", "model/one-copy");
+  copyProviderPayloads("source/provider", "target/provider", ["model/one", "model/two"]);
+
+  assert.deepEqual(getModelPayload("source/provider", "model/one"), { seed: 7 });
+  assert.deepEqual(getModelPayload("source/provider", "model/one-copy"), { seed: 7 });
+  assert.deepEqual(getModelPayload("target/provider", "model/one"), { seed: 7 });
+  assert.deepEqual(getModelPayload("target/provider", "model/two"), { temperature: 0.2 });
+}));
+
+test("moves all named provider payloads in one lifecycle operation", () => withAgentDir(() => {
+  setModelPayload("source/provider", "model/one", { seed: 7 });
+  setModelPayload("source/provider", "model/two", { temperature: 0.2 });
+
+  moveProviderPayloads("source/provider", "target/provider", ["model/one", "model/two"]);
+
+  assert.equal(getModelPayload("source/provider", "model/one"), undefined);
+  assert.equal(getModelPayload("source/provider", "model/two"), undefined);
+  assert.deepEqual(getModelPayload("target/provider", "model/one"), { seed: 7 });
+  assert.deepEqual(getModelPayload("target/provider", "model/two"), { temperature: 0.2 });
 }));
 
 test("fails closed for malformed private payload configuration without overwriting it", () => withAgentDir((agentDir) => {

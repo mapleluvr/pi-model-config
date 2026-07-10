@@ -9,6 +9,8 @@ export interface PayloadConfig {
 
 const EMPTY_CONFIG: PayloadConfig = { version: 1, extraPayloads: {} };
 
+type ModelPayloadIdentity = readonly [provider: string, modelId: string];
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
@@ -23,7 +25,21 @@ export function getPayloadConfigPath(): string {
 }
 
 export function modelPayloadKey(provider: string, modelId: string): string {
-  return `${provider}/${modelId}`;
+  return JSON.stringify([provider, modelId] satisfies ModelPayloadIdentity);
+}
+
+function parseModelPayloadKey(key: string): ModelPayloadIdentity | undefined {
+  try {
+    const parsed: unknown = JSON.parse(key);
+    if (!Array.isArray(parsed) || parsed.length !== 2 || parsed.some((part) => typeof part !== "string")) return undefined;
+    return parsed as unknown as ModelPayloadIdentity;
+  } catch {
+    return undefined;
+  }
+}
+
+function legacyModelPayloadKey(provider: string, modelId: string): string | undefined {
+  return provider.includes("/") ? undefined : `${provider}/${modelId}`;
 }
 
 export class PayloadConfigError extends Error {
@@ -72,38 +88,121 @@ function writePayloadConfig(config: PayloadConfig, filePath = getPayloadConfigPa
   fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
+function storedModelPayload(
+  config: PayloadConfig,
+  provider: string,
+  modelId: string,
+): Record<string, unknown> | undefined {
+  const exact = config.extraPayloads[modelPayloadKey(provider, modelId)];
+  if (exact) return exact;
+  const legacyKey = legacyModelPayloadKey(provider, modelId);
+  return legacyKey === undefined ? undefined : config.extraPayloads[legacyKey];
+}
+
+function setStoredModelPayload(
+  config: PayloadConfig,
+  provider: string,
+  modelId: string,
+  payload: Record<string, unknown>,
+): void {
+  config.extraPayloads[modelPayloadKey(provider, modelId)] = clonePayload(payload);
+  const legacyKey = legacyModelPayloadKey(provider, modelId);
+  if (legacyKey !== undefined) delete config.extraPayloads[legacyKey];
+}
+
+function deleteStoredModelPayload(config: PayloadConfig, provider: string, modelId: string): void {
+  delete config.extraPayloads[modelPayloadKey(provider, modelId)];
+  const legacyKey = legacyModelPayloadKey(provider, modelId);
+  if (legacyKey !== undefined) delete config.extraPayloads[legacyKey];
+}
+
 export function getModelPayload(provider: string, modelId: string): Record<string, unknown> | undefined {
-  const value = readPayloadConfig().extraPayloads[modelPayloadKey(provider, modelId)];
+  const value = storedModelPayload(readPayloadConfig(), provider, modelId);
   return value ? clonePayload(value) : undefined;
 }
 
 export function setModelPayload(provider: string, modelId: string, payload: Record<string, unknown>): void {
   if (!isPlainObject(payload)) throw new Error("Model payload must be a JSON object");
   const config = readPayloadConfigForWrite();
-  config.extraPayloads[modelPayloadKey(provider, modelId)] = clonePayload(payload);
+  setStoredModelPayload(config, provider, modelId, payload);
   writePayloadConfig(config);
 }
 
 export function removeModelPayload(provider: string, modelId: string): void {
   const config = readPayloadConfigForWrite();
-  delete config.extraPayloads[modelPayloadKey(provider, modelId)];
+  deleteStoredModelPayload(config, provider, modelId);
   writePayloadConfig(config);
 }
 
 export function removeProviderPayloads(provider: string): void {
   const config = readPayloadConfigForWrite();
-  const prefix = `${provider}/`;
-  for (const key of Object.keys(config.extraPayloads)) if (key.startsWith(prefix)) delete config.extraPayloads[key];
+  const legacyPrefix = provider.includes("/") ? undefined : `${provider}/`;
+  for (const key of Object.keys(config.extraPayloads)) {
+    const identity = parseModelPayloadKey(key);
+    if (identity?.[0] === provider || (!identity && legacyPrefix !== undefined && key.startsWith(legacyPrefix))) {
+      delete config.extraPayloads[key];
+    }
+  }
+  writePayloadConfig(config);
+}
+
+export function copyModelPayload(
+  fromProvider: string,
+  fromModelId: string,
+  toProvider: string,
+  toModelId: string,
+): void {
+  if (fromProvider === toProvider && fromModelId === toModelId) return;
+  const config = readPayloadConfigForWrite();
+  const value = storedModelPayload(config, fromProvider, fromModelId);
+  if (!value) return;
+  setStoredModelPayload(config, toProvider, toModelId, value);
   writePayloadConfig(config);
 }
 
 export function moveModelPayload(fromProvider: string, fromModelId: string, toProvider: string, toModelId: string): void {
+  if (fromProvider === toProvider && fromModelId === toModelId) return;
   const config = readPayloadConfigForWrite();
-  const value = config.extraPayloads[modelPayloadKey(fromProvider, fromModelId)];
+  const value = storedModelPayload(config, fromProvider, fromModelId);
   if (!value) return;
-  config.extraPayloads[modelPayloadKey(toProvider, toModelId)] = clonePayload(value);
-  delete config.extraPayloads[modelPayloadKey(fromProvider, fromModelId)];
+  setStoredModelPayload(config, toProvider, toModelId, value);
+  deleteStoredModelPayload(config, fromProvider, fromModelId);
   writePayloadConfig(config);
+}
+
+export function copyProviderPayloads(
+  fromProvider: string,
+  toProvider: string,
+  modelIds: readonly string[],
+): void {
+  if (fromProvider === toProvider) return;
+  const config = readPayloadConfigForWrite();
+  let changed = false;
+  for (const modelId of modelIds) {
+    const value = storedModelPayload(config, fromProvider, modelId);
+    if (!value) continue;
+    setStoredModelPayload(config, toProvider, modelId, value);
+    changed = true;
+  }
+  if (changed) writePayloadConfig(config);
+}
+
+export function moveProviderPayloads(
+  fromProvider: string,
+  toProvider: string,
+  modelIds: readonly string[],
+): void {
+  if (fromProvider === toProvider) return;
+  const config = readPayloadConfigForWrite();
+  let changed = false;
+  for (const modelId of modelIds) {
+    const value = storedModelPayload(config, fromProvider, modelId);
+    if (!value) continue;
+    setStoredModelPayload(config, toProvider, modelId, value);
+    deleteStoredModelPayload(config, fromProvider, modelId);
+    changed = true;
+  }
+  if (changed) writePayloadConfig(config);
 }
 
 export function mergePayloadIntoRequest(payload: unknown, extraPayload: unknown): Record<string, unknown> | undefined {

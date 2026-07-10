@@ -64,6 +64,16 @@ test("refuses to overwrite malformed models.json", () => withAgentDir((agentDir)
   assert.equal(fs.readFileSync(filePath, "utf8"), malformed);
 }));
 
+test("treats a blank or whitespace-only models.json as malformed and preserves it", () => withAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "models.json");
+  const blank = " \r\n\t";
+  fs.writeFileSync(filePath, blank);
+
+  assert.throws(() => readModelsConfig(), ModelsConfigError);
+  assert.throws(() => writeModelsConfig({ providers: {} }), ModelsConfigError);
+  assert.equal(fs.readFileSync(filePath, "utf8"), blank);
+}));
+
 test("returns an empty provider map only when models.json is absent", () => withAgentDir(() => {
   assert.deepEqual(readModelsConfig(), { providers: {} });
 }));

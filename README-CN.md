@@ -88,7 +88,7 @@ Pi 本体负责 Provider 注册和 ModelRegistry 刷新。保存后关闭并重�
 
 ## 请求 Payload 参数
 
-额外请求体参数不再写入 `models.json`。插件把它们按精确 `provider/model-id` 键保存在 `~/.pi/agent/model-config-payloads.json`（或 `<PI_CODING_AGENT_DIR>/model-config-payloads.json`）中，并在 `before_provider_request` 对当前模型的最终请求体做浅合并。其他模型不会受到影响，插件不会记录 payload 值。
+额外请求体参数不再写入 `models.json`。插件把它们保存在 `~/.pi/agent/model-config-payloads.json`（或 `<PI_CODING_AGENT_DIR>/model-config-payloads.json`）中。每个对象键都是精确二元 `[provider, model-id]` 标识的 JSON 编码，因此任一 ID 中的 `/` 都不会产生歧义。插件在 `before_provider_request` 对当前模型的最终请求体做浅合并；其他模型不会受到影响，插件不会记录 payload 值。
 
 string、boolean 和 JSON 值都会作为输入写入一个私有 JSON 对象；JSON 值会在保存前解析。有效的旧 `extraPayload` 内容会在对应模型下次保存时迁移；格式损坏的内容会在成功保存后删除。
 

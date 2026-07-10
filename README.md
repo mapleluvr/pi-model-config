@@ -88,7 +88,7 @@ Pi owns native provider registration and model refresh. After saving, reopen `/m
 
 ## Request payloads
 
-Extra request-body values are extension data, not `models.json` fields. The extension stores them in `~/.pi/agent/model-config-payloads.json` (or `<PI_CODING_AGENT_DIR>/model-config-payloads.json`) under exact `provider/model-id` keys. On `before_provider_request`, the selected model's object is shallowly merged into its outgoing payload. Other models are unchanged, and payload values are never logged.
+Extra request-body values are extension data, not `models.json` fields. The extension stores them in `~/.pi/agent/model-config-payloads.json` (or `<PI_CODING_AGENT_DIR>/model-config-payloads.json`). Each object key is the JSON encoding of the exact two-element `[provider, model-id]` identity, so `/` characters in either ID remain unambiguous. On `before_provider_request`, the selected model's object is shallowly merged into its outgoing payload. Other models are unchanged, and payload values are never logged.
 
 Payload parameters accept string, boolean, and JSON values as inputs to one private JSON object. JSON values are parsed before saving. Valid legacy `extraPayload` entries migrate when that model is next saved; malformed entries are removed after a successful save.
 

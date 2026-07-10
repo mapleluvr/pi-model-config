@@ -8,7 +8,15 @@ for (const file of ["README.md", "README-CN.md"]) {
     assert.match(content, /1\.1\.0/);
     assert.match(content, /JSONC/);
     assert.match(content, /model-config-payloads\.json/);
+    assert.match(content, /\[provider, model-id\]/);
     assert.match(content, /max/);
     assert.doesNotMatch(content, /Register configured providers at Pi startup|启动时从 `models\.json` 注册/);
   });
 }
+
+test("package-lock root metadata matches the package version", () => {
+  const packageJson = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const packageLock = JSON.parse(fs.readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+  assert.equal(packageLock.version, packageJson.version);
+  assert.equal(packageLock.packages[""].version, packageJson.version);
+});

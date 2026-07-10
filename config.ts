@@ -41,7 +41,7 @@ function parseModelsDocument(filePath: string, raw: string): ModelsConfig {
 export function readModelsConfig(filePath = getModelsPath()): ModelsConfig {
   if (!fs.existsSync(filePath)) return { providers: {} };
   const raw = fs.readFileSync(filePath, "utf8");
-  if (!raw.trim()) return { providers: {} };
+  if (!raw.trim()) throw new ModelsConfigError(filePath, "file is blank");
   return parseModelsDocument(filePath, raw);
 }
 

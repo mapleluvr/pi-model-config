@@ -9,8 +9,8 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { getModelsPath, readModelsConfig, writeModelsConfig } from "./config.ts";
 import {
-  getModelPayload, mergePayloadIntoRequest, moveModelPayload, removeModelPayload,
-  removeProviderPayloads, setModelPayload,
+  copyModelPayload, copyProviderPayloads, getModelPayload, mergePayloadIntoRequest,
+  moveProviderPayloads, removeModelPayload, removeProviderPayloads, setModelPayload,
 } from "./payload-config.ts";
 import {
   applyCompatBooleanChoice, applyCompatObjectChoice, COMPAT_BOOLEAN_FIELDS,
@@ -811,9 +811,17 @@ async function manageProviders(
     if (action.startsWith("复制")) {
       const newId = await promptText(ctx, "复制 Provider", "输入新 ID", `${providerId}-copy`);
       if (newId === undefined || !newId.trim()) continue;
+      const copyId = newId.trim();
       const nextConfig = cloneModelsConfig(config);
-      nextConfig.providers[newId.trim()] = structuredClone(existing);
-      if (persistNextConfig(ctx, nextConfig)) config = nextConfig;
+      nextConfig.providers[copyId] = structuredClone(existing);
+      if (persistNextConfig(ctx, nextConfig)) {
+        config = nextConfig;
+        try {
+          copyProviderPayloads(providerId, copyId, (existing.models ?? []).map((model) => model.id));
+        } catch (error) {
+          notifyError(ctx, error);
+        }
+      }
       continue;
     }
     if (action.startsWith("管理")) {
@@ -843,19 +851,20 @@ async function manageProviders(
     if (action.startsWith("编辑")) {
       const result = await editProvider(ctx, { ...existing, _providerId: providerId });
       if (!result) continue;
+      if (result.providerId !== providerId && Object.hasOwn(config.providers, result.providerId)) {
+        ctx.ui.notify(`Provider "${result.providerId}" 已存在`, "error");
+        continue;
+      }
       const nextConfig = cloneModelsConfig(config);
       delete nextConfig.providers[providerId];
       nextConfig.providers[result.providerId] = structuredClone(result.config);
       if (persistNextConfig(ctx, nextConfig)) {
         config = nextConfig;
         if (result.providerId !== providerId) {
-          for (const model of existing.models ?? []) {
-            try {
-              moveModelPayload(providerId, model.id, result.providerId, model.id);
-            } catch (error) {
-              notifyError(ctx, error);
-              break;
-            }
+          try {
+            moveProviderPayloads(providerId, result.providerId, (existing.models ?? []).map((model) => model.id));
+          } catch (error) {
+            notifyError(ctx, error);
           }
         }
       }
@@ -932,7 +941,14 @@ async function manageModels(
       modelCopy.name = `${existing.name || existing.id} (Copy)`;
       const nextConfig = cloneModelsConfig(config);
       (nextConfig.providers[providerId]!.models ??= []).push(modelCopy);
-      if (persistNextConfig(ctx, nextConfig)) config = nextConfig;
+      if (persistNextConfig(ctx, nextConfig)) {
+        config = nextConfig;
+        try {
+          copyModelPayload(providerId, existing.id, providerId, modelCopy.id);
+        } catch (error) {
+          notifyError(ctx, error);
+        }
+      }
       continue;
     }
     if (action.startsWith("编辑")) {
