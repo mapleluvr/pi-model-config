@@ -812,6 +812,10 @@ async function manageProviders(
       const newId = await promptText(ctx, "复制 Provider", "输入新 ID", `${providerId}-copy`);
       if (newId === undefined || !newId.trim()) continue;
       const copyId = newId.trim();
+      if (Object.hasOwn(config.providers, copyId)) {
+        ctx.ui.notify(`Provider "${copyId}" 已存在`, "error");
+        continue;
+      }
       const nextConfig = cloneModelsConfig(config);
       nextConfig.providers[copyId] = structuredClone(existing);
       if (persistNextConfig(ctx, nextConfig)) {

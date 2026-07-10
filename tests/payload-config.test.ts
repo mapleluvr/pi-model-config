@@ -44,20 +44,41 @@ test("keeps slash-containing provider and model identities unambiguous during cl
   assert.deepEqual(getModelPayload("alpha/beta", "model"), { owner: "alpha/beta" });
 }));
 
-test("reads and migrates slash-free-provider legacy keys without exposing them to slash providers", () => withAgentDir((agentDir) => {
+test("keeps ambiguous legacy delimiter keys inert for slash-containing identities", () => withAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "model-config-payloads.json");
+  const ambiguousKey = "alpha/beta/model";
+  const original = {
+    version: 1,
+    extraPayloads: { [ambiguousKey]: { legacy: true } },
+  };
+  fs.writeFileSync(filePath, `${JSON.stringify(original, null, 2)}\n`);
+
+  assert.equal(getModelPayload("alpha", "beta/model"), undefined);
+  assert.equal(getModelPayload("alpha/beta", "model"), undefined);
+  copyModelPayload("alpha", "beta/model", "target", "copy");
+  moveModelPayload("alpha/beta", "model", "target", "moved");
+  copyProviderPayloads("alpha", "target", ["beta/model"]);
+  moveProviderPayloads("alpha/beta", "target", ["model"]);
+  removeModelPayload("alpha", "beta/model");
+  removeProviderPayloads("alpha");
+
+  assert.equal(getModelPayload("target", "copy"), undefined);
+  assert.equal(getModelPayload("target", "moved"), undefined);
+  assert.deepEqual(readPayloadConfig().extraPayloads, original.extraPayloads);
+}));
+
+test("reads and migrates only unambiguous legacy delimiter keys", () => withAgentDir((agentDir) => {
   const filePath = path.join(agentDir, "model-config-payloads.json");
   fs.writeFileSync(filePath, `${JSON.stringify({
     version: 1,
-    extraPayloads: { "alpha/beta/model": { legacy: true } },
+    extraPayloads: { "alpha/model": { legacy: true } },
   }, null, 2)}\n`);
 
-  assert.deepEqual(getModelPayload("alpha", "beta/model"), { legacy: true });
-  assert.equal(getModelPayload("alpha/beta", "model"), undefined);
-
-  moveModelPayload("alpha", "beta/model", "alpha/beta", "model");
-  assert.equal(getModelPayload("alpha", "beta/model"), undefined);
-  assert.deepEqual(getModelPayload("alpha/beta", "model"), { legacy: true });
-  assert.equal(Object.hasOwn(readPayloadConfig().extraPayloads, "alpha/beta/model"), false);
+  assert.deepEqual(getModelPayload("alpha", "model"), { legacy: true });
+  moveModelPayload("alpha", "model", "target", "model");
+  assert.equal(getModelPayload("alpha", "model"), undefined);
+  assert.deepEqual(getModelPayload("target", "model"), { legacy: true });
+  assert.equal(Object.hasOwn(readPayloadConfig().extraPayloads, "alpha/model"), false);
 }));
 
 test("moves and removes payload identities", () => withAgentDir(() => {

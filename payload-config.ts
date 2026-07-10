@@ -39,7 +39,13 @@ function parseModelPayloadKey(key: string): ModelPayloadIdentity | undefined {
 }
 
 function legacyModelPayloadKey(provider: string, modelId: string): string | undefined {
-  return provider.includes("/") ? undefined : `${provider}/${modelId}`;
+  if (provider.includes("/") || modelId.includes("/")) return undefined;
+  return `${provider}/${modelId}`;
+}
+
+function isUnambiguousLegacyModelPayloadKey(key: string): boolean {
+  const separator = key.indexOf("/");
+  return separator >= 0 && separator === key.lastIndexOf("/");
 }
 
 export class PayloadConfigError extends Error {
@@ -139,7 +145,12 @@ export function removeProviderPayloads(provider: string): void {
   const legacyPrefix = provider.includes("/") ? undefined : `${provider}/`;
   for (const key of Object.keys(config.extraPayloads)) {
     const identity = parseModelPayloadKey(key);
-    if (identity?.[0] === provider || (!identity && legacyPrefix !== undefined && key.startsWith(legacyPrefix))) {
+    if (identity?.[0] === provider || (
+      !identity &&
+      legacyPrefix !== undefined &&
+      isUnambiguousLegacyModelPayloadKey(key) &&
+      key.startsWith(legacyPrefix)
+    )) {
       delete config.extraPayloads[key];
     }
   }

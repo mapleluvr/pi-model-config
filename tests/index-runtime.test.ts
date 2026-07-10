@@ -242,6 +242,33 @@ test("provider rename collision preserves both native providers and private payl
   });
 });
 
+test("provider copy collision preserves both native providers and private payloads", async () => {
+  await withRuntimeAgentDir(async () => {
+    const initial = {
+      providers: {
+        source: { models: [{ id: "source/model" }] },
+        target: { models: [{ id: "target/model" }] },
+      },
+    };
+    writeModelsConfig(initial);
+    setModelPayload("source", "source/model", { owner: "source" });
+    setModelPayload("target", "target/model", { owner: "target" });
+    const notifications: Array<{ message: string; level: string }> = [];
+
+    await runModelConfigCommand({
+      selects: ["管理 Providers", "编辑 [source]", "复制 Provider", "返回主菜单", "退出"],
+      editors: ["target"],
+      confirms: [],
+      customs: [],
+    }, { notifications });
+
+    assert.deepEqual(readModelsConfig(), initial);
+    assert.deepEqual(getModelPayload("source", "source/model"), { owner: "source" });
+    assert.deepEqual(getModelPayload("target", "target/model"), { owner: "target" });
+    assert.ok(notifications.some(({ message, level }) => level === "error" && message.includes("target") && message.includes("已存在")));
+  });
+});
+
 test("successful provider copy copies payloads for every copied model", async () => {
   await withRuntimeAgentDir(async () => {
     writeModelsConfig({
