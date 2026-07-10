@@ -44,6 +44,15 @@ test("moves and removes payload identities", () => withAgentDir(() => {
   assert.deepEqual(readPayloadConfig().extraPayloads, { "other/one": { c: 3 } });
 }));
 
+test("does not migrate a payload until the caller has committed the native identity", () => withAgentDir(() => {
+  setModelPayload("local", "old", { seed: 7 });
+  assert.deepEqual(getModelPayload("local", "old"), { seed: 7 });
+  assert.equal(getModelPayload("local", "new"), undefined);
+  moveModelPayload("local", "old", "local", "new");
+  assert.equal(getModelPayload("local", "old"), undefined);
+  assert.deepEqual(getModelPayload("local", "new"), { seed: 7 });
+}));
+
 test("fails closed for malformed private payload configuration without overwriting it", () => withAgentDir((agentDir) => {
   const filePath = path.join(agentDir, "model-config-payloads.json");
   fs.writeFileSync(filePath, "{ broken");

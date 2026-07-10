@@ -36,6 +36,13 @@ test("model merge retains omitted or undefined native fields and clears explicit
   });
 });
 
+test("only explicit null clears a native field", () => {
+  const retained = mergeModelConfig({ id: "model", headers: { "X-Keep": "yes" } }, { id: "model", name: "Renamed" });
+  assert.deepEqual(retained.headers, { "X-Keep": "yes" });
+  const cleared = mergeModelConfig(retained, { headers: null });
+  assert.equal(cleared.headers, undefined);
+});
+
 test("cost tiers require a positive integer threshold and non-negative finite rates", () => {
   assert.deepEqual(validateCostTier({ inputTokensAbove: 272000, input: 10, output: 45, cacheRead: 1, cacheWrite: 12.5 }), {
     inputTokensAbove: 272000, input: 10, output: 45, cacheRead: 1, cacheWrite: 12.5,

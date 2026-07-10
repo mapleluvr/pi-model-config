@@ -8,9 +8,16 @@
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { getModelsPath, readModelsConfig, writeModelsConfig } from "./config.ts";
-import { getModelPayload, mergePayloadIntoRequest } from "./payload-config.ts";
-import { applyCompatBooleanChoice, type CompatBooleanChoice } from "./compat-settings.ts";
-import type { ModelsConfig, ProviderConfig, ModelConfig, ExtraPayloadParam } from "./types.ts";
+import {
+  getModelPayload, mergePayloadIntoRequest, moveModelPayload, removeModelPayload,
+  removeProviderPayloads, setModelPayload,
+} from "./payload-config.ts";
+import {
+  applyCompatBooleanChoice, applyCompatObjectChoice, COMPAT_BOOLEAN_FIELDS,
+  COMPAT_JSON_OBJECT_FIELDS, THINKING_FORMATS, type CompatBooleanChoice,
+} from "./compat-settings.ts";
+import { mergeModelConfig, mergeProviderConfig, replaceCostTiers, validateCostTier } from "./model-fields.ts";
+import { THINKING_LEVELS, type ModelCostTier, type ModelsConfig, type ProviderConfig, type ModelConfig } from "./types.ts";
 import { searchableSelect, type SearchableSelectOption } from "./searchable-select.ts";
 import { searchableMultiSelect } from "./searchable-multi-select.ts";
 import { buildToolSelectionOptions, normalizeToolList } from "./tool-options.ts";
@@ -205,18 +212,29 @@ async function promptText(
   defaultValue?: string,
 ): Promise<string | undefined> {
   const result = await ctx.ui.editor(
-    `${title}\n\n${message}${defaultValue != null ? `\n\n当前值: ${defaultValue}` : ""}`,
+    `${title}\n\n${message}${defaultValue != null ? `\n\nCurrent value: ${defaultValue}` : ""}`,
     defaultValue ?? "",
   );
-  return result?.trim() || undefined;
+  return result === undefined ? undefined : result.trim();
 }
 
-function stripUndefined<T extends Record<string, any>>(obj: T): T {
-  const result = { ...obj };
-  for (const key of Object.keys(result)) {
-    if (result[key] === undefined) delete result[key];
-  }
-  return result;
+function cloneModelsConfig(config: ModelsConfig): ModelsConfig {
+  return structuredClone(config);
+}
+
+function notifyError(ctx: ExtensionCommandContext, error: unknown): void {
+  ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function payloadLabel(key: string, value: unknown): string {
+  const type = typeof value === "boolean" ? "bool" : typeof value === "string" ? "string" : "json";
+  const serialized = typeof value === "string" ? value : JSON.stringify(value);
+  const preview = serialized.length > 40 ? `${serialized.slice(0, 37)}...` : serialized;
+  return `[${type}] ${key} = ${preview}`;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -248,20 +266,22 @@ async function editProvider(
   ctx: ExtensionCommandContext,
   existing?: ProviderConfig & { _providerId?: string },
 ): Promise<{ providerId: string; config: ProviderConfig } | null> {
-  const isNew = !existing;
-  const providerId = existing?._providerId
-    || await promptText(ctx, "添加 Provider", "输入 Provider ID（唯一标识）：\n例如: ollama, my-llm, openrouter");
-
-  if (!providerId?.trim()) {
+  const { _providerId: existingId, ...existingProvider } = existing ?? {};
+  const base: ProviderConfig = existing ? existingProvider : { models: [] };
+  const providerId = await promptText(
+    ctx,
+    existing ? "编辑 Provider" : "添加 Provider",
+    "输入 Provider ID（唯一标识）：\n例如: ollama, my-llm, openrouter",
+    existingId,
+  );
+  if (providerId === undefined) return null;
+  if (!providerId.trim()) {
     ctx.ui.notify("Provider ID 不能为空", "error");
     return null;
   }
 
-  const base: ProviderConfig = existing ?? { models: [] };
-
   const name = await promptText(ctx, `Provider: ${providerId}`, "显示名称（可选）", base.name);
   if (name === undefined) return null;
-
   const baseUrl = await promptText(ctx, `Provider: ${providerId}`, "API Base URL:\n例如 http://localhost:11434/v1", base.baseUrl);
   if (baseUrl === undefined) return null;
 
@@ -276,154 +296,248 @@ async function editProvider(
   ];
   const apiChoice = await ctx.ui.select(`Provider: ${providerId} - API 类型`, apiTypes);
   if (apiChoice === undefined) return null;
-
   const apiKey = await promptText(
-    ctx, `Provider: ${providerId}`,
+    ctx,
+    `Provider: ${providerId}`,
     "API Key:\n  字面值: sk-xxx\n  环境变量: $MY_VAR\n  命令: !op read ...\n留空 = 无认证",
     base.apiKey,
   );
   if (apiKey === undefined) return null;
-
   const authChoice = await ctx.ui.select(`Provider: ${providerId} - Auth Header`, [
     "否 - 不自动添加 Bearer",
     "是 - 添加 Authorization: Bearer 头",
   ]);
   if (authChoice === undefined) return null;
 
-  const config: ProviderConfig = stripUndefined({
-    name: name || undefined,
-    baseUrl: baseUrl || undefined,
-    api: apiChoice?.split(" - ")[0]?.trim() || "openai-completions",
-    apiKey: apiKey || undefined,
-    authHeader: authChoice?.includes("是") || undefined,
-    models: base.models || [],
-    compat: base.compat,
-  });
+  const changes: Record<string, unknown> = {
+    name: name === "" ? null : name,
+    baseUrl: baseUrl === "" ? null : baseUrl,
+    api: apiChoice.split(" - ")[0]?.trim() || "openai-completions",
+    apiKey: apiKey === "" ? null : apiKey,
+    authHeader: authChoice.includes("是"),
+  };
 
   const doCompat = await ctx.ui.confirm(`Provider: ${providerId}`, "配置高级兼容性选项？");
   if (doCompat) {
     const compat = await editCompat(ctx, providerId, base.compat);
-    if (compat) config.compat = compat;
+    if (compat !== undefined) changes.compat = Object.keys(compat).length > 0 ? compat : null;
   }
 
-  // 如果还没有 models，询问是否自动拉取
-  const finalConfig = stripUndefined(config);
-  if ((!finalConfig.models || finalConfig.models.length === 0) && finalConfig.baseUrl) {
+  const config = mergeProviderConfig(base, changes);
+  if ((!config.models || config.models.length === 0) && config.baseUrl) {
     const doFetch = await ctx.ui.confirm(
       `Provider: ${providerId}`,
-      "当前没有配置任何 Model。要自动从 API 端点拉取模型列表吗？"
+      "当前没有配置任何 Model。要自动从 API 端点拉取模型列表吗？",
     );
     if (doFetch) {
-      // 临时构造完整 provider 用于 fetch
-      const tempProvider: ProviderConfig = { ...finalConfig };
-      const fetched = await fetchModelsFromProvider(ctx, providerId, tempProvider);
-      if (fetched && fetched.length > 0) {
-        finalConfig.models = fetched;
-      }
+      const fetched = await fetchModelsFromProvider(ctx, providerId, config);
+      if (fetched && fetched.length > 0) config.models = fetched;
     }
   }
 
-  return { providerId: providerId.trim(), config: finalConfig };
+  return { providerId: providerId.trim(), config };
 }
 
 // ═══════════════════════════════════════════════════════
 // Model Editor
 // ═══════════════════════════════════════════════════════
 
+interface ModelEditResult {
+  model: ModelConfig;
+  payload?: Record<string, unknown>;
+  removeLegacyPayload: boolean;
+}
+
+function parseLegacyPayload(value: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const payload: Record<string, unknown> = {};
+  for (const row of value) {
+    if (!isPlainObject(row) || typeof row.key !== "string" || !row.key.trim() || typeof row.type !== "string" || typeof row.value !== "string") {
+      return undefined;
+    }
+    if (row.type === "string") payload[row.key] = row.value;
+    else if (row.type === "bool" && (row.value === "true" || row.value === "false")) payload[row.key] = row.value === "true";
+    else if (row.type === "json") {
+      try {
+        payload[row.key] = JSON.parse(row.value);
+      } catch {
+        return undefined;
+      }
+    } else return undefined;
+  }
+  return payload;
+}
+
+function loadModelPayload(
+  ctx: ExtensionCommandContext,
+  providerId: string,
+  existing?: ModelConfig,
+): { payload?: Record<string, unknown>; removeLegacyPayload: boolean } {
+  if (!existing) return { removeLegacyPayload: false };
+  const privatePayload = getModelPayload(providerId, existing.id);
+  const legacy = (existing as Record<string, unknown>)["extraPayload"];
+  if (privatePayload) return { payload: privatePayload, removeLegacyPayload: Object.hasOwn(existing, "extraPayload") };
+  if (!Object.hasOwn(existing, "extraPayload")) return { removeLegacyPayload: false };
+  const migrated = parseLegacyPayload(legacy);
+  if (!migrated) {
+    ctx.ui.notify("Legacy extraPayload could not be migrated; it was left unchanged", "error");
+    return { removeLegacyPayload: false };
+  }
+  return { payload: migrated, removeLegacyPayload: true };
+}
+
+function finiteNumberOr(value: string, fallback: number): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+async function manageCostTiers(
+  ctx: ExtensionCommandContext,
+  modelId: string,
+  existingTiers?: ModelCostTier[],
+): Promise<ModelCostTier[] | undefined> {
+  const tiers = existingTiers ? existingTiers.map((tier) => ({ ...tier })) : [];
+
+  while (true) {
+    const items = tiers.map((tier, index) =>
+      `Edit tier ${index + 1}: above ${tier.inputTokensAbove}, input ${tier.input}, output ${tier.output}`,
+    );
+    items.push("Add tier", "Delete tier", "Done");
+    const choice = await ctx.ui.select(`Cost tiers - ${modelId}`, items);
+    if (choice === undefined) return undefined;
+    if (choice === "Done") return tiers;
+
+    if (choice === "Delete tier") {
+      if (tiers.length === 0) continue;
+      const target = await ctx.ui.select(`Cost tiers - ${modelId}`, tiers.map((tier, index) =>
+        `Delete tier ${index + 1}: above ${tier.inputTokensAbove}`,
+      ));
+      const match = target?.match(/^Delete tier (\d+):/);
+      if (match) tiers.splice(Number.parseInt(match[1]!, 10) - 1, 1);
+      continue;
+    }
+
+    const editMatch = choice.match(/^Edit tier (\d+):/);
+    const index = choice === "Add tier" ? undefined : editMatch ? Number.parseInt(editMatch[1]!, 10) - 1 : undefined;
+    if (choice !== "Add tier" && index === undefined) continue;
+    const current = index === undefined ? undefined : tiers[index];
+    const threshold = await promptText(ctx, `Cost tier - ${modelId}`, "Input tokens above:", current ? String(current.inputTokensAbove) : undefined);
+    if (threshold === undefined) continue;
+    const inputRate = await promptText(ctx, `Cost tier - ${modelId}`, "Input rate:", current ? String(current.input) : undefined);
+    if (inputRate === undefined) continue;
+    const outputRate = await promptText(ctx, `Cost tier - ${modelId}`, "Output rate:", current ? String(current.output) : undefined);
+    if (outputRate === undefined) continue;
+    const cacheReadRate = await promptText(ctx, `Cost tier - ${modelId}`, "Cache read rate:", current ? String(current.cacheRead) : undefined);
+    if (cacheReadRate === undefined) continue;
+    const cacheWriteRate = await promptText(ctx, `Cost tier - ${modelId}`, "Cache write rate:", current ? String(current.cacheWrite) : undefined);
+    if (cacheWriteRate === undefined) continue;
+
+    const candidate = validateCostTier({
+      inputTokensAbove: Number.parseInt(threshold, 10),
+      input: Number.parseFloat(inputRate),
+      output: Number.parseFloat(outputRate),
+      cacheRead: Number.parseFloat(cacheReadRate),
+      cacheWrite: Number.parseFloat(cacheWriteRate),
+    });
+    if (!candidate) {
+      ctx.ui.notify("Cost tier requires a positive integer threshold and non-negative finite rates", "error");
+      continue;
+    }
+    if (index === undefined) tiers.push(candidate);
+    else tiers[index] = candidate;
+  }
+}
+
 async function editModel(
   ctx: ExtensionCommandContext,
   providerId: string,
   existing?: ModelConfig,
-): Promise<ModelConfig | null> {
-  const isNew = !existing;
-
-  const modelId = isNew
-    ? await promptText(ctx, `Model - ${providerId}`, "Model ID（如 gpt-4o, llama3.1:8b）")
-    : existing!.id;
-
-  if (!modelId?.trim()) {
-    if (isNew) ctx.ui.notify("Model ID 不能为空", "error");
+): Promise<ModelEditResult | null> {
+  const modelId = await promptText(
+    ctx,
+    `Model - ${providerId}`,
+    "Model ID（如 gpt-4o, llama3.1:8b）",
+    existing?.id,
+  );
+  if (modelId === undefined) return null;
+  if (!modelId.trim()) {
+    ctx.ui.notify("Model ID 不能为空", "error");
     return null;
   }
 
   const base: ModelConfig = existing ?? {
-    id: modelId.trim(),
-    reasoning: false,
-    input: ["text"],
-    contextWindow: 128000,
-    maxTokens: 16384,
+    id: modelId.trim(), reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   };
-
+  const payloadState = loadModelPayload(ctx, providerId, existing);
+  let payload = payloadState.payload;
   const name = await promptText(ctx, `Model: ${modelId}`, "显示名称（留空使用 ID）", base.name);
   if (name === undefined) return null;
-
   const reasoningChoice = await ctx.ui.select(`Model: ${modelId} - Extended Thinking`, [
-    `否${base.reasoning ? "" : " ← 当前"}`,
-    `是${base.reasoning ? " ← 当前" : ""}`,
+    `否${base.reasoning ? "" : " ← 当前"}`, `是${base.reasoning ? " ← 当前" : ""}`,
   ]);
   if (reasoningChoice === undefined) return null;
-
   const inputChoice = await ctx.ui.select(`Model: ${modelId} - 输入类型`, [
-    `仅文本${!base.input?.includes("image") ? " ← 当前" : ""}`,
-    `文本 + 图片${base.input?.includes("image") ? " ← 当前" : ""}`,
+    `仅文本${!base.input?.includes("image") ? " ← 当前" : ""}`, `文本 + 图片${base.input?.includes("image") ? " ← 当前" : ""}`,
   ]);
   if (inputChoice === undefined) return null;
-
   const ctxWin = await promptText(ctx, `Model: ${modelId}`, "Context Window (tokens):", String(base.contextWindow ?? 128000));
   if (ctxWin === undefined) return null;
-
   const maxTok = await promptText(ctx, `Model: ${modelId}`, "Max Output Tokens:", String(base.maxTokens ?? 16384));
   if (maxTok === undefined) return null;
-
   const costIn = await promptText(ctx, `Model: ${modelId}`, "输入价格 ($/百万 tokens):", String(base.cost?.input ?? 0));
   if (costIn === undefined) return null;
-
   const costOut = await promptText(ctx, `Model: ${modelId}`, "输出价格 ($/百万 tokens):", String(base.cost?.output ?? 0));
   if (costOut === undefined) return null;
 
-  const model: ModelConfig = {
-    id: base.id,
-    name: name || undefined,
-    reasoning: reasoningChoice?.includes("是") || false,
-    input: inputChoice?.includes("图片") ? ["text", "image"] : ["text"],
-    contextWindow: parseInt(ctxWin, 10) || 128000,
-    maxTokens: parseInt(maxTok, 10) || 16384,
-    cost: {
-      input: parseFloat(costIn) || 0,
-      output: parseFloat(costOut) || 0,
-      cacheRead: base.cost?.cacheRead || 0,
-      cacheWrite: base.cost?.cacheWrite || 0,
-    },
+  const cost = {
+    ...(base.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+    input: finiteNumberOr(costIn, 0), output: finiteNumberOr(costOut, 0),
+  };
+  const changes: Record<string, unknown> = {
+    id: modelId.trim(),
+    name: name === "" ? null : name,
+    reasoning: reasoningChoice.includes("是"),
+    input: inputChoice.includes("图片") ? ["text", "image"] : ["text"],
+    contextWindow: ctxWin === "" ? null : Number.parseInt(ctxWin, 10) || 128000,
+    maxTokens: maxTok === "" ? null : Number.parseInt(maxTok, 10) || 16384,
+    cost,
   };
 
-  if (model.reasoning) {
+  if (changes.reasoning) {
     const doMap = await ctx.ui.confirm(`Model: ${modelId}`, "配置 Thinking Level Map？");
     if (doMap) {
-      const levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
-      const thinkingMap: Record<string, string | null> = {};
-      for (const level of levels) {
-        const current = base.thinkingLevelMap?.[level];
-        const val = await promptText(
-          ctx, `Model: ${modelId} - Thinking: ${level}`,
+      const thinkingMap = { ...base.thinkingLevelMap };
+      for (const level of THINKING_LEVELS) {
+        const current = thinkingMap[level];
+        const value = await promptText(
+          ctx,
+          `Model: ${modelId} - Thinking: ${level}`,
           'null = 禁用, "default" = 默认, 或自定义',
-          current === null ? "null" : (current || ""),
+          current === null ? "null" : current ?? "",
         );
-        if (val === undefined) break;
-        if (val === "" || val === "default") continue;
-        thinkingMap[level] = val === "null" ? null : val;
+        if (value === undefined) break;
+        if (value === "default") delete thinkingMap[level];
+        else if (value === "null") thinkingMap[level] = null;
+        else if (value !== "") thinkingMap[level] = value;
       }
-      if (Object.keys(thinkingMap).length > 0) model.thinkingLevelMap = thinkingMap;
+      changes.thinkingLevelMap = Object.keys(thinkingMap).length > 0 ? thinkingMap : null;
     }
+  }
+
+  const doTiers = await ctx.ui.confirm(`Model: ${modelId}`, "管理 Cost tiers？");
+  if (doTiers) {
+    const tiers = await manageCostTiers(ctx, modelId, base.cost?.tiers);
+    if (tiers !== undefined) changes.cost = replaceCostTiers(cost, tiers);
   }
 
   const doCompat = await ctx.ui.confirm(`Model: ${modelId}`, "配置高级兼容性选项？");
   if (doCompat) {
     const compat = await editCompat(ctx, modelId, base.compat);
-    if (compat) model.compat = compat;
+    if (compat !== undefined) changes.compat = Object.keys(compat).length > 0 ? compat : null;
   }
 
-  // ── Pi 默认参数展示 + 自定义 Payload 参数 ──
+  const model = mergeModelConfig(base, changes);
   const doPayload = await ctx.ui.confirm(
     `Model: ${modelId}`,
     `【Pi Agent 默认参数】\n` +
@@ -432,196 +546,108 @@ async function editModel(
     `  reasoning      = ${model.reasoning ? "是" : "否"}\n` +
     `  input          = ${(model.input || ["text"]).join(", ")}\n` +
     `  cost           = input $${model.cost?.input || 0} / output $${model.cost?.output || 0} (per 1M tokens)\n` +
-    (model.thinkingLevelMap
-      ? `  thinkingMap    = ${JSON.stringify(model.thinkingLevelMap)}\n`
-      : "") +
-    `\n以上为 Pi 默认模型参数（可在前面步骤中修改）。\n` +
+    (model.thinkingLevelMap ? `  thinkingMap    = ${JSON.stringify(model.thinkingLevelMap)}\n` : "") +
     `\n是否管理 自定义 Payload 参数？（附加到 API 请求体的额外键值对）`,
   );
   if (doPayload) {
-    const extraParams = await editExtraPayload(ctx, modelId, base.extraPayload);
-    if (extraParams) model.extraPayload = extraParams;
+    const editedPayload = await editExtraPayload(ctx, modelId, payload);
+    if (editedPayload !== undefined) payload = editedPayload;
   }
 
-  return stripUndefined(model);
+  return { model, payload, removeLegacyPayload: payloadState.removeLegacyPayload };
 }
 
 // ═══════════════════════════════════════════════════════
 // Extra Payload Editor — 自定义 API 请求体参数
 // ═══════════════════════════════════════════════════════
 
-/** 验证 JSON 字符串是否合法 */
-function isValidJson(s: string): boolean {
-  try {
-    JSON.parse(s);
-    return true;
-  } catch {
-    return false;
+async function editPayloadValue(
+  ctx: ExtensionCommandContext,
+  modelId: string,
+  key: string,
+  type: "string" | "bool" | "json",
+  current?: unknown,
+): Promise<unknown | undefined> {
+  if (type === "bool") {
+    const value = await ctx.ui.select(`Payload - ${modelId} - ${key}`, ["true", "false"]);
+    return value === undefined ? undefined : value === "true";
   }
-}
-
-/** 格式化 param 展示 */
-function paramLabel(p: ExtraPayloadParam): string {
-  const typeTag = { json: "{ }", string: "abc", bool: "T/F" }[p.type];
-  const preview = p.value.length > 40 ? p.value.slice(0, 37) + "..." : p.value;
-  return `[${typeTag}] ${p.key} = ${preview}`;
+  if (type === "string") {
+    return await promptText(ctx, `Payload - ${modelId} - ${key}`, "输入字符串值：", typeof current === "string" ? current : undefined);
+  }
+  const raw = await promptText(
+    ctx,
+    `Payload - ${modelId} - ${key} (JSON)`,
+    "输入合法 JSON 值：",
+    current === undefined ? undefined : JSON.stringify(current, null, 2),
+  );
+  if (raw === undefined) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    ctx.ui.notify("JSON 格式不合法", "error");
+    return undefined;
+  }
 }
 
 async function editExtraPayload(
   ctx: ExtensionCommandContext,
   modelId: string,
-  existing?: ExtraPayloadParam[],
-): Promise<ExtraPayloadParam[] | undefined> {
-  const params: ExtraPayloadParam[] = existing ? [...existing] : [];
+  existing?: Record<string, unknown>,
+): Promise<Record<string, unknown> | undefined> {
+  const payload = structuredClone(existing ?? {});
 
   while (true) {
-    const items: string[] = params.map((p, i) => `${i + 1}. ${paramLabel(p)}`);
-    items.push("添加参数");
-    items.push("完成");
+    const entries = Object.entries(payload);
+    const items = entries.map(([key, value], index) => `${index + 1}. ${payloadLabel(key, value)}`);
+    items.push("添加参数", "完成");
+    const choice = await ctx.ui.select(`Payload 参数 - ${modelId} (${entries.length} 个)`, items);
+    if (choice === undefined) return undefined;
+    if (choice === "完成") {
+      if (!isPlainObject(payload)) {
+        ctx.ui.notify("Payload must be a JSON object", "error");
+        continue;
+      }
+      return payload;
+    }
 
-    const choice = await ctx.ui.select(`Payload 参数 - ${modelId} (${params.length} 个)`, items);
-    if (choice === undefined || choice === "完成") break;
-
-    if (choice?.startsWith("添加")) {
-      // 输入 key
+    if (choice === "添加参数") {
       const key = await promptText(ctx, `Payload - ${modelId}`, "参数键名（如 temperature, top_p）：");
-      if (!key) continue;
-
-      // 检查重复
-      if (params.some((p) => p.key === key)) {
+      if (key === undefined || !key.trim()) continue;
+      if (Object.hasOwn(payload, key)) {
         ctx.ui.notify(`参数 "${key}" 已存在`, "warning");
         continue;
       }
-
-      // 选择类型
       const typeChoice = await ctx.ui.select(`Payload - ${modelId} - ${key}`, [
-        "string - 字符串",
-        "bool   - 布尔值 (true/false)",
-        "json   - JSON 对象或数组",
+        "string - 字符串", "bool - 布尔值 (true/false)", "json - JSON 值",
       ]);
-      if (!typeChoice) continue;
-      const type = typeChoice.includes("bool") ? "bool"
-        : typeChoice.includes("json") ? "json"
-        : "string";
-
-      // 输入值
-      let value: string | undefined;
-      if (type === "bool") {
-        const boolChoice = await ctx.ui.select(`Payload - ${modelId} - ${key}`, [
-          "true",
-          "false",
-        ]);
-        if (boolChoice === undefined) continue;
-        value = boolChoice;
-      } else if (type === "json") {
-        // JSON 类型：循环验证直到合法
-        while (true) {
-          const raw = await promptText(
-            ctx, `Payload - ${modelId} - ${key} (JSON)`,
-            "输入合法 JSON 值（对象或数组）：\n例如: {\"key\": \"value\"} 或 [1, 2, 3]",
-            params.find((p) => p.key === key)?.value,
-          );
-          if (raw === undefined) break; // 用户取消
-          if (!raw.trim()) break;
-          if (isValidJson(raw.trim())) {
-            // 美化 JSON
-            try {
-              value = JSON.stringify(JSON.parse(raw.trim()));
-            } catch {
-              value = raw.trim();
-            }
-            break;
-          }
-          const retry = await ctx.ui.confirm(
-            "JSON 格式不合法",
-            `输入内容不是合法 JSON。\n输入: ${raw.slice(0, 100)}${raw.length > 100 ? "..." : ""}\n\n重试？`,
-          );
-          if (!retry) break;
-        }
-        if (value === undefined) continue;
-        if (!value) continue;
-      } else {
-        // string 类型
-        value = await promptText(
-          ctx, `Payload - ${modelId} - ${key} (string)`,
-          "输入字符串值：",
-          params.find((p) => p.key === key)?.value,
-        );
-        if (value === undefined) continue;
-      }
-
-      params.push({ key: key.trim(), type, value: value.trim() });
+      if (typeChoice === undefined) continue;
+      const type = typeChoice.startsWith("bool") ? "bool" : typeChoice.startsWith("json") ? "json" : "string";
+      const value = await editPayloadValue(ctx, modelId, key, type);
+      if (value === undefined) continue;
+      payload[key] = value;
       ctx.ui.notify(`参数 "${key}" 已添加`, "success");
       continue;
     }
 
-    // 编辑或删除已有参数
-    const idxMatch = choice?.match(/^(\d+)\./);
-    if (idxMatch) {
-      const idx = parseInt(idxMatch[1]!, 10) - 1;
-      if (idx >= 0 && idx < params.length) {
-        const param = params[idx]!;
-        const action = await ctx.ui.select(
-          `Payload: ${paramLabel(param)}`,
-          ["修改", "删除", "返回"],
-        );
-        if (!action || action.startsWith("返回")) continue;
-
-        if (action.startsWith("删除")) {
-          params.splice(idx, 1);
-          ctx.ui.notify(`参数 "${param.key}" 已删除`, "info");
-          continue;
-        }
-
-        if (action.startsWith("修改")) {
-          // 修改值（保持类型不变，但允许在 JSON 类型时重新验证）
-          if (param.type === "bool") {
-            const boolChoice = await ctx.ui.select(
-              `Payload - ${modelId} - ${param.key}`,
-              ["true", "false"],
-            );
-            if (boolChoice !== undefined) {
-              param.value = boolChoice;
-              ctx.ui.notify(`参数 "${param.key}" 已更新`, "success");
-            }
-          } else if (param.type === "json") {
-            while (true) {
-              const raw = await promptText(
-                ctx, `Payload - ${modelId} - ${param.key} (JSON)`,
-                "输入合法 JSON 值：",
-                param.value,
-              );
-              if (raw === undefined) break;
-              if (!raw.trim()) break;
-              if (isValidJson(raw.trim())) {
-                try {
-                  param.value = JSON.stringify(JSON.parse(raw.trim()));
-                } catch {
-                  param.value = raw.trim();
-                }
-                ctx.ui.notify(`参数 "${param.key}" 已更新`, "success");
-                break;
-              }
-              const retry = await ctx.ui.confirm("JSON 不合法", "重试？");
-              if (!retry) break;
-            }
-          } else {
-            const newVal = await promptText(
-              ctx, `Payload - ${modelId} - ${param.key} (string)`,
-              "输入新值：",
-              param.value,
-            );
-            if (newVal !== undefined) {
-              param.value = newVal.trim();
-              ctx.ui.notify(`参数 "${param.key}" 已更新`, "success");
-            }
-          }
-        }
-      }
+    const indexMatch = choice.match(/^(\d+)\./);
+    if (!indexMatch) continue;
+    const entry = entries[Number.parseInt(indexMatch[1]!, 10) - 1];
+    if (!entry) continue;
+    const [key, value] = entry;
+    const action = await ctx.ui.select(`Payload: ${payloadLabel(key, value)}`, ["修改", "删除", "返回"]);
+    if (!action || action === "返回") continue;
+    if (action === "删除") {
+      delete payload[key];
+      ctx.ui.notify(`参数 "${key}" 已删除`, "info");
+      continue;
     }
+    const type = typeof value === "boolean" ? "bool" : typeof value === "string" ? "string" : "json";
+    const nextValue = await editPayloadValue(ctx, modelId, key, type, value);
+    if (nextValue === undefined) continue;
+    payload[key] = nextValue;
+    ctx.ui.notify(`参数 "${key}" 已更新`, "success");
   }
-
-  return params.length > 0 ? params : undefined;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -631,179 +657,208 @@ async function editExtraPayload(
 async function editCompat(
   ctx: ExtensionCommandContext,
   parentId: string,
-  existing?: Record<string, any>,
-): Promise<Record<string, any> | undefined> {
-  const c: Record<string, any> = existing ? { ...existing } : {};
-
-  const boolFields = [
-    { key: "supportsDeveloperRole", label: "supportsDeveloperRole" },
-    { key: "supportsReasoningEffort", label: "supportsReasoningEffort" },
-    { key: "supportsUsageInStreaming", label: "supportsUsageInStreaming" },
-    { key: "requiresToolResultName", label: "requiresToolResultName" },
-    { key: "requiresThinkingAsText", label: "requiresThinkingAsText" },
-    { key: "supportsStrictMode", label: "supportsStrictMode" },
-    { key: "supportsLongCacheRetention", label: "supportsLongCacheRetention" },
-    { key: "supportsEagerToolInputStreaming", label: "supportsEagerToolInputStreaming (Anthropic)" },
-    { key: "forceAdaptiveThinking", label: "forceAdaptiveThinking" },
-    { key: "allowEmptySignature", label: "allowEmptySignature" },
-  ];
+  existing?: Record<string, unknown>,
+): Promise<Record<string, unknown> | undefined> {
+  let c: Record<string, unknown> = existing ? { ...existing } : {};
 
   while (true) {
-    const items = boolFields.map((f) => {
-      const val = c[f.key];
-      return `${val === true ? "[yes]" : val === false ? "[no]" : "[-]"} ${f.label}`;
-    });
-    if (c.maxTokensField) items.push(`maxTokensField = ${c.maxTokensField}`);
-    if (c.thinkingFormat) items.push(`thinkingFormat = ${c.thinkingFormat}`);
-    if (c.cacheControlFormat) items.push(`cacheControlFormat = ${c.cacheControlFormat}`);
-    items.push("完成");
-
+    const items = [
+      ...COMPAT_BOOLEAN_FIELDS.map((field) => {
+        const value = c[field.key];
+        return `${value === true ? "[yes]" : value === false ? "[no]" : "[-]"} ${field.label}`;
+      }),
+      `maxTokensField = ${c.maxTokensField ?? "(unset)"}`,
+      `thinkingFormat = ${c.thinkingFormat ?? "(unset)"}`,
+      `cacheControlFormat = ${c.cacheControlFormat ?? "(unset)"}`,
+      ...COMPAT_JSON_OBJECT_FIELDS.map((field) => `${field.label} = ${c[field.key] === undefined ? "(unset)" : "(set)"}`),
+      "完成",
+    ];
     const choice = await ctx.ui.select(`Compat - ${parentId}`, items);
-    if (choice === undefined || choice === "完成") break;
+    if (choice === undefined) return undefined;
+    if (choice === "完成") return c;
 
-    for (const f of boolFields) {
-      if (choice.includes(f.label)) {
-        const current = c[f.key];
-        const valueChoice = await ctx.ui.select(`Compat - ${parentId} - ${f.label}`, [
-          `${current === undefined ? "[当前] " : ""}不指定 / 使用默认值`,
-          `${current === false ? "[当前] " : ""}false`,
-          `${current === true ? "[当前] " : ""}true`,
-          "返回",
-        ]);
-        if (!valueChoice || valueChoice.startsWith("返回")) break;
-
-        const compatChoice: CompatBooleanChoice = valueChoice.includes("false")
-          ? "false"
-          : valueChoice.includes("true")
-            ? "true"
-            : "default";
-        Object.assign(c, applyCompatBooleanChoice(c, f.key, compatChoice));
-        if (compatChoice === "default") delete c[f.key];
-        break;
-      }
-    }
-    if (choice.includes("maxTokensField")) {
-      const val = await ctx.ui.select(`Compat - ${parentId}`, ["max_completion_tokens", "max_tokens"]);
-      if (val !== undefined) c.maxTokensField = val;
-    }
-    if (choice.includes("thinkingFormat")) {
-      const val = await ctx.ui.select(`Compat - ${parentId}`, [
-        "openai", "openrouter", "deepseek", "together", "qwen", "qwen-chat-template", "(清除)",
+    const boolField = COMPAT_BOOLEAN_FIELDS.find((field) => choice.includes(field.label));
+    if (boolField) {
+      const current = c[boolField.key];
+      const valueChoice = await ctx.ui.select(`Compat - ${parentId} - ${boolField.label}`, [
+        `${current === undefined ? "[当前] " : ""}不指定 / 使用默认值`,
+        `${current === false ? "[当前] " : ""}false`,
+        `${current === true ? "[当前] " : ""}true`,
+        "返回",
       ]);
-      if (val !== undefined) {
-        c.thinkingFormat = val === "(清除)" ? undefined : val;
-        if (!c.thinkingFormat) delete c.thinkingFormat;
-      }
+      if (!valueChoice || valueChoice === "返回") continue;
+      const compatChoice: CompatBooleanChoice = valueChoice.includes("false")
+        ? "false"
+        : valueChoice.includes("true") ? "true" : "default";
+      c = applyCompatBooleanChoice(c, boolField.key, compatChoice);
+      continue;
     }
-    if (choice.includes("cacheControlFormat")) {
-      const val = await ctx.ui.select(`Compat - ${parentId}`, ["anthropic", "(清除)"]);
-      if (val !== undefined) {
-        c.cacheControlFormat = val === "(清除)" ? undefined : val;
-        if (!c.cacheControlFormat) delete c.cacheControlFormat;
-      }
+    if (choice.startsWith("maxTokensField")) {
+      const value = await ctx.ui.select(`Compat - ${parentId}`, ["max_completion_tokens", "max_tokens", "(clear)"]);
+      if (value === "(clear)") delete c.maxTokensField;
+      else if (value !== undefined) c.maxTokensField = value;
+      continue;
+    }
+    if (choice.startsWith("thinkingFormat")) {
+      const value = await ctx.ui.select(`Compat - ${parentId}`, [...THINKING_FORMATS, "(clear)"]);
+      if (value === "(clear)") delete c.thinkingFormat;
+      else if (value !== undefined) c.thinkingFormat = value;
+      continue;
+    }
+    if (choice.startsWith("cacheControlFormat")) {
+      const value = await ctx.ui.select(`Compat - ${parentId}`, ["anthropic", "(clear)"]);
+      if (value === "(clear)") delete c.cacheControlFormat;
+      else if (value !== undefined) c.cacheControlFormat = value;
+      continue;
+    }
+
+    const objectField = COMPAT_JSON_OBJECT_FIELDS.find((field) => choice.startsWith(field.label));
+    if (!objectField) continue;
+    const current = c[objectField.key];
+    const raw = await ctx.ui.editor(
+      `Compat - ${parentId} - ${objectField.label}`,
+      current === undefined ? "" : JSON.stringify(current, null, 2),
+    );
+    if (raw === undefined) continue;
+    if (!raw.trim()) {
+      c = applyCompatObjectChoice(c, objectField.key, undefined);
+      continue;
+    }
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!isPlainObject(parsed)) throw new Error("must be a JSON object");
+      c = applyCompatObjectChoice(c, objectField.key, parsed);
+    } catch (error) {
+      ctx.ui.notify(`Invalid ${objectField.label}: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
   }
-
-  return Object.keys(c).length > 0 ? c : undefined;
 }
 
 // ═══════════════════════════════════════════════════════
 // Provider Management
 // ═══════════════════════════════════════════════════════
 
+function persistNextConfig(ctx: ExtensionCommandContext, nextConfig: ModelsConfig): boolean {
+  try {
+    persistConfig(nextConfig, ctx);
+    return true;
+  } catch (error) {
+    notifyError(ctx, error);
+    return false;
+  }
+}
+
+function updateModelPayloadAfterSave(
+  ctx: ExtensionCommandContext,
+  providerId: string,
+  updated: ModelConfig,
+  payload: Record<string, unknown> | undefined,
+  existing?: ModelConfig,
+): void {
+  try {
+    if (payload && Object.keys(payload).length > 0) setModelPayload(providerId, updated.id, payload);
+    else removeModelPayload(providerId, updated.id);
+    if (existing && existing.id !== updated.id) moveModelPayload(providerId, existing.id, providerId, updated.id);
+  } catch (error) {
+    notifyError(ctx, error);
+  }
+}
+
 async function manageProviders(
   ctx: ExtensionCommandContext,
-  config: ModelsConfig,
-): Promise<void> {
+  initialConfig: ModelsConfig,
+): Promise<ModelsConfig> {
+  let config = initialConfig;
   while (true) {
     const pids = Object.keys(config.providers);
-    const items: string[] = pids.map((pid) => {
-      const p = config.providers[pid]!;
-      return `编辑 [${pid}] ${providerSummary(p)}`;
-    });
-    items.push("添加新 Provider");
-    items.push("返回主菜单");
-
+    const items = pids.map((pid) => `编辑 [${pid}] ${providerSummary(config.providers[pid]!)}`);
+    items.push("添加新 Provider", "返回主菜单");
     const choice = await ctx.ui.select("Provider 管理", items);
-    if (choice === undefined || choice?.startsWith("返回")) return;
+    if (choice === undefined || choice.startsWith("返回")) return config;
 
-    if (choice?.startsWith("添加")) {
+    if (choice.startsWith("添加")) {
       const result = await editProvider(ctx);
-      if (result) {
-        config.providers[result.providerId] = result.config;
-        persistConfig(config, ctx);
-      }
+      if (!result) continue;
+      const nextConfig = cloneModelsConfig(config);
+      nextConfig.providers[result.providerId] = structuredClone(result.config);
+      if (persistNextConfig(ctx, nextConfig)) config = nextConfig;
       continue;
     }
 
-    const match = choice?.match(/^编辑\s+\[(.+?)\]/);
-    if (match) {
-      const pid = match[1]!;
-      const existing = config.providers[pid];
-      if (!existing) continue;
+    const match = choice.match(/^编辑\s+\[(.+?)\]/);
+    if (!match) continue;
+    const providerId = match[1]!;
+    const existing = config.providers[providerId];
+    if (!existing) continue;
+    const action = await ctx.ui.select(`Provider: ${providerId}`, [
+      "编辑设置", "管理 Models", "自动拉取 Model 列表（从 API 发现）", "复制 Provider", "删除 Provider", "返回",
+    ]);
+    if (!action || action.startsWith("返回")) continue;
 
-      const action = await ctx.ui.select(`Provider: ${pid}`, [
-        "编辑设置",
-        "管理 Models",
-        "自动拉取 Model 列表（从 API 发现）",
-        "复制 Provider",
-        "删除 Provider",
-        "返回",
-      ]);
-      if (!action || action.startsWith("返回")) continue;
-
-      if (action.startsWith("删除")) {
-        const ok = await ctx.ui.confirm("确认删除", `删除 Provider "${pid}" 及其所有 Models？`);
-        if (ok) {
-          delete config.providers[pid];
-          persistConfig(config, ctx);
+    if (action.startsWith("删除")) {
+      if (!await ctx.ui.confirm("确认删除", `删除 Provider "${providerId}" 及其所有 Models？`)) continue;
+      const nextConfig = cloneModelsConfig(config);
+      delete nextConfig.providers[providerId];
+      if (persistNextConfig(ctx, nextConfig)) {
+        config = nextConfig;
+        try {
+          removeProviderPayloads(providerId);
+        } catch (error) {
+          notifyError(ctx, error);
         }
-        continue;
       }
-      if (action.startsWith("复制")) {
-        const newId = await promptText(ctx, "复制 Provider", "输入新 ID", `${pid}-copy`);
-        if (newId) {
-          config.providers[newId] = JSON.parse(JSON.stringify(existing));
-          persistConfig(config, ctx);
-        }
-        continue;
+      continue;
+    }
+    if (action.startsWith("复制")) {
+      const newId = await promptText(ctx, "复制 Provider", "输入新 ID", `${providerId}-copy`);
+      if (newId === undefined || !newId.trim()) continue;
+      const nextConfig = cloneModelsConfig(config);
+      nextConfig.providers[newId.trim()] = structuredClone(existing);
+      if (persistNextConfig(ctx, nextConfig)) config = nextConfig;
+      continue;
+    }
+    if (action.startsWith("管理")) {
+      config = await manageModels(ctx, providerId, config);
+      continue;
+    }
+    if (action.startsWith("自动拉取")) {
+      const fetched = await fetchModelsFromProvider(ctx, providerId, existing);
+      if (!fetched || fetched.length === 0) continue;
+      const replace = await ctx.ui.confirm(
+        `发现 ${fetched.length} 个模型`,
+        `拉取到的模型:\n${fetched.map((model) => `  - ${model.id}`).join("\n")}\n\n` +
+        `当前已有 ${(existing.models || []).length} 个模型。\n` +
+        "是 = 替换现有模型\n否 = 合并到现有列表（去重）",
+      );
+      const nextConfig = cloneModelsConfig(config);
+      const nextProvider = nextConfig.providers[providerId]!;
+      if (replace) nextProvider.models = fetched;
+      else {
+        const currentModels = nextProvider.models ?? [];
+        const existingIds = new Set(currentModels.map((model) => model.id));
+        nextProvider.models = [...currentModels, ...fetched.filter((model) => !existingIds.has(model.id))];
       }
-      if (action.startsWith("管理")) {
-        const updated = await manageModels(ctx, pid, existing, config);
-        config.providers[pid] = updated;
-        continue;
-      }
-      if (action.startsWith("自动拉取")) {
-        // 自动拉取模型列表
-        const fetched = await fetchModelsFromProvider(ctx, pid, existing);
-        if (fetched && fetched.length > 0) {
-          const merge = await ctx.ui.confirm(
-            `发现 ${fetched.length} 个模型`,
-            `拉取到的模型:\n${fetched.map((m) => `  - ${m.id}`).join("\n")}\n\n` +
-            `当前已有 ${(existing.models || []).length} 个模型。\n` +
-            `是 = 替换现有模型\n否 = 合并到现有列表（去重）`
-          );
-          if (merge) {
-            existing.models = fetched;
-          } else {
-            // 合并去重
-            const existingIds = new Set((existing.models || []).map((m) => m.id));
-            const newModels = fetched.filter((m) => !existingIds.has(m.id));
-            existing.models = [...(existing.models || []), ...newModels];
+      if (persistNextConfig(ctx, nextConfig)) config = nextConfig;
+      continue;
+    }
+    if (action.startsWith("编辑")) {
+      const result = await editProvider(ctx, { ...existing, _providerId: providerId });
+      if (!result) continue;
+      const nextConfig = cloneModelsConfig(config);
+      delete nextConfig.providers[providerId];
+      nextConfig.providers[result.providerId] = structuredClone(result.config);
+      if (persistNextConfig(ctx, nextConfig)) {
+        config = nextConfig;
+        if (result.providerId !== providerId) {
+          for (const model of existing.models ?? []) {
+            try {
+              moveModelPayload(providerId, model.id, result.providerId, model.id);
+            } catch (error) {
+              notifyError(ctx, error);
+              break;
+            }
           }
-          persistConfig(config, ctx);
         }
-        continue;
-      }
-      if (action.startsWith("编辑")) {
-        const editInput = { ...existing, _providerId: pid } as any;
-        const result = await editProvider(ctx, editInput);
-        if (result) {
-          if (result.providerId !== pid) delete config.providers[pid];
-          config.providers[result.providerId] = result.config;
-          persistConfig(config, ctx);
-        }
-        continue;
       }
     }
   }
@@ -816,13 +871,13 @@ async function manageProviders(
 async function manageModels(
   ctx: ExtensionCommandContext,
   providerId: string,
-  provider: ProviderConfig,
-  config: ModelsConfig,
-): Promise<ProviderConfig> {
-  const models = provider.models || [];
-  provider.models = models;
-
+  initialConfig: ModelsConfig,
+): Promise<ModelsConfig> {
+  let config = initialConfig;
   while (true) {
+    const provider = config.providers[providerId];
+    if (!provider) return config;
+    const models = provider.models ?? [];
     const choice = await searchableSelect(
       ctx,
       `Models - ${providerId}`,
@@ -831,52 +886,65 @@ async function manageModels(
         { value: ACTION_ADD_MODEL, label: "添加新 Model", searchText: "add new model 添加 新增" },
         { value: ACTION_BACK, label: "返回", searchText: "back return 返回" },
       ],
-      {
-        maxVisible: 10,
-        hint: "输入 model id/name 搜索，↑/↓ 选择，Enter 操作，Esc 返回",
-      },
+      { maxVisible: 10, hint: "输入 model id/name 搜索，↑/↓ 选择，Enter 操作，Esc 返回" },
     );
-    if (choice === undefined || choice === ACTION_BACK) return provider;
+    if (choice === undefined || choice === ACTION_BACK) return config;
 
     if (choice === ACTION_ADD_MODEL) {
-      const newModel = await editModel(ctx, providerId);
-      if (newModel) {
-        models.push(newModel);
-        persistConfig(config, ctx);
+      const result = await editModel(ctx, providerId);
+      if (!result) continue;
+      const modelToSave = structuredClone(result.model);
+      if (result.removeLegacyPayload) delete (modelToSave as Record<string, unknown>)["extraPayload"];
+      const nextConfig = cloneModelsConfig(config);
+      (nextConfig.providers[providerId]!.models ??= []).push(modelToSave);
+      if (persistNextConfig(ctx, nextConfig)) {
+        config = nextConfig;
+        updateModelPayloadAfterSave(ctx, providerId, modelToSave, result.payload);
       }
       continue;
     }
 
-    const idxMatch = choice.match(/^model:(\d+)$/);
-    if (!idxMatch) continue;
-
-    const idx = parseInt(idxMatch[1]!, 10);
-    if (idx < 0 || idx >= models.length) continue;
-
-    const existing = models[idx]!;
-    const action = await ctx.ui.select(`Model: ${modelSummary(existing)}`, [
-      "编辑", "复制", "删除", "返回",
-    ]);
+    const match = choice.match(/^model:(\d+)$/);
+    if (!match) continue;
+    const index = Number.parseInt(match[1]!, 10);
+    const existing = models[index];
+    if (!existing) continue;
+    const action = await ctx.ui.select(`Model: ${modelSummary(existing)}`, ["编辑", "复制", "删除", "返回"]);
     if (!action || action.startsWith("返回")) continue;
 
     if (action.startsWith("删除")) {
-      const ok = await ctx.ui.confirm("确认删除", `删除 Model "${existing.id}"？`);
-      if (ok) { models.splice(idx, 1); persistConfig(config, ctx); }
+      if (!await ctx.ui.confirm("确认删除", `删除 Model "${existing.id}"？`)) continue;
+      const nextConfig = cloneModelsConfig(config);
+      nextConfig.providers[providerId]!.models!.splice(index, 1);
+      if (persistNextConfig(ctx, nextConfig)) {
+        config = nextConfig;
+        try {
+          removeModelPayload(providerId, existing.id);
+        } catch (error) {
+          notifyError(ctx, error);
+        }
+      }
       continue;
     }
     if (action.startsWith("复制")) {
-      models.push({ ...existing, id: existing.id + "-copy", name: (existing.name || existing.id) + " (Copy)" });
-      persistConfig(config, ctx);
+      const nextConfig = cloneModelsConfig(config);
+      (nextConfig.providers[providerId]!.models ??= []).push({
+        ...structuredClone(existing), id: `${existing.id}-copy`, name: `${existing.name || existing.id} (Copy)`,
+      });
+      if (persistNextConfig(ctx, nextConfig)) config = nextConfig;
       continue;
     }
     if (action.startsWith("编辑")) {
-      const updated = await editModel(ctx, providerId, existing);
-      if (updated) {
-        if (updated.id !== existing.id) models.splice(idx, 1);
-        models[idx] = updated;
-        persistConfig(config, ctx);
+      const result = await editModel(ctx, providerId, existing);
+      if (!result) continue;
+      const modelToSave = structuredClone(result.model);
+      if (result.removeLegacyPayload) delete (modelToSave as Record<string, unknown>)["extraPayload"];
+      const nextConfig = cloneModelsConfig(config);
+      nextConfig.providers[providerId]!.models![index] = modelToSave;
+      if (persistNextConfig(ctx, nextConfig)) {
+        config = nextConfig;
+        updateModelPayloadAfterSave(ctx, providerId, modelToSave, result.payload, existing);
       }
-      continue;
     }
   }
 }
@@ -1365,47 +1433,47 @@ export default async function (pi: ExtensionAPI) {
   pi.registerCommand("model-config", {
     description: "可视化配置自定义模型 Providers 和 Models → 保存到 models.json",
     handler: async (_args, ctx) => {
-      const config = readModelsConfig();
+      let config: ModelsConfig;
+      try {
+        config = readModelsConfig();
+      } catch (error) {
+        notifyError(ctx, error);
+        return;
+      }
 
       while (true) {
         const pCount = Object.keys(config.providers).length;
         let mCount = 0;
-        for (const p of Object.values(config.providers)) mCount += (p.models || []).length;
+        for (const provider of Object.values(config.providers)) mCount += (provider.models || []).length;
 
         const choice = await ctx.ui.select("模型配置编辑器", [
           `管理 Providers (当前 ${pCount} providers, ${mCount} models)`,
-          `Subagent 配置`,
-          `诊断：检查 models.json 状态`,
-          `提示：保存后关闭并重开 /model (Ctrl+L) 即可看到`,
+          "Subagent 配置",
+          "诊断：检查 models.json 状态",
+          "提示：保存后关闭并重开 /model (Ctrl+L) 即可看到",
           "退出",
         ]);
+        if (choice === undefined || choice.startsWith("退出")) break;
 
-        if (choice === undefined || choice?.startsWith("退出")) break;
-
-        if (choice?.startsWith("管理 Providers")) {
-          await manageProviders(ctx, config);
-        }
-
-        if (choice?.startsWith("Subagent")) {
-          await manageSubagentModelSettings(pi, ctx);
-        }
-
-        if (choice?.startsWith("诊断")) {
-          // 诊断命令：检查 models.json 是否存在且格式正确
+        if (choice.startsWith("管理 Providers")) config = await manageProviders(ctx, config);
+        else if (choice.startsWith("Subagent")) await manageSubagentModelSettings(pi, ctx);
+        else if (choice.startsWith("诊断")) {
           const path = getModelsPath();
           const fs = await import("node:fs");
           const exists = fs.existsSync(path);
           const size = exists ? `${(fs.statSync(path).size / 1024).toFixed(1)} KB` : "N/A";
-
-          ctx.ui.notify(
-            `文件路径: ${path}\n` +
-            `存在: ${exists ? "是" : "否"} | 大小: ${size}\n` +
-            `Providers: ${pCount} | Models: ${mCount}`,
-            "info",
-          );
-        }
-
-        if (choice?.includes("提示")) {
+          try {
+            const diskConfig = readModelsConfig();
+            const providers = Object.values(diskConfig.providers);
+            const models = providers.reduce((count, provider) => count + (provider.models || []).length, 0);
+            ctx.ui.notify(
+              `文件路径: ${path}\n存在: ${exists ? "是" : "否"} | 大小: ${size}\nProviders: ${providers.length} | Models: ${models}`,
+              "info",
+            );
+          } catch (error) {
+            ctx.ui.notify(`文件路径: ${path}\n无法读取 models.json: ${error instanceof Error ? error.message : String(error)}`, "error");
+          }
+        } else if (choice.includes("提示")) {
           ctx.ui.notify(
             "工作流程：\n" +
             "1. 添加 Provider → 自动保存到 models.json\n" +
