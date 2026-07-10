@@ -47,9 +47,12 @@ export function readModelsConfig(filePath = getModelsPath()): ModelsConfig {
 
 /** 写入 models.json */
 export function writeModelsConfig(config: ModelsConfig, filePath = getModelsPath()): void {
-  if (fs.existsSync(filePath)) parseModelsDocument(filePath, fs.readFileSync(filePath, "utf8"));
+  const existing = fs.existsSync(filePath)
+    ? parseModelsDocument(filePath, fs.readFileSync(filePath, "utf8"))
+    : { providers: {} };
+  const merged = { ...existing, ...config, providers: config.providers };
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  fs.writeFileSync(filePath, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
 }
 
 /** 添加或更新一个 provider */

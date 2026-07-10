@@ -42,6 +42,18 @@ test("writes canonical JSON while retaining parsed root and provider fields", ()
   });
 }));
 
+test("retains existing root fields when replacing providers", () => withAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "models.json");
+  fs.writeFileSync(filePath, `{ "nativeRoot": true, "providers": { "p": { "models": [] } } }`);
+
+  writeModelsConfig({ providers: {} });
+
+  assert.deepEqual(JSON.parse(fs.readFileSync(filePath, "utf8")), {
+    nativeRoot: true,
+    providers: {},
+  });
+}));
+
 test("refuses to overwrite malformed models.json", () => withAgentDir((agentDir) => {
   const filePath = path.join(agentDir, "models.json");
   const malformed = `{ "providers": {`;
