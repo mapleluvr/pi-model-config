@@ -345,7 +345,6 @@ async function editProvider(
 interface ModelEditResult {
   model: ModelConfig;
   payload?: Record<string, unknown>;
-  removeLegacyPayload: boolean;
 }
 
 function parseLegacyPayload(value: unknown): Record<string, unknown> | undefined {
@@ -372,18 +371,18 @@ function loadModelPayload(
   ctx: ExtensionCommandContext,
   providerId: string,
   existing?: ModelConfig,
-): { payload?: Record<string, unknown>; removeLegacyPayload: boolean } {
-  if (!existing) return { removeLegacyPayload: false };
+): { payload?: Record<string, unknown> } {
+  if (!existing) return {};
   const privatePayload = getModelPayload(providerId, existing.id);
   const legacy = (existing as Record<string, unknown>)["extraPayload"];
-  if (privatePayload) return { payload: privatePayload, removeLegacyPayload: Object.hasOwn(existing, "extraPayload") };
-  if (!Object.hasOwn(existing, "extraPayload")) return { removeLegacyPayload: false };
+  if (privatePayload) return { payload: privatePayload };
+  if (!Object.hasOwn(existing, "extraPayload")) return {};
   const migrated = parseLegacyPayload(legacy);
   if (!migrated) {
-    ctx.ui.notify("Legacy extraPayload could not be migrated; it was left unchanged", "error");
-    return { removeLegacyPayload: false };
+    ctx.ui.notify("Legacy extraPayload could not be migrated; it will be removed after a successful save", "error");
+    return {};
   }
-  return { payload: migrated, removeLegacyPayload: true };
+  return { payload: migrated };
 }
 
 function finiteNumberOr(value: string, fallback: number): number {
@@ -554,7 +553,7 @@ async function editModel(
     if (editedPayload !== undefined) payload = editedPayload;
   }
 
-  return { model, payload, removeLegacyPayload: payloadState.removeLegacyPayload };
+  return { model, payload };
 }
 
 // ═══════════════════════════════════════════════════════
@@ -758,7 +757,7 @@ function updateModelPayloadAfterSave(
   try {
     if (payload && Object.keys(payload).length > 0) setModelPayload(providerId, updated.id, payload);
     else removeModelPayload(providerId, updated.id);
-    if (existing && existing.id !== updated.id) moveModelPayload(providerId, existing.id, providerId, updated.id);
+    if (existing && existing.id !== updated.id) removeModelPayload(providerId, existing.id);
   } catch (error) {
     notifyError(ctx, error);
   }
@@ -894,7 +893,7 @@ async function manageModels(
       const result = await editModel(ctx, providerId);
       if (!result) continue;
       const modelToSave = structuredClone(result.model);
-      if (result.removeLegacyPayload) delete (modelToSave as Record<string, unknown>)["extraPayload"];
+      delete (modelToSave as Record<string, unknown>)["extraPayload"];
       const nextConfig = cloneModelsConfig(config);
       (nextConfig.providers[providerId]!.models ??= []).push(modelToSave);
       if (persistNextConfig(ctx, nextConfig)) {
@@ -927,10 +926,12 @@ async function manageModels(
       continue;
     }
     if (action.startsWith("复制")) {
+      const modelCopy = structuredClone(existing);
+      delete (modelCopy as Record<string, unknown>)["extraPayload"];
+      modelCopy.id = `${existing.id}-copy`;
+      modelCopy.name = `${existing.name || existing.id} (Copy)`;
       const nextConfig = cloneModelsConfig(config);
-      (nextConfig.providers[providerId]!.models ??= []).push({
-        ...structuredClone(existing), id: `${existing.id}-copy`, name: `${existing.name || existing.id} (Copy)`,
-      });
+      (nextConfig.providers[providerId]!.models ??= []).push(modelCopy);
       if (persistNextConfig(ctx, nextConfig)) config = nextConfig;
       continue;
     }
@@ -938,7 +939,7 @@ async function manageModels(
       const result = await editModel(ctx, providerId, existing);
       if (!result) continue;
       const modelToSave = structuredClone(result.model);
-      if (result.removeLegacyPayload) delete (modelToSave as Record<string, unknown>)["extraPayload"];
+      delete (modelToSave as Record<string, unknown>)["extraPayload"];
       const nextConfig = cloneModelsConfig(config);
       nextConfig.providers[providerId]!.models![index] = modelToSave;
       if (persistNextConfig(ctx, nextConfig)) {
