@@ -18,8 +18,7 @@ English documentation: [README.md](README.md)
 - 自动发现模型：从 OpenAI-compatible `/models` 端点导入模型 ID。
 - 管理 Model：编辑 model ID、显示名称、输入模式、reasoning 支持、context window、max output tokens 和价格字段。
 - 管理兼容性设置：为 Provider 或 Model 设置 Pi 兼容性选项，支持 default、true、false 三态。
-- 管理 payload 参数：为单个模型添加 string、bool、JSON 类型的额外请求体字段。
-- 启动时从 `models.json` 注册已配置的 Providers。
+- 管理 payload 参数：为单个模型向私有请求 payload 对象添加 string、boolean、JSON 值。
 
 ### Subagent 配置
 
@@ -73,6 +72,12 @@ cp -r pi-model-config .pi/extensions/model-config
 2. `Subagent 配置`：管理 `pi-subagents` overrides。
 3. 诊断当前 `models.json` 文件。
 
+## Pi 0.80.6 兼容性
+
+v1.1.0 支持 `thinkingLevelMap.max`、完整的 `cost.tiers` 和 Pi 当前兼容性选项。`models.json` 使用 JSONC 读取，因此允许注释和尾逗号；只有成功解析后才会写回规范 JSON。原生配置损坏时插件会停止保存，不会用空配置覆盖文件。
+
+Pi 本体负责 Provider 注册和 ModelRegistry 刷新。保存后关闭并重新打开 `/model` 即可刷新选择器。
+
 ## Pi 模型工作流
 
 1. 创建 Provider，填写 provider ID、base URL、API 类型和 API key 设置。
@@ -81,13 +86,11 @@ cp -r pi-model-config .pi/extensions/model-config
 4. 在模型需要额外 API 请求体字段时添加 payload 参数。
 5. 保存后重新打开 Pi 的 `/model` selector，让 Pi 重新读取更新后的 `models.json`。
 
-### Payload 参数类型
+## 请求 Payload 参数
 
-| 类型 | 输入 | 验证 |
-|------|------|------|
-| `string` | 文本 | 以字符串值保存 |
-| `bool` | `true` 或 `false` 选择 | 以布尔值保存 |
-| `json` | JSON 文本 | 保存前使用 `JSON.parse()` 解析 |
+额外请求体参数不再写入 `models.json`。插件把它们按精确 `provider/model-id` 键保存在 `~/.pi/agent/model-config-payloads.json`（或 `<PI_CODING_AGENT_DIR>/model-config-payloads.json`）中，并在 `before_provider_request` 对当前模型的最终请求体做浅合并。其他模型不会受到影响，插件不会记录 payload 值。
+
+string、boolean 和 JSON 值都会作为输入写入一个私有 JSON 对象；JSON 值会在保存前解析。有效的旧 `extraPayload` 内容会在对应模型下次保存时迁移；格式损坏的内容会在成功保存后删除。
 
 ## Subagent 配置
 
@@ -125,7 +128,7 @@ Subagent 配置写入 Pi settings 的 `subagents.agentOverrides`。
 每个内置 Subagent 可以配置：
 
 - `model`：该 Subagent 使用的模型 ID。
-- `thinking`：`off`、`minimal`、`low`、`medium`、`high`、`xhigh` 之一。
+- `thinking`：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` 之一。`max` 需要包含配套 `max` 兼容性 PR 的 `pi-subagents` build。
 - `fallbackModels`：有序 fallback 列表。UI 可以从可搜索模型选择器追加，也可以接受逗号或换行分隔的手动输入。
 
 内置 agent 名称：
@@ -151,6 +154,7 @@ Tools 编辑器从母 Agent 当前 active tools 开始构造候选列表，并�
 | 数据 | 路径 |
 |------|------|
 | 模型 Providers 和 Models | `~/.pi/agent/models.json` |
+| 模型请求 Payload | `~/.pi/agent/model-config-payloads.json`（或 `<PI_CODING_AGENT_DIR>/model-config-payloads.json`） |
 | 用户 Subagent overrides | `~/.pi/agent/settings.json` |
 | 项目 Subagent overrides | `<project>/.pi/settings.json` |
 

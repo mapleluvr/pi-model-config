@@ -17,6 +17,7 @@ const SCANNED_PATHS = [
   "tool-options.ts",
   "tests/compat-settings.test.ts",
   "tests/no-emoji.test.ts",
+  "tests/release-docs.test.ts",
   "tests/searchable-multi-select.test.ts",
   "tests/searchable-select.test.ts",
   "tests/subagent-settings.test.ts",

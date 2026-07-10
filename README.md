@@ -18,8 +18,7 @@ Chinese documentation: [README-CN.md](README-CN.md)
 - Discover models: import model IDs from OpenAI-compatible `/models` endpoints.
 - Manage Models: edit model IDs, display names, input modes, reasoning support, context windows, output token limits, and pricing fields.
 - Manage compatibility settings: set Provider-level and Model-level Pi compatibility options with default, true, and false states.
-- Manage payload parameters: add string, bool, and JSON request-body fields for individual models.
-- Register configured providers at Pi startup from `models.json`.
+- Manage payload parameters: add string, boolean, and JSON values to a private request-payload object for individual models.
 
 ### Subagent configuration
 
@@ -73,6 +72,12 @@ The main menu opens these areas:
 2. `Subagent Config` for `pi-subagents` overrides.
 3. Diagnostics for the active `models.json` file.
 
+## Pi 0.80.6 compatibility
+
+Version 1.1.0 supports Pi 0.80.6 `thinkingLevelMap.max`, complete `cost.tiers`, and the current compatibility options. It reads Pi `models.json` as JSONC, so comments and trailing commas are accepted. Saving writes canonical JSON after a successful parse; malformed native configuration is never replaced.
+
+Pi owns native provider registration and model refresh. After saving, reopen `/model` to refresh Pi's selector.
+
 ## Pi model workflow
 
 1. Create a Provider with a provider ID, base URL, API type, and API key setting.
@@ -81,13 +86,11 @@ The main menu opens these areas:
 4. Add payload parameters when a model requires extra API request-body fields.
 5. Reopen Pi's `/model` selector after saving so Pi reloads the updated `models.json`.
 
-### Payload parameter types
+## Request payloads
 
-| Type | Input | Validation |
-|------|-------|------------|
-| `string` | Plain text | Stored as a string value |
-| `bool` | `true` or `false` selection | Stored as a boolean value |
-| `json` | JSON text | Parsed with `JSON.parse()` before saving |
+Extra request-body values are extension data, not `models.json` fields. The extension stores them in `~/.pi/agent/model-config-payloads.json` (or `<PI_CODING_AGENT_DIR>/model-config-payloads.json`) under exact `provider/model-id` keys. On `before_provider_request`, the selected model's object is shallowly merged into its outgoing payload. Other models are unchanged, and payload values are never logged.
+
+Payload parameters accept string, boolean, and JSON values as inputs to one private JSON object. JSON values are parsed before saving. Valid legacy `extraPayload` entries migrate when that model is next saved; malformed entries are removed after a successful save.
 
 ## Subagent configuration
 
@@ -125,7 +128,7 @@ The menu writes to the selected settings file. Sync actions copy the whole `suba
 Each builtin subagent can receive:
 
 - `model`: the model ID used by that subagent.
-- `thinking`: one of `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`.
+- `thinking`: one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. `max` requires a `pi-subagents` build containing the companion `max` compatibility PR.
 - `fallbackModels`: an ordered fallback list. The UI can append from the searchable model selector or accept comma/newline-separated manual input.
 
 Builtin agent names:
@@ -151,6 +154,7 @@ The tools editor starts from the parent Agent's current active tools and enriche
 | Data | Path |
 |------|------|
 | Model providers and models | `~/.pi/agent/models.json` |
+| Model request payloads | `~/.pi/agent/model-config-payloads.json` (or `<PI_CODING_AGENT_DIR>/model-config-payloads.json`) |
 | User subagent overrides | `~/.pi/agent/settings.json` |
 | Project subagent overrides | `<project>/.pi/settings.json` |
 
