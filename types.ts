@@ -81,10 +81,17 @@ export interface CompatConfig {
   requiresAssistantAfterToolResult?: boolean;
   requiresThinkingAsText?: boolean;
   requiresReasoningContentOnAssistantMessages?: boolean;
-  thinkingFormat?: "openai" | "openrouter" | "deepseek" | "together" | "zai" | "qwen" | "qwen-chat-template";
+  thinkingFormat?: "openai" | "openrouter" | "deepseek" | "together" | "zai" | "qwen" |
+    "chat-template" | "qwen-chat-template" | "string-thinking" | "ant-ling";
   cacheControlFormat?: "anthropic";
   supportsStrictMode?: boolean;
   supportsLongCacheRetention?: boolean;
+  supportsTemperature?: boolean;
+  zaiToolStream?: boolean;
+  sendSessionIdHeader?: boolean;
+  chatTemplateKwargs?: Record<string, unknown>;
+  openRouterRouting?: Record<string, unknown>;
+  vercelGatewayRouting?: { only?: string[]; order?: string[] };
 
   // ── Anthropic compat ──
   supportsEagerToolInputStreaming?: boolean;
