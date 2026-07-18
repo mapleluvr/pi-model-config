@@ -9,6 +9,7 @@ import {
   mergeDiscoveredModels,
   normalizeEndpointModels,
   replaceDiscoveredModels,
+  sanitizeEndpointSource,
   type EndpointDiscoverySuccess,
   type EndpointFetch,
 } from "../endpoint-models.ts";
@@ -123,6 +124,15 @@ test("fetch probes trimmed models URLs, falls through failures, and accepts supp
     "http://service.test/api/models",
   ]);
   assert.ok(calls.every((call) => call.authorization === "Bearer configured-key"));
+});
+
+test("endpoint source sanitization removes private URL components before bounding and uses a generic fallback", () => {
+  const markers = ["SOURCE_USER_MARKER", "SOURCE_PASSWORD_MARKER", "SOURCE_QUERY_MARKER", "SOURCE_FRAGMENT_MARKER"];
+  const source = `https://${markers[0].repeat(64)}:${markers[1]}@service.test/models?token=${markers[2]}#${markers[3]}`;
+  const sanitized = sanitizeEndpointSource(source);
+  assert.ok(sanitized === "https://service.test/models", "source URL was not sanitized before bounding");
+  assert.ok(!markers.some((marker) => sanitized.includes(marker)), "sanitized source contains a private URL component");
+  assert.equal(sanitizeEndpointSource("not a URL"), "(configured endpoint)");
 });
 
 test("fetch strips URL userinfo from the public source summary", async () => {
@@ -422,11 +432,15 @@ test("endpoint confirmation drift returns a refreshed sanitized preview and perf
     providers: { local: { baseUrl: "http://service.test", api: "openai-completions", models: [{ id: "old" }] } },
   });
   writePayload(agentDir, emptyPayloadDocument());
+  const sourceMarkers = ["SOURCE_USER_MARKER", "SOURCE_PASSWORD_MARKER", "SOURCE_QUERY_MARKER", "SOURCE_FRAGMENT_MARKER"];
+  const source = `https://${sourceMarkers[0]}:${sourceMarkers[1]}@service.test/v1/models?token=${sourceMarkers[2]}#${sourceMarkers[3]}`;
   const preview = await actions.previewEndpointChange({
-    providerId: "local", mode: "replace", discovery: discovery([{ id: "new" }]),
+    providerId: "local", mode: "replace", discovery: discovery([{ id: "new" }], source),
   });
   assert.equal(preview.type, "endpoint-preview");
   if (preview.type !== "endpoint-preview") return;
+  assert.ok(preview.descriptor.source === "https://service.test/v1/models", "preview source was not sanitized");
+  assert.ok(!sourceMarkers.some((marker) => JSON.stringify(preview).includes(marker)), "serialized preview contains a private source component");
 
   writeNative(agentDir, {
     providers: { local: { baseUrl: "http://service.test", api: "openai-completions", models: [{ id: "external" }] } },
@@ -437,9 +451,11 @@ test("endpoint confirmation drift returns a refreshed sanitized preview and perf
   if (stale.type !== "stale-target") return;
   assert.equal(stale.path, "endpoint-preview");
   assert.ok(stale.endpointPreview);
+  assert.ok(stale.endpointPreview!.source === "https://service.test/v1/models", "refreshed preview source was not sanitized");
   assert.deepEqual(stale.endpointPreview!.introduced.ids, ["new"]);
   assert.deepEqual(stale.endpointPreview!.removed.ids, ["external"]);
   assert.equal(Object.hasOwn(stale.endpointPreview as object, "models"), false);
+  assert.ok(!sourceMarkers.some((marker) => JSON.stringify(stale).includes(marker)), "serialized refreshed preview contains a private source component");
   assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(externalBytes), true);
   actions.discardIdentityPreview(stale.endpointPreview!.token);
 }));

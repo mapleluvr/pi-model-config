@@ -1,6 +1,7 @@
 import type { ModelConfig, ProviderConfig } from "./types.ts";
 
 const ENDPOINT_TIMEOUT_MS = 15_000;
+const ENDPOINT_SOURCE_LIMIT = 512;
 const SUMMARY_ID_LIMIT = 10;
 const SUMMARY_ID_LENGTH = 80;
 
@@ -149,17 +150,21 @@ function defaultDependencies(): EndpointModelDependencies {
   };
 }
 
-function publicEndpointSource(endpoint: string): string {
+export function sanitizeEndpointSource(source: string): string {
+  let sanitized: string;
   try {
-    const parsed = new URL(endpoint);
+    const parsed = new URL(source);
     parsed.username = "";
     parsed.password = "";
     parsed.search = "";
     parsed.hash = "";
-    return parsed.toString();
+    sanitized = parsed.toString();
   } catch {
     return "(configured endpoint)";
   }
+  return sanitized.length <= ENDPOINT_SOURCE_LIMIT
+    ? sanitized
+    : `${sanitized.slice(0, ENDPOINT_SOURCE_LIMIT - 3)}...`;
 }
 
 function requestFailureReason(error: unknown): "timeout" | "request-failed" {
@@ -238,7 +243,7 @@ export async function fetchEndpointModels(
     }
     return {
       type: "success",
-      source: publicEndpointSource(endpoints[index]!),
+      source: sanitizeEndpointSource(endpoints[index]!),
       ...normalized,
       supported: true,
     };

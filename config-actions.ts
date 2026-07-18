@@ -52,6 +52,7 @@ import {
   mergeDiscoveredModels,
   normalizeEndpointModels,
   replaceDiscoveredModels,
+  sanitizeEndpointSource,
   summarizeEndpointIds,
   type EndpointDiscoverySuccess,
   type EndpointIdSummary,
@@ -365,11 +366,6 @@ function sortedStrings(values: readonly string[]): string[] {
   return [...values].sort((a, b) => a.localeCompare(b));
 }
 
-function boundedEndpointSource(source: string): string {
-  const limit = 512;
-  return source.length <= limit ? source : `${source.slice(0, limit - 3)}...`;
-}
-
 function normalizedEndpointRequest(request: EndpointChangeRequest): EndpointChangeRequest | undefined {
   if (
     typeof request.providerId !== "string"
@@ -403,7 +399,7 @@ function normalizedEndpointRequest(request: EndpointChangeRequest): EndpointChan
     mode: request.mode,
     discovery: {
       type: "success",
-      source: request.discovery.source,
+      source: sanitizeEndpointSource(request.discovery.source),
       supported: true,
       receivedCount: request.discovery.receivedCount,
       validCount: normalized.validCount,
@@ -1213,7 +1209,7 @@ export class ModelConfigActions {
     live: EndpointLiveChange,
   ): EndpointPreviewDescriptor {
     return {
-      source: boundedEndpointSource(request.discovery.source),
+      source: request.discovery.source,
       mode: request.mode,
       validCount: request.discovery.validCount,
       skippedCount: request.discovery.skippedCount,
