@@ -407,12 +407,31 @@ unknown liveness result or possible PID reuse remains locked and requires
 explicit operator recovery rather than guessing that the owner is dead.
 
 Dead-owner recovery uses an atomic token-checked claim: contenders compete to
-move the exact observed owner record into one unique recovery claim, acquisition
-checks for a claim both before and after creating a successor record, and only
-the claim winner may install the next owner token. A token mismatch aborts the
+move the exact observed owner record into one recovery claim, acquisition checks
+for a claim both before and after creating a successor record, and only the
+claim winner may install the next owner token. A token mismatch aborts the
 claim. No contender unlinks a path by filename after merely observing staleness.
+
+A recovery claim is itself an owner record. It stores its own opaque token,
+claimant process/boot evidence, the claimed owner record, and the journal hash
+observed at claim time. No configuration write is allowed until the claimant
+installs and verifies a successor lock and removes its claim. If the claimant
+crashes before that transition, later acquisition remains blocked while the
+claim owner is alive or unknown. After positive proof that the claimant also
+cannot resume, contenders atomically claim that exact claim token; the winner
+carries forward the original owner record and journal hash without changing
+journal, native, or payload bytes. The same rule handles a crash after successor
+installation but before claim cleanup: ownership and claim tokens are compared
+and recovery resumes without deleting a different owner's record.
+
 A dead-owner lock with no journal has no recoverable transaction; the claim
-winner validates both current files and then releases its successor lock.
+winner validates both current files and then releases its successor lock. For
+unknown liveness or possible PID reuse, the recovery UI shows only non-secret
+owner/claim process metadata and offers Cancel, Retry liveness check, or Retry
+after closing the listed process. It provides no force-delete action. Journal
+and configuration files remain untouched until process exit or a changed system
+boot identity positively proves that the recorded owner cannot resume, after
+which the normal token-checked claim path applies.
 
 Every extension mutation re-reads both files after ownership, revalidates its
 baselines and candidate, and verifies the same owner token immediately before
@@ -601,6 +620,11 @@ Implementation follows TDD for new behavior. Focused tests cover:
 - cross-process lock exclusion, simultaneous dead-owner claim contenders,
   paused-live-owner takeover refusal and safe resume, dead-owner-lock-without-
   journal handling, and owner-bound release;
+- recovery claimant crashes before successor installation and after successor
+  installation but before claim cleanup, followed by one winning re-claim with
+  journal/native/payload bytes unchanged;
+- unknown liveness/PID reuse blocks without a force-delete path, then enters
+  normal recovery only after positive owner-death or changed-boot proof;
 - a simulated former owner whose token was externally replaced attempts native
   step 3 and payload step 4 writes and is fenced before both replacements;
 - valid-journal recovery with a malformed current payload, malformed-journal
