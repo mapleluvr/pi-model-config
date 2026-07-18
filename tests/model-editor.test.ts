@@ -4,7 +4,10 @@ import test from "node:test";
 import {
   buildModelCategories,
   buildModelOverrideCategories,
+  editModelOverrideEntryDraft,
+  runModelEditor,
 } from "../model-editor.ts";
+import type { SettingsPanelResult } from "../settings-panel.ts";
 
 function catalog(categories: ReturnType<typeof buildModelCategories>): Array<[string, string[]]> {
   return categories.map((category) => [category.id, category.fields.map((field) => field.id)]);
@@ -95,4 +98,172 @@ test("Override catalog exposes only the approved restricted surface", () => {
   ]);
   const ids = categories.flatMap((category) => category.fields.map((field) => field.id));
   for (const forbidden of ["id", "api", "baseUrl", "payload"]) assert.equal(ids.includes(forbidden), false);
+});
+
+function panelResult(type: SettingsPanelResult["type"], categoryId = "general", fieldId = "id"): SettingsPanelResult {
+  return {
+    type: type as any,
+    categoryId,
+    fieldId,
+    state: {
+      categoryId,
+      fieldId,
+      focusedPane: "fields",
+      categoryScrollOffset: 0,
+      fieldScrollOffset: 0,
+      narrowScreen: "fields",
+    },
+  } as SettingsPanelResult;
+}
+
+function modelSnapshot(model: Record<string, unknown>): any {
+  return {
+    type: "snapshot",
+    native: { providers: { local: { models: [model] } } },
+    payload: { version: 1, extraPayloads: {} },
+    nativeHash: "native",
+    payloadHash: "payload",
+  };
+}
+
+test("Model search restores the selected field and panel state", async () => {
+  const model = { id: "one", future: { keep: true } };
+  const states: Array<Record<string, unknown>> = [];
+  const panels = [panelResult("search"), panelResult("back", "capability", "maxTokens")];
+  const actions = { readEditorSnapshot: () => modelSnapshot(model) } as any;
+  await runModelEditor({ ui: { notify() {} } } as any, "local", "one", {
+    actions,
+    search: async () => "capability:maxTokens",
+    openPanel: async (_ctx, _model, state) => {
+      states.push({ ...state });
+      return panels.shift()!;
+    },
+  });
+  assert.equal(states[1]!.categoryId, "capability");
+  assert.equal(states[1]!.fieldId, "maxTokens");
+  assert.equal(states[1]!.focusedPane, "fields");
+});
+
+test("Model nested conflict retains the draft and original optimistic baseline", async () => {
+  const model = { id: "one", headers: { Existing: "yes" }, future: { keep: true } };
+  const calls: Array<{ baseline: unknown; next: unknown }> = [];
+  const actions = {
+    readEditorSnapshot: () => modelSnapshot(model),
+    saveModelSubtree: async (_providerId: string, _modelId: string, _key: string, baseline: unknown, next: unknown) => {
+      calls.push({ baseline, next });
+      return calls.length === 1
+        ? { type: "subtree-conflict", path: "headers", nativeHash: "n", payloadHash: "p" }
+        : { type: "success" };
+    },
+  } as any;
+  const panels = [
+    panelResult("open-section", "endpoint", "headers"),
+    panelResult("open-section", "endpoint", "headers"),
+    panelResult("back"),
+  ];
+  const selects = ["新增条目", "保存并返回", "保存并返回"];
+  const inputs = ["X-Test", "draft"];
+  const ctx = {
+    ui: {
+      select: async () => selects.shift(),
+      input: async () => inputs.shift(),
+      notify() {},
+    },
+  } as any;
+  await runModelEditor(ctx, "local", "one", { actions, openPanel: async () => panels.shift()! });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0]!.baseline, { Existing: "yes" });
+  assert.deepEqual(calls[1]!.baseline, { Existing: "yes" });
+  assert.deepEqual(calls[1]!.next, { Existing: "yes", "X-Test": "draft" });
+});
+
+test("Native optional Model fields can all be restored to absence without touching unknown fields", async () => {
+  const model: Record<string, unknown> = {
+    id: "one",
+    reasoning: false,
+    input: ["text", "image"],
+    contextWindow: 4096,
+    maxTokens: 1024,
+    future: { keep: true },
+  };
+  const actions = {
+    readEditorSnapshot: () => modelSnapshot(model),
+    patchModel: async (_providerId: string, _modelId: string, patch: Record<string, unknown>) => {
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null) delete model[key];
+        else model[key] = value;
+      }
+      return { type: "success" };
+    },
+  } as any;
+  const panels = [
+    panelResult("edit-field", "capability", "reasoning"),
+    panelResult("edit-field", "capability", "input"),
+    panelResult("edit-field", "capability", "contextWindow"),
+    panelResult("edit-field", "capability", "maxTokens"),
+    panelResult("back"),
+  ];
+  const selects = ["使用默认值", "使用默认值", "使用默认值", "使用默认值"];
+  const ctx = { ui: { select: async () => selects.shift(), notify() {} } } as any;
+  await runModelEditor(ctx, "local", "one", {
+    actions,
+    openPanel: async () => panels.shift()!,
+    multiSelect: async () => { throw new Error("default input must not open explicit selection"); },
+  });
+  for (const key of ["reasoning", "input", "contextWindow", "maxTokens"]) {
+    assert.equal(Object.hasOwn(model, key), false, `${key} should be absent`);
+  }
+  assert.deepEqual(model.future, { keep: true });
+  assert.deepEqual(selects, []);
+});
+
+for (const fieldId of ["input", "tiers"] as const) {
+  test(`Native Cost can be cleared as a whole from ${fieldId}`, async () => {
+    const model: Record<string, unknown> = {
+      id: "one",
+      cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, futureNested: { keep: true } },
+      future: { keep: true },
+    };
+    const calls: Array<{ baseline: unknown; next: unknown }> = [];
+    const actions = {
+      readEditorSnapshot: () => modelSnapshot(model),
+      saveModelSubtree: async (_providerId: string, _modelId: string, key: string, baseline: unknown, next: unknown) => {
+        calls.push({ baseline, next });
+        if (key === "cost" && (next === null || next === undefined)) delete model.cost;
+        return { type: "success" };
+      },
+    } as any;
+    const panels = [panelResult(fieldId === "tiers" ? "open-section" : "edit-field", "cost", fieldId), panelResult("back")];
+    const selects = ["清除整个 Cost（使用默认值）"];
+    const ctx = { ui: { select: async () => selects.shift(), notify() {} } } as any;
+    await runModelEditor(ctx, "local", "one", { actions, openPanel: async () => panels.shift()! });
+    assert.equal(Object.hasOwn(model, "cost"), false);
+    assert.deepEqual(calls, [{
+      baseline: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, futureNested: { keep: true } },
+      next: null,
+    }]);
+    assert.deepEqual(model.future, { keep: true });
+  });
+}
+
+test("Override Thinking Map warning follows the edited override draft only", async () => {
+  const seenWarnings: Array<string | undefined> = [];
+  const panels = [
+    panelResult("edit-field", "capability", "reasoning"),
+    panelResult("back", "thinking", "thinkingLevelMap"),
+  ];
+  const ctx = { ui: { select: async () => "false", notify() {} } } as any;
+  const result = await editModelOverrideEntryDraft(ctx, "target", {
+    reasoning: true,
+    thinkingLevelMap: { high: "provider-high" },
+  }, {
+    openPanel: async (_ctx, panel) => {
+      const field = panel.categories.find((category) => category.id === "thinking")?.fields[0];
+      seenWarnings.push(field?.warning);
+      return panels.shift()!;
+    },
+  });
+  assert.equal(result.status, "save");
+  assert.deepEqual(seenWarnings, [undefined, "Reasoning 已关闭；Thinking Map 会保留但当前不生效"]);
+  if (result.status === "save") assert.deepEqual(result.value.thinkingLevelMap, { high: "provider-high" });
 });

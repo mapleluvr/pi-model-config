@@ -8,6 +8,7 @@ import extension from "../index.ts";
 import { ModelConfigActions } from "../config-actions.ts";
 import { getModelsPath, readModelsConfig, writeModelsConfig } from "../config.ts";
 import { getPayloadConfigPath, lookupModelPayload, readPayloadConfig, serializePayloadDocument, setPayloadDocumentValue } from "../payload-config.ts";
+import { getTransactionJournalPath } from "../payload-coordinator.ts";
 import { runModelEditor } from "../model-editor.ts";
 import type { SettingsPanelResult } from "../settings-panel.ts";
 
@@ -211,3 +212,159 @@ test("lock busy remains a distinct non-secret diagnostic and performs no write",
     assert.doesNotMatch(notifications[0]!.message, /New|one/);
   });
 });
+
+test("Model copy and delete route private payloads through identity actions", async () => {
+  await withRuntimeAgentDir(async () => {
+    writeModelsConfig({ providers: { local: {
+      baseUrl: "http://localhost:11434",
+      api: "openai-completions",
+      models: [{ id: "source", future: { keep: true } }],
+    } } });
+    seedModelPayload("local", "source", { requestFlag: true });
+    const actions = new ModelConfigActions();
+
+    const copyPanels = [panelResult("run-action", "actions", "copy"), panelResult("back")];
+    await runModelEditor(
+      scriptedContext({ selects: [], inputs: [], editors: ["copy"], confirms: [true], customs: [] }),
+      "local",
+      "source",
+      { actions, openPanel: async () => copyPanels.shift()! },
+    );
+    assert.deepEqual(readModelsConfig().providers.local!.models!.map((model) => model.id), ["source", "copy"]);
+    assert.deepEqual(readModelPayload("local", "source"), { requestFlag: true });
+    assert.deepEqual(readModelPayload("local", "copy"), { requestFlag: true });
+    assert.deepEqual(readModelsConfig().providers.local!.models![1]!.future, { keep: true });
+
+    const deletePanels = [panelResult("run-action", "actions", "delete")];
+    await runModelEditor(
+      scriptedContext({ selects: [], inputs: [], editors: [], confirms: [true, true], customs: [] }),
+      "local",
+      "copy",
+      { actions, openPanel: async () => deletePanels.shift()! },
+    );
+    assert.deepEqual(readModelsConfig().providers.local!.models!.map((model) => model.id), ["source"]);
+    assert.equal(readModelPayload("local", "copy"), undefined);
+    assert.deepEqual(readModelPayload("local", "source"), { requestFlag: true });
+    assert.equal(actions.boundPreviewCount(), 0);
+  });
+});
+
+test("Native optional Model defaults delete own fields while preserving unknown persisted data", async () => {
+  await withRuntimeAgentDir(async () => {
+    writeModelsConfig({ providers: { local: {
+      baseUrl: "http://localhost:11434",
+      api: "openai-completions",
+      models: [{
+        id: "one",
+        reasoning: true,
+        input: ["text", "image"],
+        contextWindow: 4096,
+        maxTokens: 1024,
+        cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
+        future: { keep: true },
+      }],
+    } } });
+    const actions = new ModelConfigActions();
+    const panels = [
+      panelResult("edit-field", "capability", "reasoning"),
+      panelResult("edit-field", "capability", "input"),
+      panelResult("edit-field", "capability", "contextWindow"),
+      panelResult("edit-field", "capability", "maxTokens"),
+      panelResult("edit-field", "cost", "input"),
+      panelResult("back"),
+    ];
+    const selects = [
+      "使用默认值",
+      "使用默认值",
+      "使用默认值",
+      "使用默认值",
+      "清除整个 Cost（使用默认值）",
+    ];
+    const ctx = { ui: { select: async () => selects.shift(), notify() {} } } as any;
+    await runModelEditor(ctx, "local", "one", {
+      actions,
+      openPanel: async () => panels.shift()!,
+      multiSelect: async () => { throw new Error("default input must not open explicit selection"); },
+    });
+    const saved = readModelsConfig().providers.local!.models![0]!;
+    for (const key of ["reasoning", "input", "contextWindow", "maxTokens", "cost"]) {
+      assert.equal(Object.hasOwn(saved, key), false, `${key} should be absent`);
+    }
+    assert.deepEqual(saved.future, { keep: true });
+    assert.deepEqual(selects, []);
+  });
+});
+
+test("Model rename drift restarts collision review and consumes refreshed tokens", async () => {
+  await withRuntimeAgentDir(async () => {
+    writeModelsConfig({ providers: { local: {
+      baseUrl: "http://localhost:11434",
+      api: "openai-completions",
+      models: [{ id: "source" }],
+    } } });
+    const actions = new ModelConfigActions();
+    const panels = [panelResult("edit-field", "general", "id"), panelResult("back")];
+    const selects = ["复用目标 Payload"];
+    let confirms = 0;
+    const ctx = {
+      ui: {
+        input: async () => "target",
+        select: async () => selects.shift(),
+        confirm: async () => {
+          confirms += 1;
+          if (confirms === 1) seedModelPayload("local", "target", { external: true });
+          return true;
+        },
+        notify() {},
+      },
+    } as any;
+    await runModelEditor(ctx, "local", "source", { actions, openPanel: async () => panels.shift()! });
+    assert.deepEqual(readModelsConfig().providers.local!.models!.map((model) => model.id), ["target"]);
+    assert.deepEqual(readModelPayload("local", "target"), { external: true });
+    assert.equal(readModelPayload("local", "source"), undefined);
+    assert.equal(confirms, 2);
+    assert.deepEqual(selects, []);
+    assert.equal(actions.boundPreviewCount(), 0);
+  });
+});
+
+test("Model controller blocks on a transaction journal without reading a panel or mutating files", async () => {
+  await withRuntimeAgentDir(async (agentDir) => {
+    writeModelsConfig({ providers: { local: { baseUrl: "http://localhost", api: "openai-completions", models: [{ id: "one" }] } } });
+    seedModelPayload("local", "one", { keep: true });
+    fs.writeFileSync(getTransactionJournalPath(agentDir), "{");
+    const artifactPaths = [getModelsPath(agentDir), getPayloadConfigPath(agentDir), getTransactionJournalPath(agentDir)];
+    const before = artifactPaths.map((filePath) => fs.readFileSync(filePath));
+    const notifications: Array<{ message: string; level: string }> = [];
+    await runModelEditor({ ui: { notify: (message: string, level: string) => notifications.push({ message, level }) } } as any, "local", "one", {
+      actions: new ModelConfigActions({ agentDir }),
+      openPanel: async () => { throw new Error("panel must not open during recovery"); },
+    });
+    artifactPaths.forEach((filePath, index) => assert.deepEqual(fs.readFileSync(filePath), before[index]));
+    assert.deepEqual(notifications, [{ message: "配置事务需要恢复后才能继续修改", level: "error" }]);
+  });
+});
+
+for (const diagnostic of [
+  { result: "collision", message: "配置锁发生冲突" },
+  { result: "unsupported", message: "当前环境不支持配置锁" },
+] as const) {
+  test(`Model controller reports lock ${diagnostic.result} without data values`, async () => {
+    await withRuntimeAgentDir(async () => {
+      writeModelsConfig({ providers: { local: { baseUrl: "http://localhost", api: "openai-completions", models: [{ id: "one" }] } } });
+      const actions = new ModelConfigActions({ commitMutation: async () => ({ type: diagnostic.result }) as any });
+      const notifications: Array<{ message: string; level: string }> = [];
+      const before = fs.readFileSync(getModelsPath());
+      const panels = [panelResult("edit-field", "general", "name"), panelResult("back")];
+      await runModelEditor(
+        scriptedContext({ selects: ["输入值"], inputs: ["Changed"], editors: [], confirms: [], customs: [] }, notifications),
+        "local",
+        "one",
+        { actions, openPanel: async () => panels.shift()! },
+      );
+      assert.equal(fs.readFileSync(getModelsPath()).equals(before), true);
+      assert.deepEqual(notifications, [{ message: diagnostic.message, level: "error" }]);
+      assert.doesNotMatch(notifications[0]!.message, /Changed|one/);
+    });
+  });
+}

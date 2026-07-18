@@ -225,7 +225,13 @@ export function buildModelOverrideCategories(
       id: "thinking",
       label: "Thinking",
       fields: [
-        { id: "thinkingLevelMap", label: "Thinking Map", displayValue: formatNestedCount(ownValue(override, "thinkingLevelMap"), "项", "inherited"), action: "open-section" },
+        {
+          id: "thinkingLevelMap",
+          label: "Thinking Map",
+          displayValue: formatNestedCount(ownValue(override, "thinkingLevelMap"), "项", "inherited"),
+          warning: nestedWarning(override as ModelConfig),
+          action: "open-section",
+        },
       ],
     },
     {
@@ -317,6 +323,29 @@ function malformedLegacy(model: ModelConfig): boolean {
   return !parseLegacyExtraPayload(getOwnValue(model, "extraPayload")).ok;
 }
 
+function clearIdentityResolutions(request: ModelIdentityRequest): ModelIdentityRequest {
+  const cleared = deepCloneJson(request);
+  deleteOwnKey(cleared as Record<string, unknown>, "payloadCollisionResolution");
+  deleteOwnKey(cleared as Record<string, unknown>, "legacyDiscardResolution");
+  return cleared;
+}
+
+function modelIdentityNeedsLegacyDiscard(actions: ModelConfigActions, request: ModelIdentityRequest): boolean {
+  const snapshot = actions.readEditorSnapshot();
+  if (snapshot.type !== "snapshot" || hasOwnKey(request as Record<string, unknown>, "legacyDiscardResolution")) return false;
+  const provider = getOwnValue(snapshot.native.providers, request.providerId);
+  if (!provider || !Array.isArray(getOwnValue(provider, "models"))) return false;
+  const model = (getOwnValue(provider, "models") as ModelConfig[]).find((entry) => getOwnValue(entry, "id") === request.modelId);
+  return model ? malformedLegacy(model) : false;
+}
+
+async function confirmLegacyDiscard(ctx: ExtensionCommandContext): Promise<boolean> {
+  return await ctx.ui.confirm(
+    "Malformed legacy extraPayload",
+    "检测到 malformed legacy rows。确认丢弃后继续？取消会保留原始数据。",
+  );
+}
+
 async function completeSimpleAction(
   ctx: ExtensionCommandContext,
   actions: ModelConfigActions,
@@ -359,39 +388,45 @@ async function commitModelIdentity(
   actions: ModelConfigActions,
   initialRequest: ModelIdentityRequest,
 ): Promise<boolean> {
-  let request = initialRequest;
+  let request = clearIdentityResolutions(initialRequest);
   while (true) {
-    let preview = await actions.previewModelIdentityAction(request);
+    if (modelIdentityNeedsLegacyDiscard(actions, request)) {
+      if (!await confirmLegacyDiscard(ctx)) return false;
+      request = { ...request, legacyDiscardResolution: "discard-malformed-legacy" };
+    }
+    const preview = await actions.previewModelIdentityAction(request);
     if (preview.type === "payload-collision") {
       const resolution = await choosePayloadResolution(ctx);
       if (!resolution) return false;
       request = { ...request, payloadCollisionResolution: resolution } as ModelIdentityRequest;
       continue;
     }
+    if (preview.type === "validation-error" && modelIdentityNeedsLegacyDiscard(actions, request)) {
+      if (!await confirmLegacyDiscard(ctx)) return false;
+      request = { ...request, legacyDiscardResolution: "discard-malformed-legacy" };
+      continue;
+    }
     if (preview.type !== "preview") {
       notifyActionFailure(ctx, preview);
       return false;
     }
-    let token = preview.token;
-    let descriptor = preview.descriptor;
-    while (true) {
-      const confirmed = await ctx.ui.confirm(
-        "确认 Model 操作",
-        `${descriptor.kind}: ${descriptor.sourceModelId ?? ""}${descriptor.targetModelId ? ` -> ${descriptor.targetModelId}` : ""}\n受影响身份: ${descriptor.affectedIdentities.length}\nPayload 冲突: ${descriptor.collisions.length}`,
-      );
-      if (!confirmed) {
-        actions.discardIdentityPreview(token);
-        return false;
-      }
-      const committed = await actions.commitModelIdentityAction(token);
-      if (committed.type === "stale-target" && committed.preview) {
-        ctx.ui.notify("配置已变化，请确认刷新后的预览", "warning");
-        token = committed.preview.token;
-        descriptor = committed.preview;
-        continue;
-      }
-      return didSave(ctx, committed);
+    const confirmed = await ctx.ui.confirm(
+      "确认 Model 操作",
+      `${preview.descriptor.kind}: ${preview.descriptor.sourceModelId ?? ""}${preview.descriptor.targetModelId ? ` -> ${preview.descriptor.targetModelId}` : ""}\n受影响身份: ${preview.descriptor.affectedIdentities.length}\nPayload 冲突: ${preview.descriptor.collisions.length}`,
+    );
+    if (!confirmed) {
+      actions.discardIdentityPreview(preview.token);
+      return false;
     }
+    const committed = await actions.commitModelIdentityAction(preview.token);
+    if (committed.type === "stale-target" && committed.preview) {
+      // A drift refresh intentionally clears resolutions. Never reconfirm it; restart below.
+      actions.discardIdentityPreview(committed.preview.token);
+      ctx.ui.notify("配置已变化，请重新检查并确认操作", "warning");
+      request = clearIdentityResolutions(initialRequest);
+      continue;
+    }
+    return didSave(ctx, committed);
   }
 }
 
@@ -437,17 +472,38 @@ async function editBooleanChoice(
   return { status: "value", value: selected === "true" };
 }
 
+async function editNativeBooleanChoice(
+  ctx: ExtensionCommandContext,
+  title: string,
+): Promise<{ status: "cancel" } | { status: "value"; value: boolean | null }> {
+  const action = await ctx.ui.select(title, ["设置值", "使用默认值", "取消"]);
+  if (!action || action === "取消") return { status: "cancel" };
+  if (action === "使用默认值") return { status: "value", value: null };
+  return editBooleanChoice(ctx, title);
+}
+
+async function editNativePositiveInteger(
+  ctx: ExtensionCommandContext,
+  title: string,
+  current: unknown,
+): Promise<{ status: "cancel" } | { status: "value"; value: number | null }> {
+  const action = await ctx.ui.select(title, ["设置值", "使用默认值", "取消"]);
+  if (!action || action === "取消") return { status: "cancel" };
+  if (action === "使用默认值") return { status: "value", value: null };
+  return collectPositiveInteger(ctx, title, String(current ?? ""));
+}
+
 async function editInputTypes(
   ctx: ExtensionCommandContext,
   multiSelect: typeof searchableMultiSelect,
   title: string,
   current: unknown,
-  allowDefault = false,
+  absenceChoice?: "使用默认值" | "使用继承值",
 ): Promise<{ status: "cancel" } | { status: "value"; value: Array<"text" | "image"> | null }> {
-  if (allowDefault) {
-    const action = await ctx.ui.select(title, ["选择输入类型", "使用继承值", "取消"]);
+  if (absenceChoice) {
+    const action = await ctx.ui.select(title, ["设置值", absenceChoice, "取消"]);
     if (!action || action === "取消") return { status: "cancel" };
-    if (action === "使用继承值") return { status: "value", value: null };
+    if (action === absenceChoice) return { status: "value", value: null };
   }
   const initial = Array.isArray(current) ? current.filter((value): value is "text" | "image" => value === "text" || value === "image") : ["text"];
   const selected = await multiSelect(ctx, title, INPUT_OPTIONS, initial, {
@@ -522,18 +578,11 @@ export async function runModelEditor(
     if (result.categoryId === "general" && fieldId === "id") {
       const target = await collectRequiredString(ctx, "重命名 Model", `${modelId}-new`);
       if (target.status === "cancel" || target.value === modelId) continue;
-      let legacyDiscardResolution: LegacyDiscardResolution | undefined;
-      if (malformedLegacy(model)) {
-        const discard = await ctx.ui.confirm("Malformed legacy extraPayload", "重命名需要丢弃 malformed legacy rows。继续？");
-        if (!discard) continue;
-        legacyDiscardResolution = "discard-malformed-legacy";
-      }
       const saved = await commitModelIdentity(ctx, actions, {
         kind: "rename",
         providerId,
         modelId,
         targetModelId: target.value,
-        ...(legacyDiscardResolution ? { legacyDiscardResolution } : {}),
       });
       if (saved) modelId = target.value;
       continue;
@@ -554,24 +603,34 @@ export async function runModelEditor(
       continue;
     }
     if (result.categoryId === "capability" && fieldId === "reasoning") {
-      const value = await editBooleanChoice(ctx, "Model Reasoning");
+      const value = await editNativeBooleanChoice(ctx, "Model Reasoning");
       if (value.status === "value") await patchModelField(ctx, actions, providerId, modelId, "reasoning", ownValue(model, "reasoning"), value.value);
       continue;
     }
     if (result.categoryId === "capability" && fieldId === "input") {
-      const value = await editInputTypes(ctx, multiSelect, "Model 输入类型", ownValue(model, "input"));
+      const value = await editInputTypes(ctx, multiSelect, "Model 输入类型", ownValue(model, "input"), "使用默认值");
       if (value.status === "value") await patchModelField(ctx, actions, providerId, modelId, "input", ownValue(model, "input"), value.value);
       continue;
     }
     if (result.categoryId === "capability" && (fieldId === "contextWindow" || fieldId === "maxTokens")) {
-      const value = await collectPositiveInteger(ctx, fieldId === "contextWindow" ? "Context Window" : "最大输出 Tokens", String(ownValue(model, fieldId) ?? ""));
+      const value = await editNativePositiveInteger(
+        ctx,
+        fieldId === "contextWindow" ? "Context Window" : "最大输出 Tokens",
+        ownValue(model, fieldId),
+      );
       if (value.status === "value") await patchModelField(ctx, actions, providerId, modelId, fieldId, ownValue(model, fieldId), value.value);
       continue;
     }
     if (result.categoryId === "cost" && fieldId !== "tiers") {
+      const action = await ctx.ui.select(`Model 成本 - ${fieldId}`, ["设置费率", "清除整个 Cost（使用默认值）", "取消"]);
+      if (!action || action === "取消") continue;
+      const baseline = ownValue(model, "cost");
+      if (action === "清除整个 Cost（使用默认值）") {
+        didSave(ctx, await actions.saveModelSubtree(providerId, modelId, "cost", baseline, null));
+        continue;
+      }
       const value = await collectNonNegativeRate(ctx, `Model 成本 - ${fieldId}`, costValue(model, fieldId));
       if (value.status === "cancel") continue;
-      const baseline = ownValue(model, "cost");
       const next = deepCloneJson((baseline && typeof baseline === "object" && !Array.isArray(baseline))
         ? baseline
         : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
@@ -584,34 +643,20 @@ export async function runModelEditor(
       const raw = await ctx.ui.editor("复制 Model - 新 ID", `${modelId}-copy`);
       const target = raw?.trim();
       if (!target) continue;
-      let legacyDiscardResolution: LegacyDiscardResolution | undefined;
-      if (malformedLegacy(model)) {
-        const discard = await ctx.ui.confirm("Malformed legacy extraPayload", "复制需要丢弃 malformed legacy rows。继续？");
-        if (!discard) continue;
-        legacyDiscardResolution = "discard-malformed-legacy";
-      }
       await commitModelIdentity(ctx, actions, {
         kind: "copy",
         providerId,
         modelId,
         targetModelId: target,
-        ...(legacyDiscardResolution ? { legacyDiscardResolution } : {}),
       });
       continue;
     }
     if (result.categoryId === "actions" && fieldId === "delete") {
       if (!await ctx.ui.confirm("删除 Model", `确认删除 Model "${modelId}"？`)) continue;
-      let legacyDiscardResolution: LegacyDiscardResolution | undefined;
-      if (malformedLegacy(model)) {
-        const discard = await ctx.ui.confirm("Malformed legacy extraPayload", "删除需要丢弃 malformed legacy rows。继续？");
-        if (!discard) continue;
-        legacyDiscardResolution = "discard-malformed-legacy";
-      }
       const saved = await commitModelIdentity(ctx, actions, {
         kind: "delete",
         providerId,
         modelId,
-        ...(legacyDiscardResolution ? { legacyDiscardResolution } : {}),
       });
       if (saved) return;
       continue;
@@ -652,6 +697,13 @@ export async function runModelEditor(
       const held = retained.get(draftKey);
       const baseline = held?.baseline ?? stored;
       const draft = (held?.value ?? stored) as Record<string, unknown> | undefined;
+      const action = await ctx.ui.select("Model 成本与分层", ["编辑 Cost 与分层", "清除整个 Cost（使用默认值）", "取消"]);
+      if (!action || action === "取消") continue;
+      if (action === "清除整个 Cost（使用默认值）") {
+        const saved = didSave(ctx, await actions.saveModelSubtree(providerId, modelId, "cost", baseline, null));
+        if (saved) retained.delete(draftKey);
+        continue;
+      }
       const edited = await editCostDraft(ctx, "Model 成本与分层", draft ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       if (edited.status === "discard") retained.delete(draftKey);
       else {
@@ -766,8 +818,25 @@ export async function runModelList(
   }
 }
 
+const UNSUPPORTED_PREVIEW_LIMIT = 20;
+const UNSUPPORTED_PATH_LENGTH_LIMIT = 160;
+
+export function unsupportedOverrideKeys(value: ModelOverrideConfig): string[] {
+  return Object.keys(value).filter((key) => !OVERRIDE_ALLOWED_KEYS.has(key)).sort();
+}
+
 function unsupportedOverridePaths(value: ModelOverrideConfig): string[] {
-  return Object.keys(value).filter((key) => !OVERRIDE_ALLOWED_KEYS.has(key)).sort().map((key) => `$.${key}`);
+  return unsupportedOverrideKeys(value).map((key) => `$.${key}`);
+}
+
+export function formatUnsupportedOverridePreview(paths: readonly string[]): string {
+  const visible = paths.slice(0, UNSUPPORTED_PREVIEW_LIMIT).map((path) => (
+    path.length <= UNSUPPORTED_PATH_LENGTH_LIMIT
+      ? path
+      : `${path.slice(0, UNSUPPORTED_PATH_LENGTH_LIMIT - 3)}...`
+  ));
+  const remaining = paths.length - visible.length;
+  return [...visible, ...(remaining > 0 ? [`另有 ${remaining} 个不支持字段`] : [])].join("\n");
 }
 
 function setOptionalDraftValue(draft: ModelOverrideConfig, key: string, value: unknown | null): void {
@@ -809,18 +878,19 @@ export async function editModelOverrideEntryDraft(
     if (result.type === "back") {
       const unsupportedPaths = unsupportedOverridePaths(draft);
       if (unsupportedPaths.length === 0) return { status: "save", value: draft, unsupportedPaths };
-      ctx.ui.notify("Override 包含不支持字段；普通保存不会移除它们", "warning");
+      ctx.ui.notify("Override 包含不支持字段；普通保存不会持久化这些字段", "warning");
       const action = await ctx.ui.select("Override 包含不支持字段", [
         "查看不支持字段",
-        "移除不支持字段并保存 (Remove unsupported fields and save)",
+        "移除不支持字段并保存",
         "取消并保留原值",
       ]);
+      const preview = formatUnsupportedOverridePreview(unsupportedPaths);
       if (action === "查看不支持字段") {
-        ctx.ui.notify(unsupportedPaths.join("\n"), "warning");
+        ctx.ui.notify(preview, "warning");
         continue;
       }
-      if (action?.startsWith("移除")) {
-        if (!await ctx.ui.confirm("移除不支持字段", unsupportedPaths.join("\n"))) continue;
+      if (action === "移除不支持字段并保存") {
+        if (!await ctx.ui.confirm("移除不支持字段", preview)) continue;
         for (const path of unsupportedPaths) deleteOwnKey(draft, path.slice(2));
         return { status: "save", value: draft, unsupportedPaths };
       }
@@ -842,7 +912,7 @@ export async function editModelOverrideEntryDraft(
       continue;
     }
     if (result.categoryId === "capability" && fieldId === "input") {
-      const value = await editInputTypes(ctx, multiSelect, "Override 输入类型", ownValue(draft, "input"), true);
+      const value = await editInputTypes(ctx, multiSelect, "Override 输入类型", ownValue(draft, "input"), "使用继承值");
       if (value.status === "value") setOptionalDraftValue(draft, "input", value.value);
       continue;
     }
@@ -870,7 +940,13 @@ export async function editModelOverrideEntryDraft(
     let key: "thinkingLevelMap" | "cost" | "headers" | "compat" | undefined;
     if (result.categoryId === "thinking") {
       key = "thinkingLevelMap";
-      edited = await editThinkingMapDraft(ctx, "Override Thinking Map", ownValue(draft, key) as Record<string, unknown> | undefined, true);
+      const warning = nestedWarning(draft as ModelConfig);
+      edited = await editThinkingMapDraft(
+        ctx,
+        warning ? `Override Thinking Map - ${warning}` : "Override Thinking Map",
+        ownValue(draft, key) as Record<string, unknown> | undefined,
+        true,
+      );
     } else if (result.categoryId === "cost" && fieldId === "tiers") {
       key = "cost";
       edited = await editCostDraft(ctx, "Override 成本与分层", ownValue(draft, key) as Record<string, unknown> | undefined);

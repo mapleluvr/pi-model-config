@@ -22,7 +22,12 @@ import {
 import { deepCloneJson } from "./model-fields.ts";
 import { getOwnValue, hasOwnKey, setOwnValue, deleteOwnKey } from "./own-keys.ts";
 import { fetchEndpointModels, type EndpointDiscoveryFailure, type EndpointDiscoverySuccess } from "./endpoint-models.ts";
-import { runModelList, editModelOverrideEntryDraft } from "./model-editor.ts";
+import {
+  editModelOverrideEntryDraft,
+  formatUnsupportedOverridePreview,
+  runModelList,
+  unsupportedOverrideKeys,
+} from "./model-editor.ts";
 import { searchableSelect, type SearchableSelectOption } from "./searchable-select.ts";
 import {
   openSettingsPanel,
@@ -163,13 +168,38 @@ function hasMalformedLegacy(provider: ProviderConfig): boolean {
   return (provider.models ?? []).some((model) => hasOwnKey(model, "extraPayload") && !parseLegacyExtraPayload(getOwnValue(model, "extraPayload")).ok);
 }
 
+function clearIdentityResolutions(request: ProviderIdentityRequest): ProviderIdentityRequest {
+  const cleared = deepCloneJson(request);
+  deleteOwnKey(cleared as Record<string, unknown>, "payloadCollisionResolution");
+  deleteOwnKey(cleared as Record<string, unknown>, "legacyDiscardResolution");
+  return cleared;
+}
+
+function providerIdentityNeedsLegacyDiscard(actions: ModelConfigActions, request: ProviderIdentityRequest): boolean {
+  const snapshot = actions.readEditorSnapshot();
+  if (snapshot.type !== "snapshot" || hasOwnKey(request as Record<string, unknown>, "legacyDiscardResolution")) return false;
+  const provider = getOwnValue(snapshot.native.providers, request.providerId);
+  return provider !== undefined && hasMalformedLegacy(provider);
+}
+
+async function confirmLegacyDiscard(ctx: ExtensionCommandContext): Promise<boolean> {
+  return await ctx.ui.confirm(
+    "Malformed legacy extraPayload",
+    "检测到 malformed legacy rows。确认丢弃后继续？取消会保留原始数据。",
+  );
+}
+
 async function commitProviderIdentity(
   ctx: ExtensionCommandContext,
   actions: ModelConfigActions,
   initialRequest: ProviderIdentityRequest,
 ): Promise<boolean> {
-  let request = initialRequest;
+  let request = clearIdentityResolutions(initialRequest);
   while (true) {
+    if (providerIdentityNeedsLegacyDiscard(actions, request)) {
+      if (!await confirmLegacyDiscard(ctx)) return false;
+      request = { ...request, legacyDiscardResolution: "discard-malformed-legacy" };
+    }
     const preview = await actions.previewProviderIdentityAction(request);
     if (preview.type === "payload-collision") {
       const resolution = await choosePayloadResolution(ctx);
@@ -177,35 +207,61 @@ async function commitProviderIdentity(
       request = { ...request, payloadCollisionResolution: resolution } as ProviderIdentityRequest;
       continue;
     }
+    if (preview.type === "validation-error" && providerIdentityNeedsLegacyDiscard(actions, request)) {
+      if (!await confirmLegacyDiscard(ctx)) return false;
+      request = { ...request, legacyDiscardResolution: "discard-malformed-legacy" };
+      continue;
+    }
     if (preview.type !== "preview") {
       notifyActionFailure(ctx, preview);
       return false;
     }
-    let token = preview.token;
-    let descriptor = preview.descriptor;
-    while (true) {
-      const confirmed = await ctx.ui.confirm(
-        "确认 Provider 操作",
-        `${descriptor.kind}: ${descriptor.sourceProviderId}${descriptor.targetProviderId ? ` -> ${descriptor.targetProviderId}` : ""}\n受影响身份: ${descriptor.affectedIdentities.length}\nPayload 冲突: ${descriptor.collisions.length}`,
-      );
-      if (!confirmed) {
-        actions.discardIdentityPreview(token);
-        return false;
-      }
-      const result = await actions.commitProviderIdentityAction(token);
-      if (result.type === "stale-target" && result.preview) {
-        ctx.ui.notify("配置已变化，请确认刷新后的预览", "warning");
-        token = result.preview.token;
-        descriptor = result.preview;
-        continue;
-      }
-      return didSave(ctx, result);
+    const confirmed = await ctx.ui.confirm(
+      "确认 Provider 操作",
+      `${preview.descriptor.kind}: ${preview.descriptor.sourceProviderId}${preview.descriptor.targetProviderId ? ` -> ${preview.descriptor.targetProviderId}` : ""}\n受影响身份: ${preview.descriptor.affectedIdentities.length}\nPayload 冲突: ${preview.descriptor.collisions.length}`,
+    );
+    if (!confirmed) {
+      actions.discardIdentityPreview(preview.token);
+      return false;
     }
+    const result = await actions.commitProviderIdentityAction(preview.token);
+    if (result.type === "stale-target" && result.preview) {
+      // A drift refresh has no valid resolution. Discard it and restart prompts.
+      actions.discardIdentityPreview(result.preview.token);
+      ctx.ui.notify("配置已变化，请重新检查并确认操作", "warning");
+      request = clearIdentityResolutions(initialRequest);
+      continue;
+    }
+    return didSave(ctx, result);
   }
 }
 
+function endpointIdSummaryText(summary: { ids: string[]; remaining: number }): string {
+  const visible = summary.ids.length > 0 ? summary.ids.join(", ") : "(无)";
+  return summary.remaining > 0 ? `${visible} ... 另有 ${summary.remaining} 个` : visible;
+}
+
+function endpointIdentitiesText(identities: readonly (readonly [string, string])[]): string {
+  return identities.length > 0 ? identities.map((identity) => JSON.stringify(identity)).join("\n") : "(无)";
+}
+
+function endpointDiscoveryMessage(discovery: EndpointDiscoverySuccess): string {
+  return [
+    `有效 ${discovery.validCount}，跳过 ${discovery.skippedCount}，重复 ${discovery.duplicateCount}`,
+    `发现: ${endpointIdSummaryText(discovery.idSummary)}`,
+  ].join("\n");
+}
+
 function endpointMessage(descriptor: EndpointPreviewDescriptor): string {
-  return `来源: ${descriptor.source}\n有效 ${descriptor.validCount}，跳过 ${descriptor.skippedCount}，重复 ${descriptor.duplicateCount}\n新增 ${descriptor.introduced.ids.length}，移除 ${descriptor.removed.ids.length}，Payload 冲突 ${descriptor.collisions.length}`;
+  return [
+    `来源: ${descriptor.source}`,
+    `有效 ${descriptor.validCount}，跳过 ${descriptor.skippedCount}，重复 ${descriptor.duplicateCount}`,
+    `发现: ${endpointIdSummaryText(descriptor.idSummary)}`,
+    `新增: ${endpointIdSummaryText(descriptor.introduced)}`,
+    `移除: ${endpointIdSummaryText(descriptor.removed)}`,
+    `Payload 冲突身份:\n${endpointIdentitiesText(descriptor.collisions)}`,
+    `Malformed legacy 身份:\n${endpointIdentitiesText(descriptor.malformedIdentities)}`,
+  ].join("\n");
 }
 
 function notifyEndpointFailure(ctx: ExtensionCommandContext, failure: EndpointDiscoveryFailure): void {
@@ -232,6 +288,7 @@ async function fetchAndCommit(
 ): Promise<void> {
   const discovery = await fetchModels(provider);
   if (!discovery) return;
+  ctx.ui.notify(endpointDiscoveryMessage(discovery), "info");
   const modeChoice = await ctx.ui.select("端点 Model 列表", ["合并并保留现有 Models", "替换为端点 Models", "取消"]);
   if (!modeChoice || modeChoice === "取消") return;
   let mode: "merge" | "replace" = modeChoice.startsWith("替换") ? "replace" : "merge";
@@ -241,6 +298,16 @@ async function fetchAndCommit(
     if (!confirmed) {
       actions.discardIdentityPreview(preview.token);
       return;
+    }
+    if (preview.descriptor.mode === "replace") {
+      const replaceConfirmed = await ctx.ui.confirm(
+        "再次确认替换 Models",
+        `将移除不在端点列表中的 Models: ${endpointIdSummaryText(preview.descriptor.removed)}`,
+      );
+      if (!replaceConfirmed) {
+        actions.discardIdentityPreview(preview.token);
+        return;
+      }
     }
     let payloadCollisionResolution: PayloadCollisionResolution | undefined;
     let legacyDiscardResolution: LegacyDiscardResolution | undefined;
@@ -259,16 +326,73 @@ async function fetchAndCommit(
       }
       legacyDiscardResolution = "discard-malformed-legacy";
     }
-    const result = await actions.commitEndpointChange(preview.token, { payloadCollisionResolution, legacyDiscardResolution });
+    const result = await actions.commitEndpointChange(preview.token, {
+      ...(payloadCollisionResolution ? { payloadCollisionResolution } : {}),
+      ...(legacyDiscardResolution ? { legacyDiscardResolution } : {}),
+    });
     if (result.type === "stale-target" && result.endpointPreview) {
-      ctx.ui.notify("配置已变化，请确认刷新后的端点预览", "warning");
-      preview = result.endpointPreview;
+      // A drift refresh intentionally clears resolutions. Discard it and rebuild from current state.
+      actions.discardIdentityPreview(result.endpointPreview.token);
+      ctx.ui.notify("配置已变化，请重新检查并确认端点预览", "warning");
+      preview = await actions.previewEndpointChange({ providerId, mode, discovery });
       continue;
     }
     didSave(ctx, result);
     return;
   }
   notifyActionFailure(ctx, preview);
+}
+
+interface UnsupportedOverrideField {
+  targetId: string;
+  key: string;
+  path: string;
+}
+
+function unsupportedOverrideMapFields(draft: Record<string, ModelOverrideConfig>): UnsupportedOverrideField[] {
+  const fields: UnsupportedOverrideField[] = [];
+  for (const targetId of Object.keys(draft).sort()) {
+    const override = getOwnValue(draft, targetId);
+    if (!override || typeof override !== "object" || Array.isArray(override)) continue;
+    for (const key of unsupportedOverrideKeys(override)) {
+      fields.push({
+        targetId,
+        key,
+        path: `$.modelOverrides[${JSON.stringify(targetId)}][${JSON.stringify(key)}]`,
+      });
+    }
+  }
+  return fields;
+}
+
+async function reviewOverrideMapSave(
+  ctx: ExtensionCommandContext,
+  draft: Record<string, ModelOverrideConfig>,
+): Promise<"save" | "discard"> {
+  const unsupported = unsupportedOverrideMapFields(draft);
+  if (unsupported.length === 0) return "save";
+  const preview = formatUnsupportedOverridePreview(unsupported.map((field) => field.path));
+  ctx.ui.notify("Model Overrides 包含不支持字段；普通保存不会持久化这些字段", "warning");
+  while (true) {
+    const action = await ctx.ui.select("Model Overrides 包含不支持字段", [
+      "查看不支持字段",
+      "移除不支持字段并保存",
+      "取消并保留原值",
+    ]);
+    if (action === "查看不支持字段") {
+      ctx.ui.notify(preview, "warning");
+      continue;
+    }
+    if (action !== "移除不支持字段并保存") return "discard";
+    if (!await ctx.ui.confirm("移除不支持字段并保存", preview)) continue;
+    for (const field of unsupported) {
+      const override = getOwnValue(draft, field.targetId);
+      if (override && typeof override === "object" && !Array.isArray(override)) {
+        deleteOwnKey(override, field.key);
+      }
+    }
+    return "save";
+  }
 }
 
 async function editOverridesDraft(
@@ -287,7 +411,11 @@ async function editOverridesDraft(
       "放弃更改",
     ]);
     if (!choice || choice === "放弃更改") return { status: "discard" };
-    if (choice === "保存并返回") return { status: "save", value: draft };
+    if (choice === "保存并返回") {
+      const reviewed = await reviewOverrideMapSave(ctx, draft);
+      if (reviewed === "save") return { status: "save", value: draft };
+      return { status: "discard" };
+    }
     if (choice === "新增 Override") {
       const key = await collectRequiredString(ctx, "新增 Override - Model ID", "目标 Model ID");
       if (key.status === "cancel") return { status: "discard" };
@@ -368,15 +496,10 @@ export async function runProviderEditor(
     if (result.categoryId === "general" && fieldId === "id") {
       const target = await collectRequiredString(ctx, "重命名 Provider", `${providerId}-new`);
       if (target.status === "cancel" || target.value === providerId) continue;
-      const discard = hasMalformedLegacy(provider)
-        ? await ctx.ui.confirm("Malformed legacy extraPayload", "重命名需要丢弃 malformed legacy rows。继续？")
-        : true;
-      if (!discard) continue;
       const saved = await commitProviderIdentity(ctx, actions, {
         kind: "rename",
         providerId,
         targetProviderId: target.value,
-        ...(hasMalformedLegacy(provider) ? { legacyDiscardResolution: "discard-malformed-legacy" } : {}),
       });
       if (saved) providerId = target.value;
       continue;
@@ -460,28 +583,18 @@ export async function runProviderEditor(
     if (result.categoryId === "actions" && fieldId === "copy") {
       const target = await targetInput(ctx, "复制 Provider - 新 ID", `${providerId}-copy`);
       if (!target) continue;
-      const discard = hasMalformedLegacy(provider)
-        ? await ctx.ui.confirm("Malformed legacy extraPayload", "复制需要丢弃 malformed legacy rows。继续？")
-        : true;
-      if (!discard) continue;
       await commitProviderIdentity(ctx, actions, {
         kind: "copy",
         providerId,
         targetProviderId: target,
-        ...(hasMalformedLegacy(provider) ? { legacyDiscardResolution: "discard-malformed-legacy" } : {}),
       });
       continue;
     }
     if (result.categoryId === "actions" && fieldId === "delete") {
       if (!await ctx.ui.confirm("删除 Provider", `确认删除 Provider "${providerId}" 及其 Models？`)) continue;
-      const discard = hasMalformedLegacy(provider)
-        ? await ctx.ui.confirm("Malformed legacy extraPayload", "删除需要丢弃 malformed legacy rows。继续？")
-        : true;
-      if (!discard) continue;
       const saved = await commitProviderIdentity(ctx, actions, {
         kind: "delete",
         providerId,
-        ...(hasMalformedLegacy(provider) ? { legacyDiscardResolution: "discard-malformed-legacy" } : {}),
       });
       if (saved) return;
     }
