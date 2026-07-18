@@ -173,8 +173,9 @@ and lifecycle problems. It also preserves Pi's built-in Chinese IME behavior.
 
 - `provider-editor.ts` defines Provider categories, field descriptors, edit
   actions, creation, rename, copy, delete, and Model discovery routing.
-- `model-editor.ts` defines Model and Model Override categories, field
-  descriptors, edit actions, creation, rename, copy, and delete.
+- `model-editor.ts` defines full Model descriptors plus a separate restricted
+  Model Override descriptor set. It owns Model edit actions, creation, rename,
+  copy, and delete.
 - `field-editors.ts` contains shared object editors and value collection for
   headers, compat data, thinking maps, costs, and other nested structures.
 - `index.ts` retains command registration, top-level routing, Provider/Model
@@ -209,10 +210,27 @@ stored object untouched.
 - Model Overrides
 
 `Manage Models` opens the existing searchable Model list. `Model Overrides`
-opens a keyed list. Each override reuses Model field descriptors in partial
-override mode: absent values display as inherited, payload is unavailable, and
-only explicitly set fields are persisted. Override entries can be added,
-renamed, or deleted with collision and destructive confirmations.
+opens a keyed list. Each entry uses a dedicated restricted descriptor set that
+matches Pi's `ModelOverrideSchema`; it does not reuse the unrestricted Model
+catalog.
+
+An override may expose only:
+
+- target Model ID as the record key, never as a stored `id` property;
+- `name`;
+- `reasoning`;
+- `thinkingLevelMap`;
+- `input`;
+- partial `cost`, including optional rates and tiers;
+- `contextWindow`;
+- `maxTokens`;
+- `headers`;
+- `compat`.
+
+Absent values display as inherited and only explicitly set fields are
+persisted. Override entries can be added, renamed, or deleted with collision
+and destructive confirmations. The editor must never introduce `api`,
+`baseUrl`, `id`, or private Payload fields into an override.
 
 ### Compatibility
 
@@ -396,7 +414,9 @@ Implementation follows TDD for new behavior. Focused tests cover:
 - immediate patches edit only the chosen field;
 - explicit clear behavior and required-field rejection;
 - unknown field preservation after every supported patch;
-- complete pricing, thinking-map `max`, headers, and endpoint overrides.
+- complete pricing, thinking-map `max`, headers, and endpoint overrides;
+- the exact Model Override allowlist and absence of `api`, `baseUrl`, `id`, and
+  private Payload descriptors.
 
 ### Controller and Nested-Editor Tests
 
@@ -430,7 +450,8 @@ The existing test suite and syntax checks must continue to pass.
 5. New Providers and Models use only the approved minimal wizard and then open
    the settings panel.
 6. Common Provider and Model fields listed in this design are directly
-   editable, while unknown fields remain intact.
+   editable, while unknown fields remain intact; Model Overrides emit only
+   Pi's documented override field subset.
 7. `Fetch Models from endpoint` remains available and satisfies the specified
    merge, replace, cancel, and failure behavior.
 8. Provider/Model identity changes preserve private payload lifecycle and reject
