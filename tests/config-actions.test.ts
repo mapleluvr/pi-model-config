@@ -1845,7 +1845,7 @@ test("completeSimpleAction discards tokens on the same actions instance", async 
 
 test("validation pollution cannot make zero-baseUrl write succeed", async () => withAgentDir(async (agentDir, actions) => {
   const proto = Object.prototype as Record<string, unknown>;
-  const previous = proto.baseUrl;
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, "baseUrl");
   try {
     Object.defineProperty(Object.prototype, "baseUrl", {
       value: "http://evil",
@@ -1864,9 +1864,233 @@ test("validation pollution cannot make zero-baseUrl write succeed", async () => 
     assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(before), true);
     assert.equal(Object.keys(readNative(agentDir).providers).length, 0);
   } finally {
-    if (previous === undefined) delete proto.baseUrl;
-    else Object.defineProperty(Object.prototype, "baseUrl", {
-      value: previous, configurable: true, enumerable: true, writable: true,
+    if (previous) Object.defineProperty(Object.prototype, "baseUrl", previous);
+    else delete proto.baseUrl;
+  }
+}));
+
+test("simple collision retries require own token and collision resolution fields", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, { providers: {} });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "p", "m", { keep: true }));
+  const config = {
+    baseUrl: "http://localhost",
+    api: "openai-completions" as const,
+    models: [model("m")],
+  };
+  const first = await actions.createProvider("p", config);
+  assert.equal(first.type, "payload-collision");
+  if (first.type !== "payload-collision" || !first.resolutionToken) return;
+  const nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+  const payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+
+  const inheritedChoice = Object.create({
+    payloadCollisionResolution: "replace-target",
+  }) as { resolutionToken: string; payloadCollisionResolution?: "replace-target" };
+  Object.defineProperty(inheritedChoice, "resolutionToken", {
+    value: first.resolutionToken,
+    enumerable: true,
+    configurable: true,
+  });
+  const blocked = await actions.createProvider("ignored", { models: [] }, inheritedChoice);
+  assert.equal(blocked.type, "stale-target");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+  assert.equal(Object.hasOwn(readNative(agentDir).providers, "p"), false);
+  if (blocked.type === "stale-target" && blocked.resolutionToken) {
+    actions.discardResolutionToken(blocked.resolutionToken);
+  }
+
+  const inheritedAll = Object.create({
+    resolutionToken: first.resolutionToken,
+    payloadCollisionResolution: "replace-target",
+  }) as { resolutionToken?: string; payloadCollisionResolution?: "replace-target" };
+  const ignored = await actions.createProvider("p", config, inheritedAll);
+  assert.equal(ignored.type, "payload-collision");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+  if (ignored.type === "payload-collision" && ignored.resolutionToken) {
+    actions.discardResolutionToken(ignored.resolutionToken);
+  }
+}));
+
+test("simple malformed retries require an own legacy discard field", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("bad", { extraPayload: { not: "rows" } })],
+      },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "bad", { keep: true }));
+  const first = await actions.patchModel("local", "bad", { name: "Changed" });
+  assert.equal(first.type, "validation-error");
+  if (first.type !== "validation-error" || !first.resolutionToken) return;
+  const nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+  const payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+
+  const inheritedDiscard = Object.create({
+    legacyDiscardResolution: "discard-malformed-legacy",
+  }) as { resolutionToken: string; legacyDiscardResolution?: "discard-malformed-legacy" };
+  Object.defineProperty(inheritedDiscard, "resolutionToken", {
+    value: first.resolutionToken,
+    enumerable: true,
+    configurable: true,
+  });
+  const blocked = await actions.patchModel("local", "bad", { name: "Ignored" }, inheritedDiscard);
+  assert.equal(blocked.type, "stale-target");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), true);
+  if (blocked.type === "stale-target" && blocked.resolutionToken) {
+    actions.discardResolutionToken(blocked.resolutionToken);
+  }
+}));
+
+test("identity collisions ignore inherited Provider and Model resolutions", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      source: { baseUrl: "http://localhost", api: "openai-completions", models: [model("m")] },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "dest", "m", { keep: true }));
+  let nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+  let payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+
+  const providerRequest = Object.assign(Object.create({
+    payloadCollisionResolution: "replace-target",
+  }), {
+    kind: "rename" as const,
+    providerId: "source",
+    targetProviderId: "dest",
+  });
+  const providerBlocked = await actions.previewProviderIdentityAction(providerRequest);
+  assert.equal(providerBlocked.type, "payload-collision");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+  assert.equal(Object.hasOwn(readNative(agentDir).providers, "dest"), false);
+
+  writeNative(agentDir, {
+    providers: {
+      local: { baseUrl: "http://localhost", api: "openai-completions", models: [model("old")] },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "new", { keep: true }));
+  nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+  payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+  const modelRequest = Object.assign(Object.create({
+    payloadCollisionResolution: "reuse-target",
+  }), {
+    kind: "rename" as const,
+    providerId: "local",
+    modelId: "old",
+    targetModelId: "new",
+  });
+  const modelBlocked = await actions.previewModelIdentityAction(modelRequest);
+  assert.equal(modelBlocked.type, "payload-collision");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+  assert.equal(readNative(agentDir).providers.local!.models![0]!.id, "old");
+}));
+
+test("Object.prototype discard cannot authorize malformed identity deletion", async () => withAgentDir(async (agentDir, actions) => {
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, "legacyDiscardResolution");
+  try {
+    Object.defineProperty(Object.prototype, "legacyDiscardResolution", {
+      value: "discard-malformed-legacy",
+      configurable: true,
+      enumerable: true,
+      writable: true,
     });
+    writeNative(agentDir, {
+      providers: {
+        local: {
+          baseUrl: "http://localhost",
+          api: "openai-completions",
+          models: [model("bad", { extraPayload: { not: "rows" } })],
+        },
+      },
+    });
+    writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "bad", { keep: true }));
+    const nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+    const payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+
+    const modelBlocked = await actions.previewModelIdentityAction({
+      kind: "delete",
+      providerId: "local",
+      modelId: "bad",
+    });
+    assert.equal(modelBlocked.type, "validation-error");
+    assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+    assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+    assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), true);
+
+    const providerBlocked = await actions.previewProviderIdentityAction({
+      kind: "delete",
+      providerId: "local",
+    });
+    assert.equal(providerBlocked.type, "validation-error");
+    assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+    assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+  } finally {
+    if (previous) Object.defineProperty(Object.prototype, "legacyDiscardResolution", previous);
+    else delete (Object.prototype as Record<string, unknown>).legacyDiscardResolution;
+  }
+}));
+
+test("refreshed identity tokens clear own and inherited resolution fields", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      source: { baseUrl: "http://localhost", api: "openai-completions", models: [model("m")] },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "dest", "m", { version: 1 }));
+  const first = await actions.previewProviderIdentityAction({
+    kind: "rename",
+    providerId: "source",
+    targetProviderId: "dest",
+    payloadCollisionResolution: "replace-target",
+  });
+  assert.equal(first.type, "preview");
+  if (first.type !== "preview") return;
+
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "dest", "m", { version: 2 }));
+  const previousPayload = Object.getOwnPropertyDescriptor(Object.prototype, "payloadCollisionResolution");
+  const previousDiscard = Object.getOwnPropertyDescriptor(Object.prototype, "legacyDiscardResolution");
+  const previousToken = Object.getOwnPropertyDescriptor(Object.prototype, "resolutionToken");
+  try {
+    Object.defineProperty(Object.prototype, "payloadCollisionResolution", {
+      value: "replace-target", configurable: true, enumerable: true, writable: true,
+    });
+    Object.defineProperty(Object.prototype, "legacyDiscardResolution", {
+      value: "discard-malformed-legacy", configurable: true, enumerable: true, writable: true,
+    });
+    Object.defineProperty(Object.prototype, "resolutionToken", {
+      value: "inherited-token", configurable: true, enumerable: true, writable: true,
+    });
+    const nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+    const payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+
+    const drifted = await actions.commitProviderIdentityAction(first.token);
+    assert.equal(drifted.type, "stale-target");
+    assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+    assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+    if (drifted.type !== "stale-target" || !drifted.preview) return;
+    assert.equal(drifted.preview.resolution, undefined);
+
+    const blocked = await actions.commitProviderIdentityAction(drifted.preview.token);
+    assert.equal(blocked.type, "payload-collision");
+    assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+    assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+    assert.equal(Object.hasOwn(readNative(agentDir).providers, "source"), true);
+    assert.equal(Object.hasOwn(readNative(agentDir).providers, "dest"), false);
+  } finally {
+    if (previousPayload) Object.defineProperty(Object.prototype, "payloadCollisionResolution", previousPayload);
+    else delete (Object.prototype as Record<string, unknown>).payloadCollisionResolution;
+    if (previousDiscard) Object.defineProperty(Object.prototype, "legacyDiscardResolution", previousDiscard);
+    else delete (Object.prototype as Record<string, unknown>).legacyDiscardResolution;
+    if (previousToken) Object.defineProperty(Object.prototype, "resolutionToken", previousToken);
+    else delete (Object.prototype as Record<string, unknown>).resolutionToken;
   }
 }));

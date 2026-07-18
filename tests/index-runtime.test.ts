@@ -4,7 +4,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import extension from "../index.ts";
-import { readModelsConfig, writeModelsConfig } from "../config.ts";
+import { ModelConfigActions } from "../config-actions.ts";
+import { getModelsPath, readModelsConfig, writeModelsConfig } from "../config.ts";
 import {
   getPayloadConfigPath,
   lookupModelPayload,
@@ -395,5 +396,55 @@ test("diagnostics reports a whitespace-only models file as unreadable", async ()
 
     assert.equal(fs.readFileSync(modelsPath, "utf8"), blank);
     assert.ok(notifications.some(({ message, level }) => level === "error" && message.includes("file is blank")));
+  });
+});
+
+test("controller discards a cancelled simple-action token on its creating actions instance", async () => {
+  await withRuntimeAgentDir(async () => {
+    writeModelsConfig({
+      providers: {
+        local: {
+          baseUrl: "http://localhost:11434",
+          api: "openai-completions",
+          models: [{
+            id: "bad", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            extraPayload: { not: "rows" },
+          }],
+        },
+      },
+    });
+    seedModelPayload("local", "bad", { keep: true });
+    const nativeBefore = fs.readFileSync(getModelsPath());
+    const payloadBefore = fs.readFileSync(getPayloadConfigPath());
+
+    const originalPatchModel = ModelConfigActions.prototype.patchModel;
+    const originalDiscard = ModelConfigActions.prototype.discardResolutionToken;
+    let creator: ModelConfigActions | undefined;
+    let discarder: ModelConfigActions | undefined;
+    ModelConfigActions.prototype.patchModel = async function (...args) {
+      const result = await originalPatchModel.apply(this, args);
+      if (result.type === "validation-error" && result.resolutionToken) creator = this;
+      return result;
+    };
+    ModelConfigActions.prototype.discardResolutionToken = function (token) {
+      discarder = this;
+      return originalDiscard.call(this, token);
+    };
+
+    try {
+      const script = modelEditScript("bad");
+      script.confirms.push(false);
+      await runModelConfigCommand(script);
+      assert.ok(creator);
+      assert.equal(discarder, creator);
+      assert.equal(creator!.boundPreviewCount(), 0);
+      assert.equal(fs.readFileSync(getModelsPath()).equals(nativeBefore), true);
+      assert.equal(fs.readFileSync(getPayloadConfigPath()).equals(payloadBefore), true);
+      assert.equal(Object.hasOwn(readModelsConfig().providers.local!.models![0]!, "extraPayload"), true);
+    } finally {
+      ModelConfigActions.prototype.patchModel = originalPatchModel;
+      ModelConfigActions.prototype.discardResolutionToken = originalDiscard;
+    }
   });
 });

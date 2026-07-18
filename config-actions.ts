@@ -37,6 +37,7 @@ import {
 } from "./model-fields.ts";
 import {
   assertValidModelsCandidate,
+  materializeOwnOnly,
   validateModelsCandidate,
   type ValidationIssue,
   type ValidationOptions,
@@ -316,30 +317,50 @@ function setsEqual(a: readonly string[], b: readonly string[]): boolean {
   return true;
 }
 
-function rejectBareSimpleResolution(options?: {
+interface OwnResolutionFields {
   resolutionToken?: IdentityPreviewToken;
   payloadCollisionResolution?: PayloadCollisionResolution;
   legacyDiscardResolution?: LegacyDiscardResolution;
-}): BuildOutcome | undefined {
-  const hasSelected = options?.payloadCollisionResolution !== undefined
-    || options?.legacyDiscardResolution !== undefined;
-  if (hasSelected && !options?.resolutionToken) {
+}
+
+/** Read retry choices only from own properties; inherited prototype state is never authoritative. */
+function ownResolutionFields(options?: object): OwnResolutionFields {
+  const own = Object.create(null) as OwnResolutionFields;
+  if (!options) return own;
+  if (hasOwnKey(options, "resolutionToken")) {
+    own.resolutionToken = getOwnValue<IdentityPreviewToken>(options, "resolutionToken");
+  }
+  if (hasOwnKey(options, "payloadCollisionResolution")) {
+    own.payloadCollisionResolution = getOwnValue<PayloadCollisionResolution>(options, "payloadCollisionResolution");
+  }
+  if (hasOwnKey(options, "legacyDiscardResolution")) {
+    own.legacyDiscardResolution = getOwnValue<LegacyDiscardResolution>(options, "legacyDiscardResolution");
+  }
+  return own;
+}
+
+function cloneOwnOnlyJson<T>(value: T): T {
+  return materializeOwnOnly(deepCloneJson(value)) as T;
+}
+
+function rejectBareSimpleResolution(options?: object): BuildOutcome | undefined {
+  const resolution = ownResolutionFields(options);
+  const hasSelected = resolution.payloadCollisionResolution !== undefined
+    || resolution.legacyDiscardResolution !== undefined;
+  if (hasSelected && !resolution.resolutionToken) {
     return { type: "stale-target", path: "resolution-token" };
   }
   return undefined;
 }
 
-/** Strip prior payload/legacy resolutions so a refreshed identity preview cannot auto-apply them. */
+/** Strip every prior retry choice onto an own-only request before binding a refreshed preview. */
 function clearIdentityResolutions(
   request: ProviderIdentityRequest | ModelIdentityRequest,
 ): ProviderIdentityRequest | ModelIdentityRequest {
-  const next = deepCloneJson(request) as ProviderIdentityRequest | ModelIdentityRequest;
-  if ("payloadCollisionResolution" in next) {
-    delete (next as { payloadCollisionResolution?: PayloadCollisionResolution }).payloadCollisionResolution;
-  }
-  if ("legacyDiscardResolution" in next) {
-    delete (next as { legacyDiscardResolution?: LegacyDiscardResolution }).legacyDiscardResolution;
-  }
+  const next = cloneOwnOnlyJson(request) as ProviderIdentityRequest | ModelIdentityRequest;
+  deleteOwnKey(next, "resolutionToken");
+  deleteOwnKey(next, "payloadCollisionResolution");
+  deleteOwnKey(next, "legacyDiscardResolution");
   return next;
 }
 
@@ -585,7 +606,7 @@ function applyPayloadDisposition(args: {
     if (args.explicitPayload === null) {
       payload = removePayloadDocumentValue(payload, args.toProvider, args.toModelId);
     } else {
-      payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, args.explicitPayload);
+      payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, deepCloneJson(args.explicitPayload));
     }
     return payload;
   }
@@ -602,7 +623,7 @@ function applyPayloadDisposition(args: {
       payload = removePayloadDocumentValue(payload, args.fromProvider, args.fromModelId);
     }
     if (!targetExists || args.resolution === "replace-target") {
-      payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, args.migrateLegacy);
+      payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, deepCloneJson(args.migrateLegacy));
     }
     return payload;
   }
@@ -800,11 +821,12 @@ export class ModelConfigActions {
         return this.buildProviderModelsPatch(snapshot, providerId, existing, patch, options);
       }
 
-      // Ordinary non-models patch must never accept simple resolution flags/tokens.
+      // Ordinary non-models patch must never accept own simple resolution flags/tokens.
+      const resolution = ownResolutionFields(options);
       if (
-        options?.resolutionToken !== undefined
-        || options?.payloadCollisionResolution !== undefined
-        || options?.legacyDiscardResolution !== undefined
+        resolution.resolutionToken !== undefined
+        || resolution.payloadCollisionResolution !== undefined
+        || resolution.legacyDiscardResolution !== undefined
       ) {
         return { type: "stale-target", path: "resolution-token" };
       }
@@ -849,6 +871,7 @@ export class ModelConfigActions {
 
       const bare = rejectBareSimpleResolution(options);
       if (bare) return bare;
+      const resolution = ownResolutionFields(options);
 
       let effectiveProviderId = providerId;
       let effectiveModelId = modelId;
@@ -856,11 +879,13 @@ export class ModelConfigActions {
       let effectiveExisting = existing;
       let effectiveIndex = index;
       let hasExplicitPayload = options !== undefined && hasOwnKey(options, "payload");
-      let explicitPayload = options?.payload;
-      let legacyResolution = options?.legacyDiscardResolution;
+      let explicitPayload = options !== undefined && hasOwnKey(options, "payload")
+        ? getOwnValue<Record<string, unknown> | null>(options, "payload")
+        : undefined;
+      let legacyResolution = resolution.legacyDiscardResolution;
 
-      if (options?.resolutionToken) {
-        const bound = this.takeSimple(options.resolutionToken);
+      if (resolution.resolutionToken) {
+        const bound = this.takeSimple(resolution.resolutionToken);
         if (!bound || bound.request.action !== "patch-model") {
           return { type: "stale-target", path: "resolution-token" };
         }
@@ -956,14 +981,15 @@ export class ModelConfigActions {
     return this.run((snapshot) => {
       const bare = rejectBareSimpleResolution(options);
       if (bare) return bare;
+      const resolution = ownResolutionFields(options);
 
       let effectiveProviderId = providerId;
       let effectiveConfig = config;
-      let payloadResolution = options?.payloadCollisionResolution;
-      let legacyResolution = options?.legacyDiscardResolution;
+      let payloadResolution = resolution.payloadCollisionResolution;
+      let legacyResolution = resolution.legacyDiscardResolution;
 
-      if (options?.resolutionToken) {
-        const bound = this.takeSimple(options.resolutionToken);
+      if (resolution.resolutionToken) {
+        const bound = this.takeSimple(resolution.resolutionToken);
         if (!bound || bound.request.action !== "create-provider") {
           return { type: "stale-target", path: "resolution-token" };
         }
@@ -1064,16 +1090,19 @@ export class ModelConfigActions {
     return this.run((snapshot) => {
       const bare = rejectBareSimpleResolution(options);
       if (bare) return bare;
+      const resolution = ownResolutionFields(options);
 
       let effectiveProviderId = providerId;
       let effectiveModel = model;
-      let explicitPayload = options?.payload;
+      let explicitPayload = options !== undefined && hasOwnKey(options, "payload")
+        ? getOwnValue<Record<string, unknown>>(options, "payload")
+        : undefined;
       let hasExplicitPayload = options !== undefined && hasOwnKey(options, "payload");
-      let payloadResolution = options?.payloadCollisionResolution;
-      let legacyResolution = options?.legacyDiscardResolution;
+      let payloadResolution = resolution.payloadCollisionResolution;
+      let legacyResolution = resolution.legacyDiscardResolution;
 
-      if (options?.resolutionToken) {
-        const bound = this.takeSimple(options.resolutionToken);
+      if (resolution.resolutionToken) {
+        const bound = this.takeSimple(resolution.resolutionToken);
         if (!bound || bound.request.action !== "create-model") {
           return { type: "stale-target", path: "resolution-token" };
         }
@@ -1324,7 +1353,7 @@ export class ModelConfigActions {
     this.previews.set(token, {
       binding: "identity",
       ...bound,
-      request: deepCloneJson(bound.request),
+      request: cloneOwnOnlyJson(bound.request),
       collisions: bound.collisions.map((entry) => [entry[0], entry[1]] as ModelIdentity),
       affectedIdentities: bound.affectedIdentities.map((entry) => [entry[0], entry[1]] as ModelIdentity),
       identitySet: [...bound.identitySet],
@@ -1365,7 +1394,7 @@ export class ModelConfigActions {
     }
     return {
       ...bound,
-      request: deepCloneJson(bound.request),
+      request: cloneOwnOnlyJson(bound.request),
       collisions: bound.collisions.map((entry) => [entry[0], entry[1]] as ModelIdentity),
       affectedIdentities: bound.affectedIdentities.map((entry) => [entry[0], entry[1]] as ModelIdentity),
       identitySet: [...bound.identitySet],
@@ -1445,6 +1474,7 @@ export class ModelConfigActions {
     scope: "provider" | "model",
     request: ProviderIdentityRequest | ModelIdentityRequest,
   ): Promise<ActionResult> {
+    request = cloneOwnOnlyJson(request);
     let coordinated: CoordinatedSnapshot;
     try {
       coordinated = readCoordinatedSnapshot(coordinatorOptions(this.options));
@@ -1481,7 +1511,7 @@ export class ModelConfigActions {
     const descriptor = this.descriptorFor(scope, request, coordinated.native.hash, coordinated.payload.hash, affected, collisions);
     const token = this.bindPreview({
       scope,
-      request: deepCloneJson(request),
+      request: cloneOwnOnlyJson(request),
       nativeHash: coordinated.native.hash,
       payloadHash: coordinated.payload.hash,
       identitySet,
@@ -1618,7 +1648,7 @@ export class ModelConfigActions {
         );
         const newToken = this.bindPreview({
           scope: bound.scope,
-          request: deepCloneJson(clearedRequest),
+          request: cloneOwnOnlyJson(clearedRequest),
           nativeHash: snapshot.native.hash,
           payloadHash: snapshot.payload.hash,
           identitySet: identitySetNow,
@@ -1832,12 +1862,13 @@ export class ModelConfigActions {
   ): BuildOutcome {
     const bare = rejectBareSimpleResolution(options);
     if (bare) return bare;
+    const resolution = ownResolutionFields(options);
 
     let effectiveProviderId = providerId;
     let effectivePatch = patch;
     let effectiveExisting = existing;
-    let payloadResolution = options?.payloadCollisionResolution;
-    let legacyResolution = options?.legacyDiscardResolution;
+    let payloadResolution = resolution.payloadCollisionResolution;
+    let legacyResolution = resolution.legacyDiscardResolution;
 
     const rawModels = (effectivePatch as { models?: unknown }).models;
     if (!Array.isArray(rawModels)) {
@@ -1847,8 +1878,8 @@ export class ModelConfigActions {
       };
     }
 
-    if (options?.resolutionToken) {
-      const bound = this.takeSimple(options.resolutionToken);
+    if (resolution.resolutionToken) {
+      const bound = this.takeSimple(resolution.resolutionToken);
       if (!bound || bound.request.action !== "patch-provider-models") {
         return { type: "stale-target", path: "resolution-token" };
       }

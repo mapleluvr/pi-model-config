@@ -340,3 +340,19 @@ DONE.
 
 - RED: inherited prototype validation; polluted empty legacy rows; absent vs {}; either/or drift; model delete without discard; wrong-instance discard; non-models resolution flags.
 - GREEN: expanded focused suites; full `npm test` 192/192; `npm run check` + `git diff --check` pass.
+
+## Follow-up 7 - own-only resolution boundaries (2026-07-18)
+
+### Finding -> fix
+
+1. **Simple retry inputs** -> `ownResolutionFields` extracts only own `resolutionToken`, `payloadCollisionResolution`, and `legacyDiscardResolution`; custom-prototype choices cannot authorize collision replacement/reuse or malformed-legacy discard.
+2. **Identity requests and bindings** -> Provider/Model requests are deep-cloned onto null-prototype own-only structures before preview/build/bind/commit; inherited collision and discard fields are never authoritative.
+3. **Refreshed identity tokens** -> `clearIdentityResolutions` returns an own-only request with token/collision/discard fields omitted, preventing inherited fallback after drift while retaining fresh hash/identity-set validation.
+4. **JSON compatibility** -> payload disposition converts bound own-only payload values back to ordinary JSON data at the existing payload boundary; JSON equality treats null-prototype and ordinary object bags equivalently without changing array-order semantics.
+5. **Controller coverage** -> a real scripted controller cancellation asserts `completeSimpleAction` discards through the exact `ModelConfigActions` instance that created the token and leaves native/private bytes unchanged.
+
+### RED -> GREEN
+
+- RED: inherited simple collision retry wrote and deleted the target payload; inherited Provider/Model identity choices previewed destructive operations; polluted Model delete bypassed discard; refreshed preview retained inherited replacement.
+- GREEN: custom-prototype and `Object.prototype` adversarial cases reject/ignore inherited choices with byte-identical native/private storage; focused expanded suites pass 92/92.
+- Validation: full `npm test` 198/198; `npm run check` and `git diff --check` pass.

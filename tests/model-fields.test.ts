@@ -94,6 +94,8 @@ test("deep clone and equality helpers preserve false/zero and isolate mutations"
   assert.equal(deepEqualJson({ a: false }, { a: true }), false);
   // Object key order is insignificant; array order is significant.
   assert.equal(deepEqualJson({ b: 1, a: 2 }, { a: 2, b: 1 }), true);
+  const ownOnly = Object.assign(Object.create(null), { a: 2, b: 1 });
+  assert.equal(deepEqualJson(ownOnly, { b: 1, a: 2 }), true);
   assert.equal(deepEqualJson([1, 2], [2, 1]), false);
 });
 
