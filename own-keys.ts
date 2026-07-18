@@ -12,6 +12,8 @@ export interface CloneOwnJsonOptions {
   objectPrototype?: "null" | "ordinary";
   /** Validation-only: preserve non-finite numbers so exact issue paths can be reported. */
   allowNonFiniteNumbers?: boolean;
+  /** Runtime request only: preserve optional fields whose value is undefined. */
+  allowUndefinedValues?: boolean;
 }
 
 function cloneOwnJsonValue(
@@ -19,7 +21,9 @@ function cloneOwnJsonValue(
   active: Set<object>,
   objectPrototype: "null" | "ordinary",
   allowNonFiniteNumbers: boolean,
+  allowUndefinedValues: boolean,
 ): unknown {
+  if (value === undefined && allowUndefinedValues) return undefined;
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value) && !allowNonFiniteNumbers) throw new OwnJsonDataError();
@@ -41,7 +45,13 @@ function cloneOwnJsonValue(
       for (let index = 0; index < value.length; index += 1) {
         const descriptor = descriptors[String(index)];
         if (!descriptor?.enumerable || !("value" in descriptor)) throw new OwnJsonDataError();
-        out.push(cloneOwnJsonValue(descriptor.value, active, objectPrototype, allowNonFiniteNumbers));
+        out.push(cloneOwnJsonValue(
+          descriptor.value,
+          active,
+          objectPrototype,
+          allowNonFiniteNumbers,
+          allowUndefinedValues,
+        ));
       }
       for (const key of Object.keys(descriptors)) {
         const descriptor = descriptors[key]!;
@@ -59,7 +69,13 @@ function cloneOwnJsonValue(
       const descriptor = descriptors[key]!;
       if (!descriptor.enumerable) continue;
       if (!("value" in descriptor)) throw new OwnJsonDataError();
-      setOwnValue(out, key, cloneOwnJsonValue(descriptor.value, active, objectPrototype, allowNonFiniteNumbers));
+      setOwnValue(out, key, cloneOwnJsonValue(
+        descriptor.value,
+        active,
+        objectPrototype,
+        allowNonFiniteNumbers,
+        allowUndefinedValues,
+      ));
     }
     return out;
   } finally {
@@ -78,6 +94,7 @@ export function cloneOwnJsonData<T>(value: T, options: CloneOwnJsonOptions = {})
     new Set(),
     options.objectPrototype ?? "null",
     options.allowNonFiniteNumbers ?? false,
+    options.allowUndefinedValues ?? false,
   ) as T;
 }
 

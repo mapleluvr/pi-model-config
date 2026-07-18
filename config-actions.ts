@@ -941,7 +941,11 @@ export class ModelConfigActions {
     } catch {
       return { type: "recovery-required" };
     }
-    if (coordinated.native.parseState === "malformed" || coordinated.payload.parseState === "malformed") {
+    if (
+      coordinated.native.parseState === "malformed"
+      || coordinated.payload.parseState === "malformed"
+      || coordinated.journal.parseState !== "missing"
+    ) {
       return { type: "recovery-required" };
     }
     return snapshotFrom(coordinated);

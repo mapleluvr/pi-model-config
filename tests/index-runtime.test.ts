@@ -6,6 +6,7 @@ import * as path from "node:path";
 import extension from "../index.ts";
 import { ModelConfigActions } from "../config-actions.ts";
 import { getModelsPath, readModelsConfig, writeModelsConfig } from "../config.ts";
+import { commitCoordinatedMutation, getTransactionJournalPath } from "../payload-coordinator.ts";
 import {
   getPayloadConfigPath,
   lookupModelPayload,
@@ -128,6 +129,50 @@ test("activation does not dynamically register native providers and injects only
     else process.env.PI_CODING_AGENT_DIR = previous;
     fs.rmSync(agentDir, { recursive: true, force: true });
   }
+});
+
+test("editor blocks a native-after payload-before journal without mutating storage", async () => {
+  await withRuntimeAgentDir(async (agentDir) => {
+    writeModelsConfig({
+      providers: {
+        local: {
+          baseUrl: "http://localhost:11434",
+          api: "openai-completions",
+          models: [{
+            id: "old", name: "Before", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          }],
+        },
+      },
+    });
+    seedModelPayload("local", "old", { inherited: true });
+    const nativeAfter = readModelsConfig();
+    nativeAfter.providers.local!.models![0]!.name = "After";
+    const payloadAfter = setPayloadDocumentValue(readPayloadConfig(), "local", "old", { inherited: false });
+
+    await assert.rejects(commitCoordinatedMutation({
+      build: () => ({ native: nativeAfter, payload: payloadAfter, affectedIdentities: [["local", "old"]] }),
+      onBoundary(boundary) {
+        if (boundary === "native") throw new Error("simulated crash");
+      },
+    }), /simulated crash/);
+
+    const actions = new ModelConfigActions({ agentDir });
+    assert.deepEqual(actions.readEditorSnapshot(), { type: "recovery-required" });
+    const artifactPaths = [getModelsPath(agentDir), getPayloadConfigPath(agentDir), getTransactionJournalPath(agentDir)];
+    const before = artifactPaths.map((filePath) => fs.readFileSync(filePath));
+    const notifications: Array<{ message: string; level: string }> = [];
+
+    await runModelConfigCommand({
+      selects: ["管理 Providers", "编辑 [local]", "管理 Models", "编辑", "返回主菜单", "退出"],
+      editors: ["old"],
+      confirms: [],
+      customs: ["model:0", "__pi_model_config_action:back"],
+    }, { notifications });
+
+    artifactPaths.forEach((filePath, index) => assert.deepEqual(fs.readFileSync(filePath), before[index]));
+    assert.ok(notifications.some(({ message, level }) => level === "error" && message.includes("恢复")));
+  });
 });
 
 test("successful model rename keeps an explicitly edited destination payload and removes the old identity", async () => {

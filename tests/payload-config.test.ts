@@ -166,6 +166,49 @@ test("injects shallow payload values without mutating stored or event objects", 
   assert.deepEqual(configuredPayload, { temperature: 0.2, nested: { replace: true } });
 });
 
+test("injects payload into OpenAI request shapes with undefined optional fields", () => {
+  const eventPayload = {
+    model: "responses-model",
+    input: [{ role: "user", content: "hello" }],
+    prompt_cache_retention: undefined,
+    stream_options: { include_usage: undefined },
+  };
+  const configuredPayload = { temperature: 0.2, metadata: { source: "model-config" } };
+
+  const result = mergePayloadIntoRequest(eventPayload, configuredPayload);
+
+  assert.deepEqual(result, {
+    model: "responses-model",
+    input: [{ role: "user", content: "hello" }],
+    prompt_cache_retention: undefined,
+    stream_options: { include_usage: undefined },
+    temperature: 0.2,
+    metadata: { source: "model-config" },
+  });
+  assert.notEqual(result?.input, eventPayload.input);
+  assert.notEqual(result?.stream_options, eventPayload.stream_options);
+  assert.notEqual(result?.metadata, configuredPayload.metadata);
+  assert.equal(Object.hasOwn(result!, "prompt_cache_retention"), true);
+  assert.equal(Object.hasOwn(result!.stream_options as object, "include_usage"), true);
+});
+
+test("injects payload into Anthropic request shapes without mutating inputs", () => {
+  const eventPayload = {
+    model: "messages-model",
+    max_tokens: 1024,
+    messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+  };
+  const configuredPayload = { thinking: { type: "enabled", budget_tokens: 512 } };
+
+  const result = mergePayloadIntoRequest(eventPayload, configuredPayload);
+
+  assert.deepEqual(result, { ...eventPayload, thinking: configuredPayload.thinking });
+  assert.notEqual(result?.messages, eventPayload.messages);
+  assert.notEqual(result?.thinking, configuredPayload.thinking);
+  assert.deepEqual(eventPayload.messages, [{ role: "user", content: [{ type: "text", text: "hello" }] }]);
+  assert.deepEqual(configuredPayload, { thinking: { type: "enabled", budget_tokens: 512 } });
+});
+
 test("enumerates unambiguous empty-model legacy key provider/ and cleans it on provider removal", () => {
   let config = emptyPayloadDocument();
   Object.defineProperty(config.extraPayloads, "local/", {

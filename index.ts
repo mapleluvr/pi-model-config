@@ -490,17 +490,20 @@ function loadModelPayload(
   providerId: string,
   existing?: ModelConfig,
 ): {
+  type: "loaded";
   payload?: Record<string, unknown>;
   migrateLegacy?: Record<string, unknown>;
   hasMalformedLegacy?: boolean;
-} {
-  if (!existing) return {};
+} | { type: "recovery-required" } {
+  if (!existing) return { type: "loaded" };
   const snapshot = modelConfigActions().readEditorSnapshot();
-  const privatePayload = snapshot.type === "snapshot"
-    ? lookupModelPayload(snapshot.payload, providerId, existing.id)
-    : undefined;
+  if (snapshot.type === "recovery-required") {
+    notifyActionFailure(ctx, snapshot);
+    return snapshot;
+  }
+  const privatePayload = lookupModelPayload(snapshot.payload, providerId, existing.id);
   if (!Object.hasOwn(existing, "extraPayload")) {
-    return privatePayload ? { payload: privatePayload } : {};
+    return privatePayload ? { type: "loaded", payload: privatePayload } : { type: "loaded" };
   }
   const legacy = (existing as Record<string, unknown>)["extraPayload"];
   const migrated = parseLegacyPayload(legacy);
@@ -508,11 +511,11 @@ function loadModelPayload(
     // Malformed rows are preserved until the user explicitly confirms discard at save time.
     ctx.ui.notify("Legacy extraPayload is malformed and will be kept until you confirm discard on save", "error");
     return privatePayload
-      ? { payload: privatePayload, hasMalformedLegacy: true }
-      : { hasMalformedLegacy: true };
+      ? { type: "loaded", payload: privatePayload, hasMalformedLegacy: true }
+      : { type: "loaded", hasMalformedLegacy: true };
   }
-  if (privatePayload) return { payload: privatePayload };
-  return { payload: migrated, migrateLegacy: migrated };
+  if (privatePayload) return { type: "loaded", payload: privatePayload };
+  return { type: "loaded", payload: migrated, migrateLegacy: migrated };
 }
 
 /**
@@ -652,6 +655,7 @@ async function editModel(
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   };
   const payloadState = loadModelPayload(ctx, providerId, existing);
+  if (payloadState.type === "recovery-required") return null;
   let payload = payloadState.payload;
   const migrateLegacy = payloadState.migrateLegacy;
   const name = await promptText(ctx, `Model: ${modelId}`, "显示名称（留空使用 ID）", base.name);

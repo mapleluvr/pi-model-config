@@ -32,6 +32,13 @@ function cloneJson<T>(value: T): T {
   return cloneOwnJsonData(value, { objectPrototype: "ordinary" });
 }
 
+function cloneRuntimeRequest<T>(value: T): T {
+  return cloneOwnJsonData(value, {
+    objectPrototype: "ordinary",
+    allowUndefinedValues: true,
+  });
+}
+
 export function clonePayloadDocument(config: PayloadConfig): PayloadConfig {
   const normalized = cloneOwnJsonData(config);
   if (!isPlainPayloadObject(normalized) || getOwnValue(normalized, "version") !== 1) {
@@ -279,7 +286,7 @@ export function mergePayloadIntoRequest(payload: unknown, extraPayload: unknown)
   let normalizedPayload: Record<string, unknown>;
   let normalizedExtra: Record<string, unknown>;
   try {
-    normalizedPayload = cloneJson(payload);
+    normalizedPayload = cloneRuntimeRequest(payload);
     normalizedExtra = cloneJson(extraPayload);
   } catch {
     return undefined;
