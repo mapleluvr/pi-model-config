@@ -275,9 +275,11 @@ git commit -m "feat: journal private model payload mutations"
 **Files/modules:**
 - Create: `config-actions.ts`
 - Modify: `model-fields.ts`
+- Modify: `payload-config.ts`
 - Modify: `index.ts`
 - Create: `tests/config-actions.test.ts`
 - Modify: `tests/model-fields.test.ts`
+- Modify: `tests/payload-config.test.ts`
 - Modify: `tests/index-runtime.test.ts`
 - Modify: `package.json`
 
@@ -313,12 +315,12 @@ git commit -m "feat: journal private model payload mutations"
 - [ ] Implement two-phase previews for rename/copy/delete and target payload collisions; commit rejects changed hashes or identity sets and returns a refreshed preview result.
 - [ ] Build complete native/private candidates for Provider and Model rename/copy/delete and commit both through one coordinator request.
 - [ ] Add injected faults at journal/native/payload/journal-removal boundaries and assert the stable request resolver returns exactly before or after data.
-- [ ] Route every current `index.ts` Provider/Model save and payload lifecycle call through `ModelConfigActions`; remove direct `writeModelsConfig`, `setModelPayload`, move/copy/remove payload calls from controller code.
+- [ ] Route every current `index.ts` Provider/Model save and payload lifecycle call through `ModelConfigActions`; remove direct `writeModelsConfig`, `setModelPayload`, move/copy/remove payload calls from controller code, then delete the temporary direct-writer compatibility exports from `payload-config.ts` and update their tests to exercise the pure transformations or coordinated actions instead.
 - [ ] Preserve the old UI for this commit so failures isolate storage changes from the later panel replacement.
 
 **Commit:**
 ```bash
-git add config-actions.ts model-fields.ts index.ts tests/config-actions.test.ts tests/model-fields.test.ts tests/index-runtime.test.ts package.json
+git add config-actions.ts model-fields.ts payload-config.ts index.ts tests/config-actions.test.ts tests/model-fields.test.ts tests/payload-config.test.ts tests/index-runtime.test.ts package.json
 git commit -m "refactor: centralize model config mutations"
 ```
 
