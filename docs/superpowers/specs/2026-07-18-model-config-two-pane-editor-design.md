@@ -1,6 +1,6 @@
 # Pi Model Config Two-Pane Editor Design
 
-**Status:** Approved for implementation planning after independent review
+**Status:** Revised IPC coordination pending independent re-review
 **Date:** 2026-07-18
 **Target:** The next `pi-model-config` release after 1.1.0
 
@@ -393,54 +393,48 @@ field it encounters and all cross-field invariants affected by the candidate.
 
 ### Native and Private Payload Transactions
 
-The private payload config schema remains unchanged. Coordination uses two
-implementation-private artifacts beside it:
+The private payload config schema remains unchanged. Coordination uses:
 
-- a cross-process lock record containing an opaque owner token, local process
-  identity, and process-start evidence when the platform exposes it;
+- an OS-owned local IPC endpoint held only while one process has mutation
+  authority;
 - `model-config-transaction.json`, an atomically written recovery journal.
 
-The lock has no time-based stale takeover. An owner that is alive but paused can
-never lose ownership. Automatic recovery is allowed only when a platform
-adapter positively proves that the recorded local process cannot resume. An
-unknown liveness result or possible PID reuse remains locked and requires
-explicit operator recovery rather than guessing that the owner is dead.
+The endpoint identity is SHA-256 of the canonical native real path of the
+selected agent directory. Windows normalizes separators and drive-letter form
+but preserves the canonical component casing returned by `realpath.native`, so
+case-sensitive directories are not conflated. Platform adapters are:
 
-Dead-owner recovery uses an atomic token-checked claim: contenders compete to
-move the exact observed owner record into one recovery claim, acquisition checks
-for a claim both before and after creating a successor record, and only the
-claim winner may install the next owner token. A token mismatch aborts the
-claim. No contender unlinks a path by filename after merely observing staleness.
+- Windows: `\\.\pipe\pi-model-config-<full-hash>` named pipe;
+- Linux: `\0pi-model-config-<full-hash>` abstract Unix-domain socket;
+- macOS: one deterministic loopback-only dynamic/private TCP port derived from
+  the hash, with a versioned full-hash identity handshake.
 
-A recovery claim is itself an owner record. It stores its own opaque token,
-claimant process/boot evidence, the claimed owner record, and the journal hash
-observed at claim time. No configuration write is allowed until the claimant
-installs and verifies a successor lock and removes its claim. If the claimant
-crashes before that transition, later acquisition remains blocked while the
-claim owner is alive or unknown. After positive proof that the claimant also
-cannot resume, contenders atomically claim that exact claim token; the winner
-carries forward the original owner record and journal hash without changing
-journal, native, or payload bytes. The same rule handles a crash after successor
-installation but before claim cleanup: ownership and claim tokens are compared
-and recovery resumes without deleting a different owner's record.
+The Windows named pipe and Linux abstract socket have full-hash names and no
+persistent filesystem entry. On macOS, the port is `49152 + (firstUnsigned16BitWord(hash) % 16384)`.
+`EADDRINUSE` followed by a valid matching identity handshake means the same
+agent directory is busy. A valid different identity, unrecognized listener,
+handshake timeout, unsupported adapter, or endpoint error fails closed as a lock
+collision and never tries another port or triggers takeover. The handshake
+contains only protocol version, endpoint identity hash, opaque owner token, and
+PID; it contains no path, key, payload, or model data.
 
-A dead-owner lock with no journal has no recoverable transaction; the claim
-winner validates both current files and then releases its successor lock. For
-unknown liveness or possible PID reuse, the recovery UI shows only non-secret
-owner/claim process metadata and offers Cancel, Retry liveness check, or Retry
-after closing the listed process. It provides no force-delete action. Journal
-and configuration files remain untouched until process exit or a changed system
-boot identity positively proves that the recorded owner cannot resume, after
-which the normal token-checked claim path applies.
+`listen` success is the sole mutation-ownership transition. A paused owner keeps
+the endpoint because the OS still owns its server handle. Process exit or crash
+releases it automatically, so there is no mtime lease, boot/PID inference,
+stale-owner deletion, recovery claim, or force-unlock path. Acquisition never
+waits for the owner or retries takeover; `EADDRINUSE` returns a no-write
+"operation in progress" result with a retry action.
 
-Every extension mutation re-reads both files after ownership, revalidates its
-baselines and candidate, and verifies the same owner token immediately before
-each journal, native, and payload replacement. Token loss stops before that
-write and leaves any existing journal for recovery. Release is bound to the
-same token. These checks fence externally replaced ownership, while the
-proof-of-death rule ensures a former automatic owner cannot resume after a
-successful takeover. A live owner causes a no-write "operation in progress"
-result with a retry action.
+An acquired `MutationLockHandle` is bound to one server instance and opaque
+token. Every extension mutation re-reads both files after acquisition,
+revalidates its baselines and candidate, and checks that the same server is
+still listening and has emitted no `error` or unexpected `close` immediately
+before each journal, native, and payload replacement. The check and synchronous
+atomic replacement occur in one JavaScript turn with no intervening `await`.
+Handle loss stops before that write and leaves any existing journal for the next
+owner to recover.
+Release awaits `server.close()` and no mutation occurs afterward. A process that
+crashes cannot resume, while a paused process cannot lose its OS endpoint.
 
 Human confirmation is never awaited while holding the lock. A preview records
 native and payload hashes; after confirmation, the operation acquires the lock,
@@ -459,7 +453,7 @@ proceeds as follows:
    private config and never appear in logs or error text.
 3. Atomically write the native candidate.
 4. Atomically write the private payload candidate.
-5. Atomically remove the journal and release the owner-bound lock handle.
+5. Atomically remove the journal and await release of the IPC lock handle.
 
 `before_provider_request` never acquires or waits on the mutation lock. It uses
 at most three immediate stable-snapshot attempts. One attempt reads journal,
@@ -479,12 +473,12 @@ neither journal side fails closed for all extension payload injection. This
 point-in-time protocol remains coherent for current-session Models, built-in
 fallback Models, dynamically registered Models, and journal boundaries.
 
-Recovery paths that require no choice run to completion under the owner-bound
+Recovery paths that require no choice run to completion under the IPC mutation
 lock: when a valid journal's native hash equals `before`, restore the complete
 before payload snapshot and report rollback; when it equals `after`, restore
 the complete after snapshot and report roll-forward. Either path quarantines a
 malformed current payload when necessary, removes the journal, and checks the
-owner token before each write.
+same live IPC server handle before each write.
 
 Every recovery requiring human choice uses the same two-phase protocol:
 
@@ -617,16 +611,15 @@ Implementation follows TDD for new behavior. Focused tests cover:
   transactions, including retry exhaustion and fail-closed behavior;
 - before/after request-hook resolution for current-session Models, built-in
   fallback identities, and dynamically registered identities;
-- cross-process lock exclusion, simultaneous dead-owner claim contenders,
-  paused-live-owner takeover refusal and safe resume, dead-owner-lock-without-
-  journal handling, and owner-bound release;
-- recovery claimant crashes before successor installation and after successor
-  installation but before claim cleanup, followed by one winning re-claim with
-  journal/native/payload bytes unchanged;
-- unknown liveness/PID reuse blocks without a force-delete path, then enters
-  normal recovery only after positive owner-death or changed-boot proof;
-- a simulated former owner whose token was externally replaced attempts native
-  step 3 and payload step 4 writes and is fenced before both replacements;
+- real cross-process IPC exclusion under Node and Bun, including a paused owner,
+  simultaneous contenders, clean release, and immediate reacquisition after the
+  owner process is killed;
+- Windows named-pipe and Linux abstract-socket full-hash endpoint derivation,
+  plus macOS deterministic-port handshake for matching, different, unrecognized,
+  and timed-out identities;
+- endpoint bind/error/close faults before journal, native step 3, and payload
+  step 4 writes are fenced before replacement, and crash leftovers are recovered
+  only after a new process acquires the OS endpoint;
 - valid-journal recovery with a malformed current payload, malformed-journal
   quarantine with valid files, malformed-payload quarantine/reset, and invalid
   native recovery blocking;
