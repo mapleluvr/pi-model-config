@@ -367,10 +367,10 @@ test("Endpoint confirmation Cancel discards the bound preview on the creating ac
   assert.equal(actions.boundPreviewCount(), 0);
 }));
 
-test("Endpoint Merge shows normalized discovery before mode choice and bounded ID details before commit", async () => withAgentDir(async (_agentDir, actions) => {
+test("Endpoint Merge shows sanitized normalized discovery before mode choice and bounded ID details before commit", async () => withAgentDir(async (_agentDir, actions) => {
   writeModelsConfig({
     providers: {
-      local: { baseUrl: "http://service.test", apiKey: "configured-reference", api: "openai-completions", models: [{ id: "same", future: { keep: true } }] },
+      local: { baseUrl: "http://userinfo-sentinel:password-sentinel@service.test/v1?query-sentinel=1#fragment-sentinel", apiKey: "configured-reference", api: "openai-completions", models: [{ id: "same", future: { keep: true } }] },
     },
   });
   writePayload({ version: 1, extraPayloads: {} });
@@ -404,6 +404,9 @@ test("Endpoint Merge shows normalized discovery before mode choice and bounded I
   const infoIndex = events.findIndex((event) => event.includes("有效 2") && event.includes("跳过 1") && event.includes("重复 1") && event.includes("same") && event.includes("new"));
   const modeIndex = events.findIndex((event) => event === "select:端点 Model 列表");
   assert.ok(infoIndex >= 0 && infoIndex < modeIndex, "discovery summary must precede mode selection");
+  const info = events[infoIndex]!;
+  assert.match(info, /来源: http:\/\/service\.test\/v1/);
+  assert.doesNotMatch(info, /userinfo-sentinel|password-sentinel|query-sentinel|fragment-sentinel/);
   assert.match(confirmations[0]!, /发现: same, new/);
   assert.match(confirmations[0]!, /新增: new/);
   assert.match(confirmations[0]!, /移除: \(无\)/);

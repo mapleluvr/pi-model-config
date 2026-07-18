@@ -247,6 +247,7 @@ function endpointIdentitiesText(identities: readonly (readonly [string, string])
 
 function endpointDiscoveryMessage(discovery: EndpointDiscoverySuccess): string {
   return [
+    `来源: ${discovery.source}`,
     `有效 ${discovery.validCount}，跳过 ${discovery.skippedCount}，重复 ${discovery.duplicateCount}`,
     `发现: ${endpointIdSummaryText(discovery.idSummary)}`,
   ].join("\n");
