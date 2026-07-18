@@ -158,15 +158,15 @@ git commit -m "feat: validate and atomically write model config"
 - Produces `EndpointIdentity`, `IpcHandshakeV1`, `MutationLockHandle`, and `AcquireLockResult`.
 - Produces async `tryAcquireMutationLock(agentDir, deps): Promise<AcquireLockResult>`; acquired handles expose `token`, synchronous `assertOwned(): void`, and async `release(): Promise<void>`.
 - `AcquireLockResult` is exactly `acquired`, `busy`, `collision`, or `unsupported`; only `acquired` carries a handle. Other results never mutate files.
-- `LockDependencies` injects canonical realpath, SHA-256, token generation, platform, `node:net` server/client factories, and a bounded diagnostic-handshake timer for deterministic tests.
+- `LockDependencies` injects canonical realpath, SHA-256, token generation, platform/runtime identity, `node:net` server/client factories, and a bounded Windows/macOS diagnostic-probe timer for deterministic tests.
 - `IpcHandshakeV1` contains only `version: 1`, full endpoint identity hash, opaque owner token, and PID.
 
 **Constraints and invariants:**
 - Endpoint identity is SHA-256 of the canonical native real agent-directory path. Windows normalizes separators and drive-letter form but preserves component casing returned by `realpath.native`, so case-sensitive directories are not conflated. Canonicalization failure returns `unsupported` without a write.
-- Windows listens on `\\.\pipe\pi-model-config-<full-hash>`. Linux listens on the abstract UDS name `\0pi-model-config-<full-hash>`. Both full-hash names are process-owned and leave no persistent filesystem entry.
+- Windows listens on `\\.\pipe\pi-model-config-<full-hash>`. Node `EADDRINUSE` is `busy`. Bun 1.3.14 may report `ERR_INVALID_ARG_TYPE` with `Failed to listen at <exact-pipe>` for an occupied pipe; only for that exact derived pipe/error pair, one bounded connection probe is allowed. Successful connection is `busy` even when the owner event loop is blocked; connection failure is `collision`/`unsupported` and never retries bind. Linux listens on the abstract UDS name `\0pi-model-config-<full-hash>`. Both full-hash names are process-owned and leave no persistent filesystem entry.
 - macOS uses one loopback-only port: `49152 + (firstUnsigned16BitWord(hash) % 16384)`. On `EADDRINUSE`, a valid matching handshake is `busy`; a valid different identity, unrecognized listener, timeout, or protocol error is `collision`. It never tries another port or permits takeover, so endpoint identity cannot drift while an owner is alive.
 - `listen` success is the sole ownership transition. There is no persisted lock/claim, mtime lease, boot/PID liveness inference, stale cleanup, or force-unlock path.
-- Acquisition does not wait for owner release. The only bounded wait is the injectable macOS identity probe after `EADDRINUSE`; a paused/unresponsive listener fails closed rather than being replaced.
+- Acquisition does not wait for owner release. The only bounded waits are the exact-pipe Windows connection probe for Bun's occupied-listen error and the macOS identity probe after `EADDRINUSE`; a failed/unresponsive probe fails closed rather than replacing an owner.
 - The owner server accepts only local IPC/loopback connections, caps handshake input/output, emits no path or secret, and closes accepted sockets immediately after one response.
 - A handle is write-capable only while its exact server instance remains `listening` and has emitted neither unexpected `error` nor `close`. `assertOwned()` checks that state immediately before a synchronous journal/native/payload replacement in the same JavaScript turn with no intervening `await`; loss throws before the write.
 - `release()` marks the close as expected, awaits `server.close()`, and invalidates the handle. A second release is idempotent; any later `assertOwned()` fails. No mutation runs after release.
@@ -183,9 +183,9 @@ git commit -m "feat: validate and atomically write model config"
 
 **Implementation intent:**
 - [ ] Add pure endpoint tests for Windows named-pipe and Linux abstract-UDS full hashes, Windows case/path normalization, the exact macOS port formula, and secret-free `IpcHandshakeV1` serialization.
-- [ ] Add fake-`net` tests for listen success, matching/different/malformed/timed-out handshakes, bind errors, unexpected error/close, expected close, idempotent release, and post-release fencing; assert a different macOS identity never advances to another port.
+- [ ] Add fake-`net` tests for listen success, Node `EADDRINUSE`, Bun's exact occupied-pipe error plus successful/failed/timed-out exact-pipe connection probes, matching/different/malformed/timed-out macOS handshakes, bind errors, unexpected error/close, expected close, idempotent release, and post-release fencing; assert no failed probe retries bind and a different macOS identity never advances to another port.
 - [ ] Implement `lock-worker.ts` modes for acquire-and-hold, event-loop-block-after-ready, clean release, and process kill/crash. Its stdout protocol contains only readiness/result markers.
-- [ ] Run real child-process tests with both `node` and `bun` when available: one owner excludes simultaneous contenders, a blocked event loop retains the endpoint, clean close permits reacquisition, and killed owner permits immediate reacquisition with no cleanup step.
+- [ ] Run the exact real owner/contender matrix `Node/Node`, `Node/Bun`, `Bun/Node`, and `Bun/Bun` when Bun is available. Every contender must return typed `busy` while the owner event loop is blocked; clean close and owner kill must permit typed `acquired` reacquisition with no cleanup step.
 - [ ] On Windows, exercise the real named-pipe adapter under both runtimes. On Linux, exercise the real abstract UDS adapter. On macOS, exercise loopback matching/different identity and foreign-listener fail-closed behavior. Platform-specific tests skip only when not running on that platform and remain mandatory in that platform's release evidence.
 - [ ] Implement owner server lifecycle and bounded one-message handshake; never listen beyond named-pipe/abstract-UDS/`127.0.0.1` scopes.
 - [ ] Verify injected endpoint loss fences simulated journal, native step 3, and payload step 4 calls before each write.
@@ -287,7 +287,7 @@ git commit -m "feat: journal private model payload mutations"
 - Simple APIs: `patchProvider`, `patchModel`, `createProvider`, and `createModel`.
 - Nested APIs: `saveProviderSubtree`, `saveModelSubtree`, and `saveModelPayload`, each requiring a deep baseline of the exact object.
 - Identity APIs use `previewProviderIdentityAction`/`commitProviderIdentityAction` and Model equivalents for rename, copy, and delete; previews carry native/payload hashes, affected identities, and exact target-payload collisions.
-- Results are typed as success, stale-target, validation-error, subtree-conflict, native-collision, payload-collision, lock-busy, or recovery-required; no result embeds secret values.
+- Results are typed as success, stale-target, validation-error, subtree-conflict, native-collision, payload-collision, lock-busy, lock-collision, lock-unsupported, or recovery-required; lock results preserve the coordinator reason and no result embeds secret values.
 
 **Constraints and invariants:**
 - Every operation re-reads under the lock and applies only its confirmed patch to the fresh object.
@@ -299,7 +299,7 @@ git commit -m "feat: journal private model payload mutations"
 
 **Acceptance evidence:**
 - RED: `node --experimental-strip-types --test tests/config-actions.test.ts` -> fails because transactional domain actions do not exist.
-- GREEN: the same command -> passes simple patch, unknown preservation, nested conflict, every CRUD collision, target payload resolution, legacy migration, and injected journal-step failure cases.
+- GREEN: the same command -> passes simple patch, unknown preservation, nested conflict, every CRUD collision, target payload resolution, legacy migration, distinct zero-write lock-busy/collision/unsupported propagation, and injected journal-step failure cases.
 - Regression: `npm test && npm run check` -> old scripted UI tests remain green after their persistence calls are routed through `ModelConfigActions`.
 
 **Risk and rollback:**
@@ -307,7 +307,7 @@ git commit -m "feat: journal private model payload mutations"
 - Rollback: revert this commit to restore the previous persistence path; at this intermediate point the coordinator/action layer is deliberately active behind the existing UI and remains independent of the later panel replacement.
 
 **Implementation intent:**
-- [ ] Define typed patch/result contracts and RED tests for false/zero preservation, explicit clear, stale identity, invalid full candidate, and unrelated-versus-same-subtree external edits.
+- [ ] Define typed patch/result contracts and RED tests for false/zero preservation, explicit clear, stale identity, invalid full candidate, unrelated-versus-same-subtree external edits, and exact non-secret propagation of IPC busy/collision/unsupported with unchanged native/private bytes.
 - [ ] Implement fresh snapshot lookup by Provider key and Model ID, never by stale array index.
 - [ ] Implement creation and copy collision checks under lock; Model IDs must remain unique within their Provider.
 - [ ] Implement two-phase previews for rename/copy/delete and target payload collisions; commit rejects changed hashes or identity sets and returns a refreshed preview result.
@@ -367,7 +367,7 @@ git commit -m "refactor: centralize model config mutations"
 - [ ] Add pure merge/replace tests proving same-ID hand edits survive Merge and every new ID appears once.
 - [ ] Add action previews containing source, counts, bounded ID summary, introduced IDs, removed IDs, and exact private payload collisions without values.
 - [ ] Reacquire/re-read/recompute after confirmation; return refreshed preview on any hash, introduced-ID, removed-ID, or collision-set change.
-- [ ] Route the existing endpoint action through this module and coordinator before the Provider panel is introduced.
+- [ ] Route the existing endpoint action through this module and coordinator before the Provider panel is introduced; endpoint action/controller tests require distinct non-secret lock-busy/collision/unsupported results and zero writes.
 
 **Commit:**
 ```bash
@@ -507,7 +507,7 @@ git commit -m "feat: add nested model field editors"
 
 **Acceptance evidence:**
 - RED: `node --experimental-strip-types --test tests/model-editor.test.ts` -> fails because catalogs/controllers do not exist.
-- GREEN: the same command -> passes exact field catalogs, inactive/active Thinking Map warning states, search/state restoration, scalar cancel/save, all nested routes, creation/copy/rename/delete, payload lifecycle, override allowlist, unsupported cleanup, and collision tests.
+- GREEN: the same command -> passes exact field catalogs, inactive/active Thinking Map warning states, search/state restoration, scalar cancel/save, all nested routes, creation/copy/rename/delete, payload lifecycle, override allowlist, unsupported cleanup, identity collisions, and distinct lock-busy/collision/unsupported zero-write diagnostics.
 - Regression: `npm test && npm run check` -> top-level runtime scripts use the new Model panel with zero failures.
 
 **Risk and rollback:**
@@ -516,7 +516,7 @@ git commit -m "feat: add nested model field editors"
 
 **Implementation intent:**
 - [ ] Write descriptor tests that compare exact category/field ID arrays and assert false/zero/inherited/nested summaries.
-- [ ] Implement the Model controller loop: fresh read -> panel -> close -> collect/edit -> `ModelConfigActions` -> reopen at returned state.
+- [ ] Implement the Model controller loop: fresh read -> panel -> close -> collect/edit -> `ModelConfigActions` -> reopen at returned state; map lock-busy/collision/unsupported to distinct non-secret notifications without changing panel state or files.
 - [ ] Add `/` all-field search and cancelled-search state restoration.
 - [ ] Wire scalar fields to immediate patches and nested fields to deep-baseline save calls; retain failed drafts after validation/conflict errors.
 - [ ] Implement ID-only creation, post-create General panel state, copy target input, rename, delete confirmations, and collision retry.
@@ -560,7 +560,7 @@ git commit -m "feat: add field-oriented model editor"
 
 **Acceptance evidence:**
 - RED: `node --experimental-strip-types --test tests/provider-editor.test.ts` -> fails because Provider panel/controller do not exist.
-- GREEN: the same command -> passes exact field catalog, panel navigation/search restoration, API secrecy, scalar/nested save/discard, Model routing, Overrides draft/conflict, endpoint action, creation, and lifecycle tests.
+- GREEN: the same command -> passes exact field catalog, panel navigation/search restoration, API secrecy, scalar/nested save/discard, Model routing, Overrides draft/conflict, endpoint action, creation/lifecycle, identity collisions, and distinct lock-busy/collision/unsupported zero-write diagnostics.
 - Regression: `npm test && npm run check` -> old Provider pipeline assertions are replaced by equivalent storage assertions and all tests pass.
 
 **Risk and rollback:**
@@ -569,7 +569,7 @@ git commit -m "feat: add field-oriented model editor"
 
 **Implementation intent:**
 - [ ] Write exact Provider descriptor and display tests, including masked literal API key and unchanged `$`/`!` references.
-- [ ] Implement fresh-read Provider controller and global field search with panel state restoration.
+- [ ] Implement fresh-read Provider controller and global field search with panel state restoration; map lock-busy/collision/unsupported from ordinary and endpoint actions to distinct non-secret notifications without changing panel state or files.
 - [ ] Wire scalar immediate patches, Headers/Compat drafts, Manage Models, and permanent Fetch action.
 - [ ] Implement Model Overrides keyed-list draft, entry collision checks, restricted child editor, unsupported-path preview, optimistic whole-map comparison, and retained draft after failed save.
 - [ ] Implement the minimal creation wizard and post-create panel; do not prompt for API key, auth header, Compat, or discovery during creation.
