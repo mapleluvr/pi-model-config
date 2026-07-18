@@ -31,6 +31,7 @@ import { mergeModelConfig, mergeProviderConfig, replaceCostTiers, validateCostTi
 import { THINKING_LEVELS, type ModelCostTier, type ModelsConfig, type ProviderConfig, type ModelConfig } from "./types.ts";
 import { searchableSelect, type SearchableSelectOption } from "./searchable-select.ts";
 import { searchableMultiSelect } from "./searchable-multi-select.ts";
+import { runProviderList } from "./provider-editor.ts";
 import { buildToolSelectionOptions, normalizeToolList } from "./tool-options.ts";
 import {
   formatSubagentOverrideSummary,
@@ -1762,8 +1763,12 @@ export default async function (pi: ExtensionAPI) {
         ]);
         if (choice === undefined || choice.startsWith("退出")) break;
 
-        if (choice.startsWith("管理 Providers")) config = await manageProviders(ctx, config);
-        else if (choice.startsWith("Subagent")) await manageSubagentModelSettings(pi, ctx);
+        if (choice.startsWith("管理 Providers")) {
+          const actions = new ModelConfigActions();
+          await runProviderList(ctx, { actions });
+          const refreshed = actions.readEditorSnapshot();
+          if (refreshed.type === "snapshot") config = cloneModelsConfig(refreshed.native);
+        } else if (choice.startsWith("Subagent")) await manageSubagentModelSettings(pi, ctx);
         else if (choice.startsWith("诊断")) {
           const path = getModelsPath();
           const fs = await import("node:fs");

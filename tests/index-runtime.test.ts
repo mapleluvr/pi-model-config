@@ -3,17 +3,13 @@ import test from "node:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+
 import extension from "../index.ts";
 import { ModelConfigActions } from "../config-actions.ts";
 import { getModelsPath, readModelsConfig, writeModelsConfig } from "../config.ts";
-import { commitCoordinatedMutation, getTransactionJournalPath } from "../payload-coordinator.ts";
-import {
-  getPayloadConfigPath,
-  lookupModelPayload,
-  readPayloadConfig,
-  serializePayloadDocument,
-  setPayloadDocumentValue,
-} from "../payload-config.ts";
+import { getPayloadConfigPath, lookupModelPayload, readPayloadConfig, serializePayloadDocument, setPayloadDocumentValue } from "../payload-config.ts";
+import { runModelEditor } from "../model-editor.ts";
+import type { SettingsPanelResult } from "../settings-panel.ts";
 
 function seedModelPayload(provider: string, modelId: string, payload: Record<string, unknown>): void {
   const next = setPayloadDocumentValue(readPayloadConfig(), provider, modelId, payload);
@@ -24,17 +20,12 @@ function readModelPayload(provider: string, modelId: string): Record<string, unk
   return lookupModelPayload(readPayloadConfig(), provider, modelId);
 }
 
-interface ScriptedUi {
+interface Script {
   selects: string[];
-  editors: string[];
+  inputs: Array<string | undefined>;
+  editors: Array<string | undefined>;
   confirms: boolean[];
-  customs: string[];
-}
-
-interface CommandHooks {
-  notifications?: Array<{ message: string; level: string }>;
-  onSelect?: (value: string) => void;
-  onEditor?: (value: string) => void;
+  customs: unknown[];
 }
 
 function take<T>(values: T[], label: string): T {
@@ -43,32 +34,41 @@ function take<T>(values: T[], label: string): T {
   return value as T;
 }
 
-function scriptedContext(script: ScriptedUi, hooks: CommandHooks = {}): any {
+function scriptedContext(script: Script, notifications: Array<{ message: string; level: string }> = []): any {
   return {
     ui: {
-      select: async () => {
-        const value = take(script.selects, "select");
-        hooks.onSelect?.(value);
-        return value;
-      },
-      editor: async () => {
-        const value = take(script.editors, "editor");
-        hooks.onEditor?.(value);
-        return value;
-      },
+      select: async () => take(script.selects, "select"),
+      input: async () => take(script.inputs, "input"),
+      editor: async () => take(script.editors, "editor"),
       confirm: async () => take(script.confirms, "confirm"),
-      custom: async () => take(script.customs, "custom select"),
-      notify: (message: string, level: string) => hooks.notifications?.push({ message, level }),
+      custom: async () => take(script.customs, "custom"),
+      notify: (message: string, level: string) => notifications.push({ message, level }),
     },
   };
 }
 
-async function withRuntimeAgentDir(run: (agentDir: string) => Promise<void>): Promise<void> {
+function panelResult(type: SettingsPanelResult["type"], categoryId = "general", fieldId = "id"): SettingsPanelResult {
+  return {
+    type: type as any,
+    categoryId,
+    fieldId,
+    state: {
+      categoryId,
+      fieldId,
+      focusedPane: "fields",
+      categoryScrollOffset: 0,
+      fieldScrollOffset: 0,
+      narrowScreen: "fields",
+    },
+  } as SettingsPanelResult;
+}
+
+async function withRuntimeAgentDir(run: () => Promise<void>): Promise<void> {
   const previous = process.env.PI_CODING_AGENT_DIR;
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-config-runtime-"));
   try {
     process.env.PI_CODING_AGENT_DIR = agentDir;
-    await run(agentDir);
+    await run();
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previous;
@@ -76,525 +76,138 @@ async function withRuntimeAgentDir(run: (agentDir: string) => Promise<void>): Pr
   }
 }
 
-async function runModelConfigCommand(script: ScriptedUi, hooks: CommandHooks = {}): Promise<void> {
+async function runModelConfigCommand(script: Script, notifications: Array<{ message: string; level: string }> = []): Promise<void> {
   let handler: ((args: string, ctx: any) => Promise<void>) | undefined;
   await extension({
     registerCommand: (name: string, command: { handler: (args: string, ctx: any) => Promise<void> }) => {
       if (name === "model-config") handler = command.handler;
     },
-    registerProvider: () => {},
+    registerProvider: () => { throw new Error("native providers must not be re-registered"); },
     on: () => {},
   } as any);
-  assert.ok(handler, "model-config command should be registered");
-  await handler!("", scriptedContext(script, hooks));
-  assert.deepEqual(script, { selects: [], editors: [], confirms: [], customs: [] });
-}
-
-function modelEditScript(modelId: string, payloadEdit?: "edit" | "clear"): ScriptedUi {
-  const payloadChoices = payloadEdit === "edit"
-    ? ["1. [bool] inherited = true", "修改", "false", "完成"]
-    : payloadEdit === "clear"
-      ? ["1. [bool] inherited = true", "删除", "完成"]
-      : [];
-  return {
-    selects: [
-      "管理 Providers", "编辑 [local]", "管理 Models", "编辑",
-      "否", "仅文本", ...payloadChoices, "返回主菜单", "退出",
-    ],
-    editors: [modelId, "", "128000", "16384", "0", "0"],
-    confirms: [false, false, payloadEdit !== undefined],
-    customs: ["model:0", "__pi_model_config_action:back"],
-  };
+  assert.ok(handler);
+  await handler!("", scriptedContext(script, notifications));
+  assert.deepEqual(script, { selects: [], inputs: [], editors: [], confirms: [], customs: [] });
 }
 
 test("activation does not dynamically register native providers and injects only the selected model payload", async () => {
-  const previous = process.env.PI_CODING_AGENT_DIR;
-  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-config-runtime-"));
-  const handlers = new Map<string, Function>();
-  try {
-    process.env.PI_CODING_AGENT_DIR = agentDir;
+  await withRuntimeAgentDir(async () => {
     seedModelPayload("local", "one", { temperature: 0.4 });
-    const fakePi = {
+    const handlers = new Map<string, Function>();
+    await extension({
       registerCommand: () => {},
       registerProvider: () => { throw new Error("native providers must not be re-registered"); },
       on: (event: string, handler: Function) => handlers.set(event, handler),
-    };
-    await extension(fakePi as any);
-    const handler = handlers.get("before_provider_request");
-    assert.ok(handler);
-    assert.deepEqual(handler!({ payload: { model: "one" } }, { model: { provider: "local", id: "one" } }), { model: "one", temperature: 0.4 });
-    assert.equal(handler!({ payload: { model: "two" } }, { model: { provider: "local", id: "two" } }), undefined);
-  } finally {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previous;
-    fs.rmSync(agentDir, { recursive: true, force: true });
-  }
-});
-
-test("editor blocks a native-after payload-before journal without mutating storage", async () => {
-  await withRuntimeAgentDir(async (agentDir) => {
-    writeModelsConfig({
-      providers: {
-        local: {
-          baseUrl: "http://localhost:11434",
-          api: "openai-completions",
-          models: [{
-            id: "old", name: "Before", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384,
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          }],
-        },
-      },
-    });
-    seedModelPayload("local", "old", { inherited: true });
-    const nativeAfter = readModelsConfig();
-    nativeAfter.providers.local!.models![0]!.name = "After";
-    const payloadAfter = setPayloadDocumentValue(readPayloadConfig(), "local", "old", { inherited: false });
-
-    await assert.rejects(commitCoordinatedMutation({
-      build: () => ({ native: nativeAfter, payload: payloadAfter, affectedIdentities: [["local", "old"]] }),
-      onBoundary(boundary) {
-        if (boundary === "native") throw new Error("simulated crash");
-      },
-    }), /simulated crash/);
-
-    const actions = new ModelConfigActions({ agentDir });
-    assert.deepEqual(actions.readEditorSnapshot(), { type: "recovery-required" });
-    const artifactPaths = [getModelsPath(agentDir), getPayloadConfigPath(agentDir), getTransactionJournalPath(agentDir)];
-    const before = artifactPaths.map((filePath) => fs.readFileSync(filePath));
-    const notifications: Array<{ message: string; level: string }> = [];
-
-    await runModelConfigCommand({
-      selects: ["管理 Providers", "编辑 [local]", "管理 Models", "编辑", "返回主菜单", "退出"],
-      editors: ["old"],
-      confirms: [],
-      customs: ["model:0", "__pi_model_config_action:back"],
-    }, { notifications });
-
-    artifactPaths.forEach((filePath, index) => assert.deepEqual(fs.readFileSync(filePath), before[index]));
-    assert.ok(notifications.some(({ message, level }) => level === "error" && message.includes("恢复")));
+    } as any);
+    const hook = handlers.get("before_provider_request");
+    assert.ok(hook);
+    assert.deepEqual(hook!({ payload: { model: "one" } }, { model: { provider: "local", id: "one" } }), { model: "one", temperature: 0.4 });
+    assert.equal(hook!({ payload: { model: "two" } }, { model: { provider: "local", id: "two" } }), undefined);
   });
 });
 
-test("successful model rename keeps an explicitly edited destination payload and removes the old identity", async () => {
+test("top-level Provider route opens the two-pane Model pipeline and renames through actions", async () => {
   await withRuntimeAgentDir(async () => {
-    writeModelsConfig({
-      providers: {
-        local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] },
-      },
-    });
+    writeModelsConfig({ providers: { local: {
+      baseUrl: "http://localhost:11434",
+      api: "openai-completions",
+      models: [{ id: "old", name: "Old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+    } } });
     seedModelPayload("local", "old", { inherited: true });
 
-    await runModelConfigCommand(modelEditScript("new", "edit"));
-
-    const saved = readModelsConfig().providers.local!.models![0]!;
-    assert.equal(saved.id, "new");
-    assert.equal(Object.hasOwn(saved, "extraPayload"), false);
-    assert.deepEqual(readModelPayload("local", "new"), { inherited: false });
-    assert.equal(readModelPayload("local", "old"), undefined);
-  });
-});
-
-test("successful model rename keeps an explicitly cleared destination payload cleared", async () => {
-  await withRuntimeAgentDir(async () => {
-    writeModelsConfig({
-      providers: {
-        local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] },
-      },
-    });
-    seedModelPayload("local", "old", { inherited: true });
-
-    await runModelConfigCommand(modelEditScript("new", "clear"));
-
-    const saved = readModelsConfig().providers.local!.models![0]!;
-    assert.equal(saved.id, "new");
-    assert.equal(readModelPayload("local", "new"), undefined);
-    assert.equal(readModelPayload("local", "old"), undefined);
-  });
-});
-
-test("successful model edit removes an invalid legacy extraPayload instead of persisting it", async () => {
-  await withRuntimeAgentDir(async () => {
-    writeModelsConfig({
-      providers: {
-        local: {
-          baseUrl: "http://localhost:11434",
-          api: "openai-completions",
-          models: [{
-            id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384,
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            extraPayload: [{ key: "broken", type: "json", value: "{" }],
-          }],
-        },
-      },
-    });
-
-    const script = modelEditScript("old");
-    // Explicit discard confirmation for malformed native legacy rows.
-    script.confirms.push(true);
-    await runModelConfigCommand(script);
-
-    const saved = readModelsConfig().providers.local!.models![0]!;
-    assert.equal(Object.hasOwn(saved, "extraPayload"), false);
-    assert.equal(readModelPayload("local", "old"), undefined);
-  });
-});
-
-test("successful model copy removes legacy extraPayload and copies the private payload", async () => {
-  await withRuntimeAgentDir(async () => {
-    writeModelsConfig({
-      providers: {
-        local: {
-          baseUrl: "http://localhost:11434",
-          api: "openai-completions",
-          models: [{
-            id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384,
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            extraPayload: [{ key: "broken", type: "json", value: "{" }],
-          }],
-        },
-      },
-    });
-    seedModelPayload("local", "old", { seed: 7 });
-
-    await runModelConfigCommand({
-      selects: ["管理 Providers", "编辑 [local]", "管理 Models", "复制", "返回主菜单", "退出"],
+    const script: Script = {
+      selects: ["管理 Providers", "管理 Models", "退出"],
+      inputs: ["new"],
       editors: [],
       confirms: [true],
-      customs: ["model:0", "__pi_model_config_action:back"],
-    });
-
-    const copied = readModelsConfig().providers.local!.models![1]!;
-    assert.equal(copied.id, "old-copy");
-    assert.equal(Object.hasOwn(copied, "extraPayload"), false);
-    assert.deepEqual(readModelPayload("local", "old"), { seed: 7 });
-    assert.deepEqual(readModelPayload("local", "old-copy"), { seed: 7 });
-  });
-});
-
-test("provider rename collision preserves both native providers and private payloads", async () => {
-  await withRuntimeAgentDir(async () => {
-    const initial = {
-      providers: {
-        source: {
-          name: "Source",
-          baseUrl: "http://localhost:11434",
-          api: "openai-completions",
-          models: [{ id: "source/model" }],
-        },
-        target: {
-          name: "Target",
-          baseUrl: "http://localhost:11434",
-          api: "anthropic-messages",
-          models: [{ id: "target/model" }],
-        },
-      },
-    };
-    writeModelsConfig(initial);
-    seedModelPayload("source", "source/model", { owner: "source" });
-    seedModelPayload("target", "target/model", { owner: "target" });
-    const notifications: Array<{ message: string; level: string }> = [];
-
-    await runModelConfigCommand({
-      selects: [
-        "管理 Providers", "编辑 [source]", "编辑设置",
-        "openai-completions - OpenAI Chat Completions", "否 - 不自动添加 Bearer",
-        "返回主菜单", "退出",
+      customs: [
+        "provider:local",
+        panelResult("run-action", "models", "manageModels"),
+        "model:old",
+        panelResult("edit-field", "general", "id"),
+        panelResult("back"),
+        "__pi_model_config_action:back",
+        panelResult("back"),
+        "__pi_model_config_action:back",
       ],
-      editors: ["target", "Source", "", ""],
-      confirms: [false],
-      customs: [],
-    }, { notifications });
-
-    assert.deepEqual(readModelsConfig(), initial);
-    assert.deepEqual(readModelPayload("source", "source/model"), { owner: "source" });
-    assert.deepEqual(readModelPayload("target", "target/model"), { owner: "target" });
-    assert.ok(notifications.some(({ message, level }) => level === "error" && message.includes("target") && message.includes("已存在")));
-  });
-});
-
-test("provider copy collision preserves both native providers and private payloads", async () => {
-  await withRuntimeAgentDir(async () => {
-    const initial = {
-      providers: {
-        source: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "source/model" }] },
-        target: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "target/model" }] },
-      },
     };
-    writeModelsConfig(initial);
-    seedModelPayload("source", "source/model", { owner: "source" });
-    seedModelPayload("target", "target/model", { owner: "target" });
-    const notifications: Array<{ message: string; level: string }> = [];
-
-    await runModelConfigCommand({
-      selects: ["管理 Providers", "编辑 [source]", "复制 Provider", "返回主菜单", "退出"],
-      editors: ["target"],
-      confirms: [],
-      customs: [],
-    }, { notifications });
-
-    assert.deepEqual(readModelsConfig(), initial);
-    assert.deepEqual(readModelPayload("source", "source/model"), { owner: "source" });
-    assert.deepEqual(readModelPayload("target", "target/model"), { owner: "target" });
-    assert.ok(notifications.some(({ message, level }) => level === "error" && message.includes("target") && message.includes("已存在")));
+    await runModelConfigCommand(script);
+    const model = readModelsConfig().providers.local!.models![0]!;
+    assert.equal(model.id, "new");
+    assert.deepEqual(readModelPayload("local", "new"), { inherited: true });
+    assert.equal(readModelPayload("local", "old"), undefined);
   });
 });
 
-test("successful provider copy copies payloads for every copied model", async () => {
+test("Provider creation asks only for ID, required Base URL, and API type, then opens General", async () => {
   await withRuntimeAgentDir(async () => {
-    writeModelsConfig({
-      providers: {
-        "source/provider": {
-          baseUrl: "http://localhost:11434",
-          api: "openai-completions",
-          models: [{ id: "model/one" }, { id: "model/two" }],
-        },
-      },
-    });
-    seedModelPayload("source/provider", "model/one", { seed: 7 });
-    seedModelPayload("source/provider", "model/two", { temperature: 0.2 });
-
-    await runModelConfigCommand({
-      selects: ["管理 Providers", "编辑 [source/provider]", "复制 Provider", "返回主菜单", "退出"],
-      editors: ["target/provider"],
-      confirms: [],
-      customs: [],
-    });
-
-    assert.deepEqual(readModelsConfig().providers["target/provider"], readModelsConfig().providers["source/provider"]);
-    assert.deepEqual(readModelPayload("target/provider", "model/one"), { seed: 7 });
-    assert.deepEqual(readModelPayload("target/provider", "model/two"), { temperature: 0.2 });
-  });
-});
-
-test("provider copy does not write payloads when blank native persistence fails", async () => {
-  await withRuntimeAgentDir(async (agentDir) => {
-    writeModelsConfig({ providers: { source: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "model" }] } } });
-    seedModelPayload("source", "model", { seed: 7 });
-    const modelsPath = path.join(agentDir, "models.json");
-    const blank = " \r\n\t";
-    let corrupted = false;
-
-    await runModelConfigCommand({
-      selects: ["管理 Providers", "编辑 [source]", "复制 Provider", "返回主菜单", "退出"],
-      editors: ["target"],
-      confirms: [],
-      customs: [],
-    }, {
-      onEditor: () => {
-        if (corrupted) return;
-        corrupted = true;
-        fs.writeFileSync(modelsPath, blank);
-      },
-    });
-
-    assert.equal(fs.readFileSync(modelsPath, "utf8"), blank);
-    assert.deepEqual(readModelPayload("source", "model"), { seed: 7 });
-    assert.equal(readModelPayload("target", "model"), undefined);
-  });
-});
-
-test("model copy does not write payloads when blank native persistence fails", async () => {
-  await withRuntimeAgentDir(async (agentDir) => {
-    writeModelsConfig({ providers: { local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "model" }] } } });
-    seedModelPayload("local", "model", { seed: 7 });
-    const modelsPath = path.join(agentDir, "models.json");
-    const blank = " \r\n\t";
-    let corrupted = false;
-
-    await runModelConfigCommand({
-      selects: ["管理 Providers", "编辑 [local]", "管理 Models", "复制", "返回主菜单", "退出"],
+    writeModelsConfig({ providers: {} });
+    const script: Script = {
+      selects: ["管理 Providers", "openai-completions", "退出"],
+      inputs: ["created", "http://localhost:11434"],
       editors: [],
       confirms: [],
-      customs: ["model:0", "__pi_model_config_action:back"],
-    }, {
-      onSelect: (value) => {
-        if (corrupted || value !== "复制") return;
-        corrupted = true;
-        fs.writeFileSync(modelsPath, blank);
-      },
-    });
-
-    assert.equal(fs.readFileSync(modelsPath, "utf8"), blank);
-    assert.deepEqual(readModelPayload("local", "model"), { seed: 7 });
-    assert.equal(readModelPayload("local", "model-copy"), undefined);
+      customs: [
+        "__pi_model_config_action:add_provider",
+        panelResult("back"),
+        "__pi_model_config_action:back",
+      ],
+    };
+    await runModelConfigCommand(script);
+    const provider = readModelsConfig().providers.created!;
+    assert.equal(provider.baseUrl, "http://localhost:11434");
+    assert.equal(provider.api, "openai-completions");
+    assert.deepEqual(provider.models, []);
+    assert.equal(Object.hasOwn(provider, "apiKey"), false);
+    assert.equal(Object.hasOwn(provider, "authHeader"), false);
   });
 });
 
-test("diagnostics reports a whitespace-only models file as unreadable", async () => {
-  await withRuntimeAgentDir(async (agentDir) => {
-    writeModelsConfig({ providers: { local: { baseUrl: "http://localhost:11434", models: [] } } });
-    const modelsPath = path.join(agentDir, "models.json");
-    const blank = " \r\n\t";
-    const notifications: Array<{ message: string; level: string }> = [];
-
-    await runModelConfigCommand({
-      selects: ["诊断：检查 models.json 状态", "退出"],
+test("Model creation uses Pi-compatible defaults and opens General without discovery prompts", async () => {
+  await withRuntimeAgentDir(async () => {
+    writeModelsConfig({ providers: { local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [] } } });
+    const script: Script = {
+      selects: ["管理 Providers", "管理 Models", "退出"],
+      inputs: ["created-model"],
       editors: [],
       confirms: [],
-      customs: [],
-    }, {
-      notifications,
-      onSelect: (value) => {
-        if (value.startsWith("诊断")) fs.writeFileSync(modelsPath, blank);
-      },
+      customs: [
+        "provider:local",
+        panelResult("run-action", "models", "manageModels"),
+        "__pi_model_config_action:add_model",
+        panelResult("back"),
+        "__pi_model_config_action:back",
+        panelResult("back"),
+        "__pi_model_config_action:back",
+      ],
+    };
+    await runModelConfigCommand(script);
+    const model = readModelsConfig().providers.local!.models![0]!;
+    assert.deepEqual(model, {
+      id: "created-model",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128000,
+      maxTokens: 16384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
-
-    assert.equal(fs.readFileSync(modelsPath, "utf8"), blank);
-    assert.ok(notifications.some(({ message, level }) => level === "error" && message.includes("file is blank")));
   });
 });
 
-test("legacy Provider endpoint action normalizes and merges through the endpoint transaction", async () => {
+test("lock busy remains a distinct non-secret diagnostic and performs no write", async () => {
   await withRuntimeAgentDir(async () => {
-    const existing = {
-      id: "same",
-      name: "Hand edited",
-      reasoning: true,
-      headers: { "X-Keep": "yes" },
-    };
-    writeModelsConfig({
-      providers: {
-        local: {
-          baseUrl: "http://service.test/api/",
-          apiKey: "ollama",
-          api: "openai-completions",
-          models: [existing],
-        },
-      },
+    writeModelsConfig({ providers: { local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "one" }] } } });
+    const actions = new ModelConfigActions({ commitMutation: async () => ({ type: "busy" }) as any });
+    const notifications: Array<{ message: string; level: string }> = [];
+    const original = fs.readFileSync(getModelsPath());
+    const panels = [panelResult("edit-field", "general", "name"), panelResult("back")];
+    const ctx = scriptedContext({ selects: ["输入值"], inputs: ["New"], editors: [], confirms: [], customs: [] }, notifications);
+    await runModelEditor(ctx, "local", "one", {
+      actions,
+      openPanel: async () => panels.shift()!,
     });
-    const originalFetch = globalThis.fetch;
-    const calls: Array<{ url: string; authorization?: string }> = [];
-    globalThis.fetch = (async (input, init) => {
-      calls.push({
-        url: String(input),
-        authorization: (init?.headers as Record<string, string> | undefined)?.Authorization,
-      });
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ data: [
-          { id: " same ", name: "Remote" },
-          { id: " ", name: " new " },
-          { id: "new", name: "Duplicate" },
-          { id: "" },
-        ] }),
-      } as Response;
-    }) as typeof fetch;
-    try {
-      await runModelConfigCommand({
-        selects: [
-          "管理 Providers",
-          "编辑 [local]",
-          "自动拉取 Model 列表（从 API 发现）",
-          "合并：保留现有 Model 并添加新 ID",
-          "返回主菜单",
-          "退出",
-        ],
-        editors: [],
-        confirms: [true],
-        customs: [],
-      });
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-
-    assert.deepEqual(calls, [{ url: "http://service.test/api/models", authorization: undefined }]);
-    const models = readModelsConfig().providers.local!.models!;
-    assert.deepEqual(models[0], existing);
-    assert.deepEqual(models[1], { id: "new", name: "new" });
-  });
-});
-
-test("legacy endpoint Cancel and rejected Replace confirmation write nothing", async () => {
-  await withRuntimeAgentDir(async () => {
-    writeModelsConfig({
-      providers: {
-        local: {
-          baseUrl: "http://service.test",
-          apiKey: "ollama",
-          api: "openai-completions",
-          models: [{ id: "old", name: "Keep" }],
-        },
-      },
-    });
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => ({
-      ok: true,
-      status: 200,
-      json: async () => [{ id: "new" }],
-    }) as Response) as typeof fetch;
-    try {
-      const beforeCancel = fs.readFileSync(getModelsPath());
-      await runModelConfigCommand({
-        selects: [
-          "管理 Providers", "编辑 [local]", "自动拉取 Model 列表（从 API 发现）",
-          "取消", "返回主菜单", "退出",
-        ],
-        editors: [], confirms: [], customs: [],
-      });
-      assert.equal(fs.readFileSync(getModelsPath()).equals(beforeCancel), true);
-
-      const beforeReplace = fs.readFileSync(getModelsPath());
-      await runModelConfigCommand({
-        selects: [
-          "管理 Providers", "编辑 [local]", "自动拉取 Model 列表（从 API 发现）",
-          "替换：仅保留端点返回的 Model ID", "返回主菜单", "退出",
-        ],
-        editors: [], confirms: [false], customs: [],
-      });
-      assert.equal(fs.readFileSync(getModelsPath()).equals(beforeReplace), true);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-});
-
-test("controller discards a cancelled simple-action token on its creating actions instance", async () => {
-  await withRuntimeAgentDir(async () => {
-    writeModelsConfig({
-      providers: {
-        local: {
-          baseUrl: "http://localhost:11434",
-          api: "openai-completions",
-          models: [{
-            id: "bad", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384,
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            extraPayload: { not: "rows" },
-          }],
-        },
-      },
-    });
-    seedModelPayload("local", "bad", { keep: true });
-    const nativeBefore = fs.readFileSync(getModelsPath());
-    const payloadBefore = fs.readFileSync(getPayloadConfigPath());
-
-    const originalPatchModel = ModelConfigActions.prototype.patchModel;
-    const originalDiscard = ModelConfigActions.prototype.discardResolutionToken;
-    let creator: ModelConfigActions | undefined;
-    let discarder: ModelConfigActions | undefined;
-    ModelConfigActions.prototype.patchModel = async function (...args) {
-      const result = await originalPatchModel.apply(this, args);
-      if (result.type === "validation-error" && result.resolutionToken) creator = this;
-      return result;
-    };
-    ModelConfigActions.prototype.discardResolutionToken = function (token) {
-      discarder = this;
-      return originalDiscard.call(this, token);
-    };
-
-    try {
-      const script = modelEditScript("bad");
-      script.confirms.push(false);
-      await runModelConfigCommand(script);
-      assert.ok(creator);
-      assert.equal(discarder, creator);
-      assert.equal(creator!.boundPreviewCount(), 0);
-      assert.equal(fs.readFileSync(getModelsPath()).equals(nativeBefore), true);
-      assert.equal(fs.readFileSync(getPayloadConfigPath()).equals(payloadBefore), true);
-      assert.equal(Object.hasOwn(readModelsConfig().providers.local!.models![0]!, "extraPayload"), true);
-    } finally {
-      ModelConfigActions.prototype.patchModel = originalPatchModel;
-      ModelConfigActions.prototype.discardResolutionToken = originalDiscard;
-    }
+    assert.deepEqual(fs.readFileSync(getModelsPath()), original);
+    assert.deepEqual(notifications, [{ message: "配置操作进行中，请稍后重试", level: "error" }]);
+    assert.doesNotMatch(notifications[0]!.message, /New|one/);
   });
 });

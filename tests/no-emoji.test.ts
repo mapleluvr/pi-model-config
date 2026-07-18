@@ -10,6 +10,8 @@ const SCANNED_PATHS = [
   "README-CN.md",
   "compat-settings.ts",
   "index.ts",
+  "model-editor.ts",
+  "provider-editor.ts",
   "searchable-multi-select.ts",
   "searchable-select.ts",
   "subagent-settings.ts",
