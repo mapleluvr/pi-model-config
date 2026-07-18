@@ -303,6 +303,64 @@ async function commitModelIdentity(
   return applyActionResult(ctx, await actions.commitModelIdentityAction(preview.token));
 }
 
+function managedProviderPatch(config: ProviderConfig): Record<string, unknown> {
+  return {
+    name: config.name ?? null,
+    baseUrl: config.baseUrl ?? null,
+    api: config.api ?? null,
+    apiKey: config.apiKey ?? null,
+    authHeader: config.authHeader ?? null,
+    compat: config.compat ?? null,
+    headers: config.headers ?? null,
+    modelOverrides: config.modelOverrides ?? null,
+  };
+}
+
+function managedProviderBaselines(existing: ProviderConfig): Record<string, unknown> {
+  return {
+    name: existing.name,
+    baseUrl: existing.baseUrl,
+    api: existing.api,
+    apiKey: existing.apiKey,
+    authHeader: existing.authHeader,
+    compat: existing.compat,
+    headers: existing.headers,
+    modelOverrides: existing.modelOverrides,
+  };
+}
+
+function managedModelPatch(model: ModelConfig): Record<string, unknown> {
+  return {
+    name: model.name ?? null,
+    reasoning: model.reasoning,
+    input: model.input,
+    contextWindow: model.contextWindow ?? null,
+    maxTokens: model.maxTokens ?? null,
+    cost: model.cost,
+    thinkingLevelMap: model.thinkingLevelMap ?? null,
+    compat: model.compat ?? null,
+    headers: model.headers ?? null,
+    api: model.api ?? null,
+    baseUrl: model.baseUrl ?? null,
+  };
+}
+
+function managedModelBaselines(existing: ModelConfig): Record<string, unknown> {
+  return {
+    name: existing.name,
+    reasoning: existing.reasoning,
+    input: existing.input,
+    contextWindow: existing.contextWindow,
+    maxTokens: existing.maxTokens,
+    cost: existing.cost,
+    thinkingLevelMap: existing.thinkingLevelMap,
+    compat: existing.compat,
+    headers: existing.headers,
+    api: existing.api,
+    baseUrl: existing.baseUrl,
+  };
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -886,21 +944,16 @@ async function manageProviders(
           kind: "rename",
           providerId,
           targetProviderId: result.providerId,
-          provider: result.config,
+          providerPatch: managedProviderPatch(result.config),
+          fieldBaselines: managedProviderBaselines(existing),
         });
         if (saved) config = saved;
       } else {
-        const saved = applyActionResult(ctx, await actions.patchProvider(providerId, {
-          name: result.config.name ?? null,
-          baseUrl: result.config.baseUrl ?? null,
-          api: result.config.api ?? null,
-          apiKey: result.config.apiKey ?? null,
-          authHeader: result.config.authHeader ?? null,
-          compat: result.config.compat ?? null,
-          models: result.config.models,
-          headers: result.config.headers ?? null,
-          modelOverrides: result.config.modelOverrides ?? null,
-        }));
+        const saved = applyActionResult(ctx, await actions.patchProvider(
+          providerId,
+          managedProviderPatch(result.config),
+          { fieldBaselines: managedProviderBaselines(existing) },
+        ));
         if (saved) config = saved;
       }
     }
@@ -960,21 +1013,21 @@ async function manageModels(
       continue;
     }
     if (action.startsWith("复制")) {
-      const modelCopy = structuredClone(existing);
-      delete (modelCopy as Record<string, unknown>)["extraPayload"];
-      modelCopy.id = `${existing.id}-copy`;
-      modelCopy.name = `${existing.name || existing.id} (Copy)`;
+      const targetModelId = `${existing.id}-copy`;
       const saved = await commitModelIdentity(ctx, {
         kind: "copy",
         providerId,
         modelId: existing.id,
-        targetModelId: modelCopy.id,
-        model: modelCopy,
+        targetModelId,
+        modelPatch: {
+          name: `${existing.name || existing.id} (Copy)`,
+        },
       });
       if (saved) config = saved;
       continue;
     }
     if (action.startsWith("编辑")) {
+      const fieldBaselines = managedModelBaselines(existing);
       const result = await editModel(ctx, providerId, existing);
       if (!result) continue;
       const modelToSave = structuredClone(result.model);
@@ -988,29 +1041,19 @@ async function manageModels(
           providerId,
           modelId: existing.id,
           targetModelId: modelToSave.id,
-          model: modelToSave,
+          modelPatch: managedModelPatch(modelToSave),
+          fieldBaselines,
           payload: payloadOption,
           migrateLegacyExtraPayload: payloadOption === null ? undefined : result.migrateLegacy,
         });
         if (saved) config = saved;
       } else {
-        const patch = {
-          id: modelToSave.id,
-          name: modelToSave.name ?? null,
-          reasoning: modelToSave.reasoning,
-          input: modelToSave.input,
-          contextWindow: modelToSave.contextWindow ?? null,
-          maxTokens: modelToSave.maxTokens ?? null,
-          cost: modelToSave.cost,
-          thinkingLevelMap: modelToSave.thinkingLevelMap ?? null,
-          compat: modelToSave.compat ?? null,
-          headers: modelToSave.headers ?? null,
-          api: modelToSave.api ?? null,
-          baseUrl: modelToSave.baseUrl ?? null,
-        };
-        const saved = applyActionResult(ctx, await actions.patchModel(providerId, existing.id, patch, {
-          payload: payloadOption,
-        }));
+        const saved = applyActionResult(ctx, await actions.patchModel(
+          providerId,
+          existing.id,
+          managedModelPatch(modelToSave),
+          { fieldBaselines, payload: payloadOption },
+        ));
         if (saved) config = saved;
       }
     }

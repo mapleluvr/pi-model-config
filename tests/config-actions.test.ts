@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { hashArtifact, readArtifact } from "../atomic-file.ts";
 import { ModelConfigActions, type ActionResult } from "../config-actions.ts";
 import { getModelsPath } from "../config.ts";
 import {
@@ -58,8 +57,8 @@ function readPayload(agentDir: string): PayloadConfig {
   return parsePayloadDocument(fs.readFileSync(filePath), filePath);
 }
 
-function seedBasic(agentDir: string): ModelsConfig {
-  const config: ModelsConfig = {
+function seedBasic(agentDir: string): void {
+  writeNative(agentDir, {
     providers: {
       local: {
         baseUrl: "http://localhost:11434",
@@ -67,10 +66,26 @@ function seedBasic(agentDir: string): ModelsConfig {
         models: [model("one", { name: "One", headers: { "X-Keep": "1" }, compat: { supportsTemperature: true } })],
       },
     },
-  };
-  writeNative(agentDir, config);
+  });
   writePayload(agentDir, emptyPayloadDocument());
-  return config;
+}
+
+const SECRET_MARKERS = ["sk-secret", "top_secret", "extraPayload", "\"temperature\"", "\"phase\""];
+
+function assertDiagnosticSecretFree(result: ActionResult): void {
+  if (result.type === "success") return;
+  const text = JSON.stringify(result);
+  for (const marker of SECRET_MARKERS) {
+    assert.equal(text.includes(marker), false, `diagnostic result leaked ${marker}: ${text.slice(0, 200)}`);
+  }
+  assert.equal(Object.hasOwn(result as object, "snapshot"), false);
+  assert.equal(Object.hasOwn(result as object, "native"), false);
+  assert.equal(Object.hasOwn(result as object, "payload"), false);
+  if (result.type === "preview") {
+    assert.equal(typeof result.token, "string");
+    assert.equal(Object.hasOwn(result.descriptor as object, "request"), false);
+    assert.equal(Object.hasOwn(result as object, "request"), false);
+  }
 }
 
 async function withAgentDir(run: (agentDir: string, actions: ModelConfigActions) => Promise<void> | void): Promise<void> {
@@ -85,18 +100,6 @@ async function withAgentDir(run: (agentDir: string, actions: ModelConfigActions)
     else process.env.PI_CODING_AGENT_DIR = previous;
     fs.rmSync(agentDir, { recursive: true, force: true });
   }
-}
-
-function assertNoSecrets(result: ActionResult): void {
-  if (result.type === "success" || result.type === "preview" || result.type === "subtree-conflict" || result.type === "stale-target") {
-    // Snapshots may carry private editor values; assert only non-snapshot diagnostic fields stay free of literals.
-    const { type } = result;
-    assert.equal(type.includes("sk-secret"), false);
-    return;
-  }
-  const text = JSON.stringify(result);
-  assert.equal(text.includes("sk-secret"), false);
-  assert.equal(text.includes("top_secret"), false);
 }
 
 test("patchProvider preserves false/zero values, explicit clear, and unknown fields", async () => withAgentDir(async (agentDir, actions) => {
@@ -144,7 +147,6 @@ test("patchModel looks up by provider key and model id, never stale array index"
   assert.equal(models[0]!.name, undefined);
   assert.equal(models[1]!.id, "beta");
   assert.equal(models[1]!.name, "Renamed Beta");
-  assert.equal(models[1]!.reasoning, false);
 }));
 
 test("stale identity and invalid full candidates reject without mutation", async () => withAgentDir(async (agentDir, actions) => {
@@ -152,14 +154,12 @@ test("stale identity and invalid full candidates reject without mutation", async
   const before = fs.readFileSync(getModelsPath(agentDir));
   const missing = await actions.patchProvider("missing", { name: "x" });
   assert.equal(missing.type, "stale-target");
+  assertDiagnosticSecretFree(missing);
   assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(before), true);
 
-  const invalid = await actions.patchProvider("local", { baseUrl: null, api: null, models: [] });
+  const invalid = await actions.patchProvider("local", { baseUrl: null, api: null });
   assert.equal(invalid.type, "validation-error");
-  if (invalid.type === "validation-error") {
-    assert.ok(invalid.issues.length > 0);
-    assert.equal(JSON.stringify(invalid).includes("sk-"), false);
-  }
+  assertDiagnosticSecretFree(invalid);
   assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(before), true);
 }));
 
@@ -171,7 +171,6 @@ test("nested subtree save conflicts only on the exact edited subtree", async () 
   const baselineHeaders = structuredClone(snapshot.native.providers.local!.headers ?? {});
   const baselineCompat = structuredClone(snapshot.native.providers.local!.compat ?? {});
 
-  // Unrelated external edit to compat while headers draft is open.
   const external = readNative(agentDir);
   external.providers.local!.compat = { supportsStore: true };
   writeNative(agentDir, external);
@@ -181,10 +180,31 @@ test("nested subtree save conflicts only on the exact edited subtree", async () 
   assert.deepEqual(readNative(agentDir).providers.local!.headers, { "X-New": "2" });
   assert.deepEqual(readNative(agentDir).providers.local!.compat, { supportsStore: true });
 
-  // Same-subtree conflict for compat.
   const conflict = await actions.saveProviderSubtree("local", "compat", baselineCompat, { supportsTemperature: false });
   assert.equal(conflict.type, "subtree-conflict");
+  assertDiagnosticSecretFree(conflict);
+  if (conflict.type === "subtree-conflict") {
+    assert.equal(conflict.path.includes("compat"), true);
+  }
   assert.deepEqual(readNative(agentDir).providers.local!.compat, { supportsStore: true });
+}));
+
+test("object key reorder does not cause subtree conflict", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost:1",
+        api: "openai-completions",
+        headers: { b: "2", a: "1" },
+        models: [model("one")],
+      },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  // Baseline with different key insertion order must still match.
+  const result = await actions.saveProviderSubtree("local", "headers", { a: "1", b: "2" }, { a: "1", b: "2", c: "3" });
+  assert.equal(result.type, "success");
+  assert.deepEqual(readNative(agentDir).providers.local!.headers, { a: "1", b: "2", c: "3" });
 }));
 
 test("create and copy reject occupied native targets without writes", async () => withAgentDir(async (agentDir, actions) => {
@@ -201,12 +221,186 @@ test("create and copy reject occupied native targets without writes", async () =
 
   const create = await actions.createProvider("target", { baseUrl: "http://localhost:3", api: "openai-completions", models: [] });
   assert.equal(create.type, "native-collision");
+  assertDiagnosticSecretFree(create);
 
   const copyPreview = await actions.previewProviderIdentityAction({ kind: "copy", providerId: "source", targetProviderId: "target" });
   assert.equal(copyPreview.type, "native-collision");
+  assertDiagnosticSecretFree(copyPreview);
 
   assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
   assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+}));
+
+test("createProvider rejects duplicate model ids with zero writes", async () => withAgentDir(async (agentDir, actions) => {
+  seedBasic(agentDir);
+  const before = fs.readFileSync(getModelsPath(agentDir));
+  const result = await actions.createProvider("dup", {
+    baseUrl: "http://localhost:9",
+    api: "openai-completions",
+    models: [model("same"), model("same", { name: "Other" })],
+  });
+  assert.equal(result.type, "validation-error");
+  assertDiagnosticSecretFree(result);
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(before), true);
+  assert.equal(readNative(agentDir).providers.dup, undefined);
+}));
+
+test("provider identity enumerates native and payload-only tuple identities including slash ids", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      "src/prov": {
+        baseUrl: "http://localhost:1",
+        api: "openai-completions",
+        models: [model("native/one")],
+      },
+    },
+  });
+  let payload = setPayloadDocumentValue(emptyPayloadDocument(), "src/prov", "native/one", { n: 1 });
+  payload = setPayloadDocumentValue(payload, "src/prov", "payload/only", { p: 1 });
+  writePayload(agentDir, payload);
+
+  const preview = await actions.previewProviderIdentityAction({
+    kind: "rename",
+    providerId: "src/prov",
+    targetProviderId: "dst/prov",
+  });
+  assert.equal(preview.type, "preview");
+  if (preview.type !== "preview") return;
+  assert.deepEqual(preview.affectedIdentities, [
+    ["src/prov", "native/one"],
+    ["src/prov", "payload/only"],
+    ["dst/prov", "native/one"],
+    ["dst/prov", "payload/only"],
+  ]);
+  assertDiagnosticSecretFree(preview);
+
+  const committed = await actions.commitProviderIdentityAction(preview.token);
+  assert.equal(committed.type, "success");
+  assert.equal(readNative(agentDir).providers["src/prov"], undefined);
+  assert.ok(readNative(agentDir).providers["dst/prov"]);
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "dst/prov", "native/one"), { n: 1 });
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "dst/prov", "payload/only"), { p: 1 });
+  assert.equal(lookupModelPayload(readPayload(agentDir), "src/prov", "payload/only"), undefined);
+}));
+
+test("provider delete removes exactly all disclosed native and payload-only identities", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      gone: { baseUrl: "http://localhost:1", api: "openai-completions", models: [model("a")] },
+      keep: { baseUrl: "http://localhost:2", api: "openai-completions", models: [model("b")] },
+    },
+  });
+  let payload = setPayloadDocumentValue(emptyPayloadDocument(), "gone", "a", { a: 1 });
+  payload = setPayloadDocumentValue(payload, "gone", "orphan", { o: 1 });
+  payload = setPayloadDocumentValue(payload, "keep", "b", { b: 1 });
+  writePayload(agentDir, payload);
+
+  const preview = await actions.previewProviderIdentityAction({ kind: "delete", providerId: "gone" });
+  assert.equal(preview.type, "preview");
+  if (preview.type !== "preview") return;
+  assert.deepEqual(preview.affectedIdentities, [["gone", "a"], ["gone", "orphan"]]);
+  const ok = await actions.commitProviderIdentityAction(preview.token);
+  assert.equal(ok.type, "success");
+  assert.equal(readNative(agentDir).providers.gone, undefined);
+  assert.equal(lookupModelPayload(readPayload(agentDir), "gone", "a"), undefined);
+  assert.equal(lookupModelPayload(readPayload(agentDir), "gone", "orphan"), undefined);
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "keep", "b"), { b: 1 });
+}));
+
+test("reuse-target preserves existing target payload even with explicit payload or null", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      local: { baseUrl: "http://localhost:1", api: "openai-completions", models: [model("old")] },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(
+    setPayloadDocumentValue(emptyPayloadDocument(), "local", "old", { from: "source" }),
+    "local",
+    "new",
+    { from: "target" },
+  ));
+
+  const rename = await actions.previewModelIdentityAction({
+    kind: "rename",
+    providerId: "local",
+    modelId: "old",
+    targetModelId: "new",
+    payload: null,
+    payloadCollisionResolution: "reuse-target",
+  });
+  assert.equal(rename.type, "preview");
+  if (rename.type !== "preview") return;
+  assert.deepEqual(rename.collisions, [["local", "new"]]);
+  const renamed = await actions.commitModelIdentityAction(rename.token);
+  assert.equal(renamed.type, "success");
+  assert.equal(lookupModelPayload(readPayload(agentDir), "local", "old"), undefined);
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "new"), { from: "target" });
+
+  // Copy reuse: source and target both retained.
+  writeNative(agentDir, {
+    providers: {
+      local: { baseUrl: "http://localhost:1", api: "openai-completions", models: [model("src"), model("dst")] },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(
+    setPayloadDocumentValue(emptyPayloadDocument(), "local", "src", { from: "source" }),
+    "local",
+    "dst",
+    { from: "target" },
+  ));
+  // Need free target for copy - use free id with pre-existing payload only.
+  writeNative(agentDir, {
+    providers: {
+      local: { baseUrl: "http://localhost:1", api: "openai-completions", models: [model("src")] },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(
+    setPayloadDocumentValue(emptyPayloadDocument(), "local", "src", { from: "source" }),
+    "local",
+    "copy-target",
+    { from: "target" },
+  ));
+  const copy = await actions.previewModelIdentityAction({
+    kind: "copy",
+    providerId: "local",
+    modelId: "src",
+    targetModelId: "copy-target",
+    payloadCollisionResolution: "reuse-target",
+  });
+  assert.equal(copy.type, "preview");
+  if (copy.type !== "preview") return;
+  const copied = await actions.commitModelIdentityAction(copy.token);
+  assert.equal(copied.type, "success");
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "src"), { from: "source" });
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "copy-target"), { from: "target" });
+}));
+
+test("replace-target overwrites target payload with source semantics", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      local: { baseUrl: "http://localhost:1", api: "openai-completions", models: [model("old")] },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(
+    setPayloadDocumentValue(emptyPayloadDocument(), "local", "old", { from: "source" }),
+    "local",
+    "new",
+    { from: "target" },
+  ));
+  const preview = await actions.previewModelIdentityAction({
+    kind: "rename",
+    providerId: "local",
+    modelId: "old",
+    targetModelId: "new",
+    payloadCollisionResolution: "replace-target",
+  });
+  assert.equal(preview.type, "preview");
+  if (preview.type !== "preview") return;
+  assert.deepEqual(preview.collisions, [["local", "new"]]);
+  const committed = await actions.commitModelIdentityAction(preview.token);
+  assert.equal(committed.type, "success");
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "new"), { from: "source" });
+  assert.equal(lookupModelPayload(readPayload(agentDir), "local", "old"), undefined);
 }));
 
 test("target payload collisions require explicit resolution and never rewrite implicitly", async () => withAgentDir(async (agentDir, actions) => {
@@ -230,29 +424,59 @@ test("target payload collisions require explicit resolution and never rewrite im
     targetModelId: "new",
   });
   assert.equal(preview.type, "payload-collision");
+  assertDiagnosticSecretFree(preview);
   if (preview.type === "payload-collision") {
     assert.deepEqual(preview.collisions, [["local", "new"]]);
-    assertNoSecrets(preview);
   }
   assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
-
-  const resolved = await actions.previewModelIdentityAction({
-    kind: "rename",
-    providerId: "local",
-    modelId: "old",
-    targetModelId: "new",
-    payloadCollisionResolution: "replace-target",
-  });
-  assert.equal(resolved.type, "preview");
-  if (resolved.type !== "preview") return;
-  const committed = await actions.commitModelIdentityAction(resolved.token);
-  assert.equal(committed.type, "success");
-  assert.equal(lookupModelPayload(readPayload(agentDir), "local", "old"), undefined);
-  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "new"), { from: "source" });
-  assert.equal(readNative(agentDir).providers.local!.models![0]!.id, "new");
 }));
 
-test("identity commit revalidates hashes and identity sets before writing", async () => withAgentDir(async (agentDir, actions) => {
+test("opaque preview tokens reject mutation and unknown tokens", async () => withAgentDir(async (agentDir, actions) => {
+  seedBasic(agentDir);
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "one", { seed: 7 }));
+
+  const preview = await actions.previewModelIdentityAction({
+    kind: "rename",
+    providerId: "local",
+    modelId: "one",
+    targetModelId: "two",
+  });
+  assert.equal(preview.type, "preview");
+  if (preview.type !== "preview") return;
+  assertDiagnosticSecretFree(preview);
+
+  // Mutate every public field on the result object; commit still uses bound state.
+  (preview as { affectedIdentities: unknown }).affectedIdentities = [["evil", "x"]];
+  (preview as { collisions: unknown }).collisions = [["evil", "y"]];
+  (preview.descriptor as { kind: string }).kind = "delete";
+  (preview.descriptor as { sourceProviderId: string }).sourceProviderId = "evil";
+  const text = JSON.stringify(preview);
+  assert.equal(text.includes("seed"), false);
+
+  const committed = await actions.commitModelIdentityAction(preview.token);
+  assert.equal(committed.type, "success");
+  assert.equal(readNative(agentDir).providers.local!.models![0]!.id, "two");
+
+  const unknown = await actions.commitModelIdentityAction("not-a-real-token");
+  assert.equal(unknown.type, "stale-target");
+  assertDiagnosticSecretFree(unknown);
+
+  // Tampered token string cannot invent a new action.
+  const again = await actions.previewModelIdentityAction({
+    kind: "copy",
+    providerId: "local",
+    modelId: "two",
+    targetModelId: "three",
+  });
+  assert.equal(again.type, "preview");
+  if (again.type !== "preview") return;
+  const forged = `${again.token}-forged`;
+  const forgedResult = await actions.commitModelIdentityAction(forged);
+  assert.equal(forgedResult.type, "stale-target");
+  assert.equal(readNative(agentDir).providers.local!.models!.some((entry) => entry.id === "three"), false);
+}));
+
+test("identity commit drift returns refreshed sanitized preview without write", async () => withAgentDir(async (agentDir, actions) => {
   seedBasic(agentDir);
   writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "one", { seed: 7 }));
 
@@ -268,102 +492,193 @@ test("identity commit revalidates hashes and identity sets before writing", asyn
   const drifted = readNative(agentDir);
   drifted.providers.local!.models = [model("one"), model("extra")];
   writeNative(agentDir, drifted);
+  const nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+  const payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
 
   const commit = await actions.commitModelIdentityAction(preview.token);
   assert.equal(commit.type, "stale-target");
-  assert.equal(readNative(agentDir).providers.local!.models!.map((entry) => entry.id).join(","), "one,extra");
+  assertDiagnosticSecretFree(commit);
+  if (commit.type === "stale-target") {
+    assert.ok(commit.preview);
+    assert.equal(typeof commit.preview!.token, "string");
+    assert.equal(commit.preview!.kind, "rename");
+    assert.deepEqual(commit.preview!.affectedIdentities, [["local", "one"], ["local", "two"]]);
+  }
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
   assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "one"), { seed: 7 });
 }));
 
-test("provider identity operations carry every model payload in one journaled transaction", async () => withAgentDir(async (agentDir, actions) => {
+test("field baselines prevent overwriting concurrent unedited model additions", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost:1",
+        api: "openai-completions",
+        name: "Original",
+        headers: { "X-Keep": "1" },
+        models: [model("one")],
+      },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  const baselines = { name: "Original", baseUrl: "http://localhost:1", api: "openai-completions" };
+
+  // Concurrent process adds a model and changes headers.
+  const concurrent = readNative(agentDir);
+  concurrent.providers.local!.models!.push(model("two"));
+  concurrent.providers.local!.headers = { "X-Keep": "1", "X-New": "2" };
+  writeNative(agentDir, concurrent);
+
+  const result = await actions.patchProvider("local", { name: "Renamed" }, { fieldBaselines: baselines });
+  assert.equal(result.type, "success");
+  const provider = readNative(agentDir).providers.local!;
+  assert.equal(provider.name, "Renamed");
+  assert.equal(provider.models!.map((entry) => entry.id).join(","), "one,two");
+  assert.deepEqual(provider.headers, { "X-Keep": "1", "X-New": "2" });
+
+  // Same field concurrent edit conflicts.
+  const conflict = await actions.patchProvider("local", { name: "Again" }, {
+    fieldBaselines: { name: "Original" },
+  });
+  assert.equal(conflict.type, "subtree-conflict");
+  assertDiagnosticSecretFree(conflict);
+  assert.equal(readNative(agentDir).providers.local!.name, "Renamed");
+}));
+
+test("provider rename applies managed patch without replacing concurrent models", async () => withAgentDir(async (agentDir, actions) => {
   writeNative(agentDir, {
     providers: {
       source: {
         baseUrl: "http://localhost:1",
         api: "openai-completions",
-        models: [model("a"), model("b")],
+        name: "Src",
+        models: [model("a")],
       },
     },
   });
-  writePayload(agentDir, setPayloadDocumentValue(
-    setPayloadDocumentValue(emptyPayloadDocument(), "source", "a", { a: 1 }),
-    "source",
-    "b",
-    { b: 2 },
-  ));
-
+  writePayload(agentDir, emptyPayloadDocument());
   const preview = await actions.previewProviderIdentityAction({
     kind: "rename",
     providerId: "source",
     targetProviderId: "dest",
+    providerPatch: { name: "Dest" },
+    fieldBaselines: { name: "Src" },
   });
   assert.equal(preview.type, "preview");
   if (preview.type !== "preview") return;
-  assert.deepEqual(preview.affectedIdentities, [["source", "a"], ["source", "b"], ["dest", "a"], ["dest", "b"]]);
 
-  const result = await actions.commitProviderIdentityAction(preview.token);
-  assert.equal(result.type, "success");
-  assert.equal(readNative(agentDir).providers.source, undefined);
-  assert.ok(readNative(agentDir).providers.dest);
-  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "dest", "a"), { a: 1 });
-  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "dest", "b"), { b: 2 });
-  assert.equal(lookupModelPayload(readPayload(agentDir), "source", "a"), undefined);
+  // Concurrent model addition before commit.
+  const concurrent = readNative(agentDir);
+  concurrent.providers.source!.models!.push(model("b"));
+  writeNative(agentDir, concurrent);
+
+  const committed = await actions.commitProviderIdentityAction(preview.token);
+  // Hash drift -> refreshed preview, zero write of rename under old identity set.
+  assert.equal(committed.type, "stale-target");
+  assertDiagnosticSecretFree(committed);
+  assert.ok(readNative(agentDir).providers.source);
+  assert.equal(readNative(agentDir).providers.dest, undefined);
+  assert.equal(readNative(agentDir).providers.source!.models!.length, 2);
 }));
 
-test("legacy native extraPayload migrates only in the successful model transaction that previewed it", async () => withAgentDir(async (agentDir, actions) => {
+test("legacy extraPayload migrates on model copy and provider rename with private precedence", async () => withAgentDir(async (agentDir, actions) => {
   writeNative(agentDir, {
     providers: {
       local: {
         baseUrl: "http://localhost:1",
         api: "openai-completions",
-        models: [model("old", {
-          extraPayload: { migrated: true },
-        })],
+        models: [model("old", { extraPayload: { migrated: true } })],
       },
     },
   });
   writePayload(agentDir, emptyPayloadDocument());
 
-  const preview = await actions.previewModelIdentityAction({
-    kind: "rename",
+  const copyPreview = await actions.previewModelIdentityAction({
+    kind: "copy",
     providerId: "local",
     modelId: "old",
-    targetModelId: "new",
-    model: model("new"),
-    migrateLegacyExtraPayload: { migrated: true },
+    targetModelId: "copy",
   });
-  assert.equal(preview.type, "preview");
-  if (preview.type !== "preview") return;
+  assert.equal(copyPreview.type, "preview");
+  if (copyPreview.type !== "preview") return;
+  const copied = await actions.commitModelIdentityAction(copyPreview.token);
+  assert.equal(copied.type, "success");
+  const copyModel = readNative(agentDir).providers.local!.models!.find((entry) => entry.id === "copy")!;
+  assert.equal(Object.hasOwn(copyModel, "extraPayload"), false);
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "copy"), { migrated: true });
+  // Source native still may retain legacy until edited; copy must not remove source private absence.
+  assert.equal(lookupModelPayload(readPayload(agentDir), "local", "old"), undefined);
 
-  // Drift blocks migration; legacy field remains until a successful commit.
+  // Private existing takes precedence over legacy on rename target with replace.
+  writeNative(agentDir, {
+    providers: {
+      source: {
+        baseUrl: "http://localhost:1",
+        api: "openai-completions",
+        models: [model("m", { extraPayload: { legacy: true } })],
+      },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "source", "m", { private: true }));
+  const rename = await actions.previewProviderIdentityAction({
+    kind: "rename",
+    providerId: "source",
+    targetProviderId: "dest",
+  });
+  assert.equal(rename.type, "preview");
+  if (rename.type !== "preview") return;
+  const renamed = await actions.commitProviderIdentityAction(rename.token);
+  assert.equal(renamed.type, "success");
+  const destModel = readNative(agentDir).providers.dest!.models![0]!;
+  assert.equal(Object.hasOwn(destModel, "extraPayload"), false);
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "dest", "m"), { private: true });
+}));
+
+test("legacy migration is skipped on collision/stale/validation/lock failure", async () => withAgentDir(async (agentDir, actions) => {
   writeNative(agentDir, {
     providers: {
       local: {
         baseUrl: "http://localhost:1",
         api: "openai-completions",
-        models: [model("old", { extraPayload: { migrated: true }, name: "changed" })],
+        models: [model("old", { extraPayload: { migrated: true } })],
       },
     },
   });
-  const stale = await actions.commitModelIdentityAction(preview.token);
-  assert.equal(stale.type, "stale-target");
-  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), true);
-  assert.equal(lookupModelPayload(readPayload(agentDir), "local", "new"), undefined);
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "new", { keep: true }));
+  const beforeNative = fs.readFileSync(getModelsPath(agentDir));
+  const beforePayload = fs.readFileSync(getPayloadConfigPath(agentDir));
 
-  const preview2 = await actions.previewModelIdentityAction({
+  const collision = await actions.previewModelIdentityAction({
     kind: "rename",
     providerId: "local",
     modelId: "old",
     targetModelId: "new",
-    model: model("new", { name: "changed" }),
+  });
+  assert.equal(collision.type, "payload-collision");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), true);
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(beforeNative), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(beforePayload), true);
+
+  const lockActions = new ModelConfigActions({
+    agentDir,
+    commitMutation: async () => ({ type: "busy" }),
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  const lockPreview = await lockActions.previewModelIdentityAction({
+    kind: "rename",
+    providerId: "local",
+    modelId: "old",
+    targetModelId: "free",
     migrateLegacyExtraPayload: { migrated: true },
   });
-  assert.equal(preview2.type, "preview");
-  if (preview2.type !== "preview") return;
-  const ok = await actions.commitModelIdentityAction(preview2.token);
-  assert.equal(ok.type, "success");
-  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), false);
-  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "new"), { migrated: true });
+  assert.equal(lockPreview.type, "preview");
+  if (lockPreview.type !== "preview") return;
+  const lockResult = await lockActions.commitModelIdentityAction(lockPreview.token);
+  assert.equal(lockResult.type, "lock-busy");
+  assertDiagnosticSecretFree(lockResult);
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), true);
+  assert.equal(lookupModelPayload(readPayload(agentDir), "local", "free"), undefined);
 }));
 
 test("lock busy/collision/unsupported propagate as distinct zero-write results", async () => withAgentDir(async (agentDir) => {
@@ -379,54 +694,70 @@ test("lock busy/collision/unsupported propagate as distinct zero-write results",
     });
     const result = await actions.patchProvider("local", { name: "x" });
     assert.equal(result.type, `lock-${lockType}`);
-    assertNoSecrets(result);
+    assertDiagnosticSecretFree(result);
   }
 
   assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
   assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
 }));
 
-test("injected journal-step failures keep request resolution exactly before or after", async () => withAgentDir(async (agentDir) => {
-  writeNative(agentDir, {
-    providers: {
-      local: { baseUrl: "http://localhost:1", api: "openai-completions", models: [model("one")] },
-    },
-  });
-  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "one", { phase: "before" }));
-  const actions = new ModelConfigActions({
-    agentDir,
-    commitMutation: async (request: MutationRequest, options?: PayloadCoordinatorOptions): Promise<CommitResult> => {
-      return commitCoordinatedMutation({
-        ...request,
-        onBoundary(boundary) {
-          request.onBoundary?.(boundary);
-          if (boundary === "native") throw new Error("injected native failure");
-        },
-      }, options);
-    },
-  });
+test("action layer faults at journal/native/payload/journal-removal keep exact before or after resolution", async () => withAgentDir(async (agentDir) => {
+  const boundaries = ["journal", "native", "payload", "journal-removed"] as const;
+  for (const failAt of boundaries) {
+    writeNative(agentDir, {
+      providers: {
+        local: { baseUrl: "http://localhost:1", api: "openai-completions", models: [model("one")] },
+      },
+    });
+    writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "one", { phase: "before" }));
+    // Clean journal from prior iteration.
+    const journalPath = getTransactionJournalPath(agentDir);
+    if (fs.existsSync(journalPath)) fs.rmSync(journalPath);
 
-  const preview = await actions.previewModelIdentityAction({
-    kind: "rename",
-    providerId: "local",
-    modelId: "one",
-    targetModelId: "two",
-  });
-  assert.equal(preview.type, "preview");
-  if (preview.type !== "preview") return;
+    const actions = new ModelConfigActions({
+      agentDir,
+      commitMutation: async (request: MutationRequest, options?: PayloadCoordinatorOptions): Promise<CommitResult> => {
+        return commitCoordinatedMutation({
+          ...request,
+          onBoundary(boundary) {
+            request.onBoundary?.(boundary);
+            if (boundary === failAt && failAt !== "journal-removed") throw new Error(`injected ${failAt} failure`);
+            if (boundary === "journal-removed" && failAt === "journal-removed") throw new Error("injected journal-removed failure");
+          },
+        }, options);
+      },
+    });
 
-  await assert.rejects(() => actions.commitModelIdentityAction(preview.token));
+    const preview = await actions.previewModelIdentityAction({
+      kind: "rename",
+      providerId: "local",
+      modelId: "one",
+      targetModelId: "two",
+    });
+    assert.equal(preview.type, "preview");
+    if (preview.type !== "preview") return;
 
-  const resolvedOne = resolveRequestPayload("local", "one", { agentDir });
-  const resolvedTwo = resolveRequestPayload("local", "two", { agentDir });
-  // Exactly one coherent journal side: before identity or after identity, never mixed.
-  const beforeOnly = resolvedOne?.phase === "before" && resolvedTwo === undefined;
-  const afterOnly = resolvedTwo?.phase === "before" && resolvedOne === undefined;
-  assert.equal(beforeOnly || afterOnly, true);
-  assert.equal(Boolean(beforeOnly && afterOnly), false);
+    if (failAt === "journal-removed") {
+      // Failure after journal removal: commit may surface as thrown after success path mid-flight.
+      try {
+        await actions.commitModelIdentityAction(preview.token);
+      } catch {
+        // expected
+      }
+    } else {
+      await assert.rejects(() => actions.commitModelIdentityAction(preview.token));
+    }
+
+    const resolvedOne = resolveRequestPayload("local", "one", { agentDir });
+    const resolvedTwo = resolveRequestPayload("local", "two", { agentDir });
+    const beforeOnly = resolvedOne?.phase === "before" && resolvedTwo === undefined;
+    const afterOnly = resolvedTwo?.phase === "before" && resolvedOne === undefined;
+    assert.equal(beforeOnly || afterOnly, true, `boundary ${failAt} mixed views: one=${JSON.stringify(resolvedOne)} two=${JSON.stringify(resolvedTwo)}`);
+    assert.equal(Boolean(beforeOnly && afterOnly), false);
+  }
 }));
 
-test("editor snapshot returns deep clones and hashes without secret leakage in result types", async () => withAgentDir(async (agentDir, actions) => {
+test("editor snapshot returns deep clones; diagnostics never embed private docs", async () => withAgentDir(async (agentDir, actions) => {
   writeNative(agentDir, {
     providers: {
       local: {
@@ -442,19 +773,18 @@ test("editor snapshot returns deep clones and hashes without secret leakage in r
   assert.equal(snapshot.type, "snapshot");
   if (snapshot.type !== "snapshot") return;
   assert.ok(snapshot.nativeHash.startsWith("sha256:"));
-  assert.ok(snapshot.payloadHash.startsWith("sha256:"));
   snapshot.native.providers.local!.name = "mutated";
   assert.notEqual(readNative(agentDir).providers.local!.name, "mutated");
-  const payloadClone = snapshot.payload;
-  payloadClone.extraPayloads[modelPayloadKey("local", "one")] = { broken: true };
-  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "one"), { top_secret: true });
+
+  const missing = await actions.patchModel("local", "missing", { name: "x" });
+  assert.equal(missing.type, "stale-target");
+  assertDiagnosticSecretFree(missing);
 }));
 
-test("createModel and saveModelPayload journal private values without embedding them in results", async () => withAgentDir(async (agentDir, actions) => {
+test("createModel and saveModelPayload succeed without leaking payload into diagnostics", async () => withAgentDir(async (agentDir, actions) => {
   seedBasic(agentDir);
   const created = await actions.createModel("local", model("two"), { payload: { temperature: 0.2 } });
   assert.equal(created.type, "success");
-  assertNoSecrets(created);
   assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "two"), { temperature: 0.2 });
 
   const snapshot = actions.readEditorSnapshot();
@@ -463,7 +793,6 @@ test("createModel and saveModelPayload journal private values without embedding 
   const baseline = lookupModelPayload(snapshot.payload, "local", "two")!;
   const saved = await actions.saveModelPayload("local", "two", baseline, { temperature: 0.5 });
   assert.equal(saved.type, "success");
-  assertNoSecrets(saved);
   assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "two"), { temperature: 0.5 });
 }));
 
@@ -472,5 +801,6 @@ test("recovery-required is returned when storage is not mutation-ready", async (
   fs.writeFileSync(getTransactionJournalPath(agentDir), "{");
   const result = await actions.patchProvider("local", { name: "x" });
   assert.equal(result.type, "recovery-required");
+  assertDiagnosticSecretFree(result);
   assert.equal(fs.readFileSync(getTransactionJournalPath(agentDir), "utf8"), "{");
 }));

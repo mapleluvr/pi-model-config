@@ -402,7 +402,18 @@ function validateProvider(
   if (value.models !== undefined) {
     const modelsPath = childPath(path, "models");
     if (!Array.isArray(value.models)) addIssue(issues, modelsPath, "must be an array");
-    else models = value.models.map((model, index) => validateModel(model, `${modelsPath}[${index}]`, issues));
+    else {
+      models = value.models.map((model, index) => validateModel(model, `${modelsPath}[${index}]`, issues));
+      const seenIds = new Set<string>();
+      value.models.forEach((model, index) => {
+        if (!isObject(model) || typeof model.id !== "string" || model.id.trim().length === 0) return;
+        if (seenIds.has(model.id)) {
+          addIssue(issues, `${modelsPath}[${index}].id`, "must be unique within the provider");
+        } else {
+          seenIds.add(model.id);
+        }
+      });
+    }
   }
 
   let overrideCount = 0;

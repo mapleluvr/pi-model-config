@@ -90,6 +90,9 @@ test("deep clone and equality helpers preserve false/zero and isolate mutations"
   assert.equal(original.nested.keep, true);
   assert.equal(deepEqualJson({ a: false, b: 0 }, { a: false, b: 0 }), true);
   assert.equal(deepEqualJson({ a: false }, { a: true }), false);
+  // Object key order is insignificant; array order is significant.
+  assert.equal(deepEqualJson({ b: 1, a: 2 }, { a: 2, b: 1 }), true);
+  assert.equal(deepEqualJson([1, 2], [2, 1]), false);
 });
 
 test("provider and model subtree helpers clone exact objects", () => {

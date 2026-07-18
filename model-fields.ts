@@ -22,10 +22,31 @@ export function deepCloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+/** Order-insensitive for plain objects; array order is significant. */
 export function deepEqualJson(left: unknown, right: unknown): boolean {
-  if (left === undefined && right === undefined) return true;
-  if (left === undefined || right === undefined) return false;
-  return JSON.stringify(left) === JSON.stringify(right);
+  if (left === right) return true;
+  if (left === undefined || right === undefined || left === null || right === null) return left === right;
+  if (typeof left !== typeof right) return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((entry, index) => deepEqualJson(entry, right[index]));
+  }
+  if (isPlainObject(left) && isPlainObject(right)) {
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    if (leftKeys.length !== rightKeys.length) return false;
+    const rightSet = new Set(rightKeys);
+    for (const key of leftKeys) {
+      if (!rightSet.has(key)) return false;
+      if (!deepEqualJson(left[key], right[key])) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 export function normalizeSubtreeBaseline(value: unknown): unknown {

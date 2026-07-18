@@ -205,3 +205,14 @@ test("assertion error reports paths and messages but never inspected secret valu
     },
   );
 });
+
+test("rejects duplicate model ids within a provider", () => {
+  const paths = issuePaths({
+    providers: {
+      native: {
+        models: [{ id: "dup" }, { id: "dup" }],
+      },
+    },
+  });
+  assert.ok(paths.includes("$.providers.native.models[1].id"));
+});
