@@ -193,8 +193,8 @@ export function listProviderPayloadIdentities(config: PayloadConfig, providerId:
       && isUnambiguousLegacyModelPayloadKey(key)
       && key.startsWith(legacyPrefix)
     ) {
+      // Empty model id is supported: key `provider/` maps to [provider, ""].
       const modelId = key.slice(legacyPrefix.length);
-      if (modelId.length === 0) continue;
       const entry: ModelPayloadIdentity = [providerId, modelId];
       map.set(JSON.stringify(entry), entry);
     }

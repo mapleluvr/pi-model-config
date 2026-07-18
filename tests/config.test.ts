@@ -114,3 +114,58 @@ test("atomically writes a valid candidate while preserving unknown nested fields
   assert.equal(fs.statSync(filePath).mode & 0o777, originalMode);
   assert.deepEqual(fs.readdirSync(agentDir).filter((entry) => entry.endsWith(".tmp")), []);
 }));
+
+
+test("parseModelsDocument keeps literal __proto__ and sentinel-named provider keys as distinct own keys", () => withAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "models.json");
+  const document = `{
+  // comment
+  "providers": {
+    "__proto__": {
+      "baseUrl": "http://proto",
+      "api": "openai-completions",
+      "models": []
+    },
+    "__mc_own_proto__": {
+      "baseUrl": "http://sentinel",
+      "api": "openai-completions",
+      "models": [{ "id": "nested", "headers": { "__proto__": "hdr", "x": "1" } }]
+    },
+  },
+}`;
+  fs.writeFileSync(filePath, document, "utf8");
+  const parsed = parseModelsDocument(filePath, document);
+  assert.equal(Object.hasOwn(parsed.providers, "__proto__"), true);
+  assert.equal(Object.hasOwn(parsed.providers, "__mc_own_proto__"), true);
+  assert.equal(parsed.providers["__proto__"]!.baseUrl, "http://proto");
+  assert.equal(parsed.providers["__mc_own_proto__"]!.baseUrl, "http://sentinel");
+  const nestedHeaders = parsed.providers["__mc_own_proto__"]!.models![0]!.headers as Record<string, unknown>;
+  assert.equal(Object.hasOwn(nestedHeaders, "__proto__"), true);
+  assert.equal(nestedHeaders["__proto__"], "hdr");
+
+  writeModelsConfig(parsed);
+  const roundtrip = readModelsConfig();
+  assert.equal(Object.hasOwn(roundtrip.providers, "__proto__"), true);
+  assert.equal(Object.hasOwn(roundtrip.providers, "__mc_own_proto__"), true);
+  assert.equal(roundtrip.providers["__proto__"]!.baseUrl, "http://proto");
+  assert.equal(roundtrip.providers["__mc_own_proto__"]!.baseUrl, "http://sentinel");
+  assert.notEqual(roundtrip.providers["__proto__"], roundtrip.providers["__mc_own_proto__"]);
+}));
+
+test("parseModelsDocument materializes unicode-escaped __proto__ provider key as own key", () => withAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "models.json");
+  // \u005f is underscore; four escapes form the key __proto__
+  const document = `{
+  "providers": {
+    "\u005f\u005fproto\u005f\u005f": {
+      "baseUrl": "http://escaped",
+      "api": "openai-completions",
+      "models": []
+    }
+  }
+}`;
+  fs.writeFileSync(filePath, document, "utf8");
+  const parsed = parseModelsDocument(filePath, fs.readFileSync(filePath));
+  assert.equal(Object.hasOwn(parsed.providers, "__proto__"), true);
+  assert.equal(parsed.providers["__proto__"]!.baseUrl, "http://escaped");
+}));

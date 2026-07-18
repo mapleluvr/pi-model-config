@@ -182,7 +182,10 @@ test("successful model edit removes an invalid legacy extraPayload instead of pe
       },
     });
 
-    await runModelConfigCommand(modelEditScript("old"));
+    const script = modelEditScript("old");
+    // Explicit discard confirmation for malformed native legacy rows.
+    script.confirms.push(true);
+    await runModelConfigCommand(script);
 
     const saved = readModelsConfig().providers.local!.models![0]!;
     assert.equal(Object.hasOwn(saved, "extraPayload"), false);
@@ -210,7 +213,7 @@ test("successful model copy removes legacy extraPayload and copies the private p
     await runModelConfigCommand({
       selects: ["管理 Providers", "编辑 [local]", "管理 Models", "复制", "返回主菜单", "退出"],
       editors: [],
-      confirms: [],
+      confirms: [true],
       customs: ["model:0", "__pi_model_config_action:back"],
     });
 

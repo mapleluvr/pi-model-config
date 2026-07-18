@@ -2,7 +2,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { parse, type ParseError } from "jsonc-parser";
+import { parseTree, type Node, type ParseError } from "jsonc-parser";
 import { atomicReplace, readArtifact } from "./atomic-file.ts";
 import { assertValidModelsCandidate } from "./config-validation.ts";
 import { deleteOwnKey, getOwnValue, hasOwnKey, setOwnValue } from "./own-keys.ts";
@@ -23,44 +23,58 @@ export function getModelsPath(agentDir = process.env.PI_CODING_AGENT_DIR || path
   return path.join(agentDir, "models.json");
 }
 
-/** jsonc-parser treats `__proto__` keys as prototype assignment; shield then restore as own keys. */
-const PROTO_KEY_SENTINEL = "__mc_own_proto__";
-
-function shieldProtoKeys(document: string): string {
-  return document.replace(/"__proto__"(\s*:)/g, `"${PROTO_KEY_SENTINEL}"$1`);
-}
-
-function restoreOwnKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((entry) => restoreOwnKeys(entry));
-  if (!value || typeof value !== "object") return value;
-  const source = value as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-  for (const key of Object.keys(source)) {
-    const restoredKey = key === PROTO_KEY_SENTINEL ? "__proto__" : key;
-    setOwnValue(out, restoredKey, restoreOwnKeys(source[key]) as never);
+/**
+ * Structural JSONC materialization: build values from the parse tree with own-key-safe
+ * property insertion. Never uses parse()/getNodeValue() assignment (which collapses `__proto__`).
+ */
+function materializeJsoncNode(node: Node): unknown {
+  switch (node.type) {
+    case "null":
+      return null;
+    case "boolean":
+    case "number":
+    case "string":
+      return node.value;
+    case "array": {
+      const items: unknown[] = [];
+      for (const child of node.children ?? []) items.push(materializeJsoncNode(child));
+      return items;
+    }
+    case "object": {
+      const out: Record<string, unknown> = {};
+      for (const prop of node.children ?? []) {
+        if (prop.type !== "property" || !prop.children || prop.children.length < 2) continue;
+        const keyNode = prop.children[0]!;
+        const valueNode = prop.children[1]!;
+        if (keyNode.type !== "string" || typeof keyNode.value !== "string") continue;
+        setOwnValue(out, keyNode.value, materializeJsoncNode(valueNode));
+      }
+      return out;
+    }
+    default:
+      return undefined;
   }
-  return out;
 }
 
 export function parseModelsDocument(filePath: string, raw: string | Uint8Array): ModelsConfig {
   const document = Buffer.from(raw).toString("utf8");
   const errors: ParseError[] = [];
-  const parsed = parse(shieldProtoKeys(document), errors, { allowTrailingComma: true, disallowComments: false });
+  const tree = parseTree(document, errors, { allowTrailingComma: true, disallowComments: false });
   if (errors.length > 0) {
     throw new ModelsConfigError(filePath, errors.map((error) => `offset ${error.offset}: ${error.error}`).join("; "));
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+  if (!tree || tree.type !== "object") {
     throw new ModelsConfigError(filePath, "root must be a JSON object");
   }
-  const root = restoreOwnKeys(parsed) as Record<string, unknown>;
+  const root = materializeJsoncNode(tree) as Record<string, unknown>;
   if (root.providers !== undefined && (!root.providers || typeof root.providers !== "object" || Array.isArray(root.providers))) {
     throw new ModelsConfigError(filePath, "providers must be a JSON object when present");
   }
-  const providers = (root.providers as Record<string, ProviderConfig> | undefined) ?? {};
-  // Ensure providers map is an own-key bag even when empty.
+  const providersSource = (root.providers as Record<string, ProviderConfig> | undefined) ?? {};
   const ownProviders: Record<string, ProviderConfig> = {};
-  for (const key of Object.keys(providers)) {
-    setOwnValue(ownProviders, key, providers[key]!);
+  for (const key of Object.keys(providersSource)) {
+    if (!hasOwnKey(providersSource, key)) continue;
+    setOwnValue(ownProviders, key, providersSource[key]!);
   }
   const config = { ...root, providers: ownProviders } as ModelsConfig;
   try {

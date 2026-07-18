@@ -758,8 +758,9 @@ test("action layer faults at journal/native/payload/journal-removal keep exact b
     const resolvedTwo = resolveRequestPayload("local", "two", { agentDir });
     const beforeOnly = resolvedOne?.phase === "before" && resolvedTwo === undefined;
     const afterOnly = resolvedTwo?.phase === "before" && resolvedOne === undefined;
-    assert.equal(beforeOnly || afterOnly, true, `boundary ${failAt} mixed views: one=${JSON.stringify(resolvedOne)} two=${JSON.stringify(resolvedTwo)}`);
-    assert.equal(Boolean(beforeOnly && afterOnly), false);
+    // Never serialize private resolved payloads into assertion messages.
+    assert.equal(beforeOnly || afterOnly, true, `boundary ${failAt} mixed before/after resolution`);
+    assert.equal(Boolean(beforeOnly && afterOnly), false, `boundary ${failAt} dual views`);
   }
 }));
 
@@ -1008,14 +1009,25 @@ test("replace-target clears absent source payload; reuse preserves absolute targ
   assert.equal(lookupModelPayload(readPayload(agentDir), "local", "fresh"), undefined);
 }));
 
-test("bound previews expire by TTL, prune by capacity, and discardIdentityPreview drops secrets", async () => withAgentDir(async (agentDir) => {
+test("bound previews expire by scheduled TTL without later API call", async () => withAgentDir(async (agentDir) => {
   seedBasic(agentDir);
   let clock = 1_000_000;
+  type Queued = { at: number; fn: () => void };
+  const queue: Queued[] = [];
   const actions = new ModelConfigActions({
     agentDir,
     now: () => clock,
     previewTtlMs: 100,
     maxPreviews: 2,
+    schedule: (fn, delayMs) => {
+      const entry = { at: clock + delayMs, fn };
+      queue.push(entry);
+      return { id: entry };
+    },
+    cancel: (handle) => {
+      const idx = queue.findIndex((entry) => entry === handle.id);
+      if (idx >= 0) queue.splice(idx, 1);
+    },
   });
 
   const p1 = await actions.previewModelIdentityAction({
@@ -1037,8 +1049,17 @@ test("bound previews expire by TTL, prune by capacity, and discardIdentityPrevie
   if (p3.type !== "preview") return;
   assert.ok(actions.boundPreviewCount() <= 2);
 
-  // Oldest may be pruned by capacity; expire remaining.
+  // Fire scheduled expiry callbacks without further action-layer API calls.
   clock += 200;
+  while (queue.length > 0) {
+    const due = queue.filter((entry) => entry.at <= clock);
+    if (due.length === 0) break;
+    for (const entry of due) {
+      const idx = queue.indexOf(entry);
+      if (idx >= 0) queue.splice(idx, 1);
+      entry.fn();
+    }
+  }
   assert.equal(actions.boundPreviewCount(), 0);
   const expired = await actions.commitModelIdentityAction(p3.token);
   assert.equal(expired.type, "stale-target");
@@ -1055,7 +1076,7 @@ test("bound previews expire by TTL, prune by capacity, and discardIdentityPrevie
   assert.equal(discarded.type, "stale-target");
   assertDiagnosticSecretFree(discarded);
 
-  // Terminal commit consumes token (cannot reuse after success).
+  // Terminal commit consumes token even when coordinator throws.
   writeNative(agentDir, {
     providers: {
       local: {
@@ -1066,17 +1087,45 @@ test("bound previews expire by TTL, prune by capacity, and discardIdentityPrevie
     },
   });
   writePayload(agentDir, emptyPayloadDocument());
-  const p5 = await actions.previewModelIdentityAction({
+  const throwing = new ModelConfigActions({
+    agentDir,
+    now: () => clock,
+    previewTtlMs: 10_000,
+    schedule: (fn, delayMs) => {
+      const entry = { at: clock + delayMs, fn };
+      queue.push(entry);
+      return { id: entry };
+    },
+    cancel: (handle) => {
+      const idx = queue.findIndex((entry) => entry === handle.id);
+      if (idx >= 0) queue.splice(idx, 1);
+    },
+    commitMutation: async () => {
+      throw new Error("injected commit throw");
+    },
+  });
+  const p5 = await throwing.previewModelIdentityAction({
     kind: "rename", providerId: "local", modelId: "one", targetModelId: "two",
   });
   assert.equal(p5.type, "preview");
   if (p5.type !== "preview") return;
-  assert.equal((await actions.commitModelIdentityAction(p5.token)).type, "success");
-  assert.equal((await actions.commitModelIdentityAction(p5.token)).type, "stale-target");
+  assert.equal(throwing.boundPreviewCount(), 1);
+  await assert.rejects(() => throwing.commitModelIdentityAction(p5.token));
+  assert.equal(throwing.boundPreviewCount(), 0);
+  assert.equal((await throwing.commitModelIdentityAction(p5.token)).type, "stale-target");
+
+  // Successful commit also consumes.
+  const p6 = await actions.previewModelIdentityAction({
+    kind: "rename", providerId: "local", modelId: "one", targetModelId: "two",
+  });
+  assert.equal(p6.type, "preview");
+  if (p6.type !== "preview") return;
+  assert.equal((await actions.commitModelIdentityAction(p6.token)).type, "success");
+  assert.equal((await actions.commitModelIdentityAction(p6.token)).type, "stale-target");
   assert.equal(actions.boundPreviewCount(), 0);
 }));
 
-test("malformed legacy extraPayload rows fail with zero-write validation", async () => withAgentDir(async (agentDir, actions) => {
+test("malformed legacy rows never vanish without explicit discard resolution", async () => withAgentDir(async (agentDir, actions) => {
   writeNative(agentDir, {
     providers: {
       local: {
@@ -1086,40 +1135,73 @@ test("malformed legacy extraPayload rows fail with zero-write validation", async
       },
     },
   });
-  writePayload(agentDir, emptyPayloadDocument());
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "old", { private: true }));
   const beforeNative = fs.readFileSync(getModelsPath(agentDir));
   const beforePayload = fs.readFileSync(getPayloadConfigPath(agentDir));
-  const preview = await actions.previewModelIdentityAction({
+
+  // Private present still rejects without discard.
+  const rename = await actions.previewModelIdentityAction({
     kind: "rename",
     providerId: "local",
     modelId: "old",
     targetModelId: "new",
   });
-  assert.equal(preview.type, "validation-error");
-  assertDiagnosticSecretFree(preview);
+  assert.equal(rename.type, "validation-error");
+  assertDiagnosticSecretFree(rename);
   assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(beforeNative), true);
   assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(beforePayload), true);
   assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), true);
 
+  const patch = await actions.patchModel("local", "old", { name: "x" }, {
+    fieldBaselines: { name: undefined },
+    payload: { private: true },
+  });
+  assert.equal(patch.type, "validation-error");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), true);
+
+  // Explicit discard on preview/commit succeeds and strips.
+  const discardPreview = await actions.previewModelIdentityAction({
+    kind: "rename",
+    providerId: "local",
+    modelId: "old",
+    targetModelId: "new",
+    legacyDiscardResolution: "discard-malformed-legacy",
+  });
+  assert.equal(discardPreview.type, "preview");
+  if (discardPreview.type !== "preview") return;
+  assert.equal((await actions.commitModelIdentityAction(discardPreview.token)).type, "success");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), false);
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "new"), { private: true });
+
+  // Provider rename without discard preserves malformed bytes.
   writeNative(agentDir, {
     providers: {
-      local: {
+      source: {
         baseUrl: "http://localhost",
         api: "openai-completions",
-        models: [model("old", {
-          extraPayload: [{ key: "x", type: "json", value: "{bad" }],
-        })],
+        models: [model("m", { extraPayload: [{ key: "x", type: "json", value: "{bad" }] })],
       },
     },
   });
-  const badJson = await actions.previewModelIdentityAction({
+  writePayload(agentDir, emptyPayloadDocument());
+  const providerBlocked = await actions.previewProviderIdentityAction({
     kind: "copy",
-    providerId: "local",
-    modelId: "old",
-    targetModelId: "copy",
+    providerId: "source",
+    targetProviderId: "dest",
   });
-  assert.equal(badJson.type, "validation-error");
-  assertDiagnosticSecretFree(badJson);
+  assert.equal(providerBlocked.type, "validation-error");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.source!.models![0]!, "extraPayload"), true);
+
+  const providerOk = await actions.previewProviderIdentityAction({
+    kind: "copy",
+    providerId: "source",
+    targetProviderId: "dest",
+    legacyDiscardResolution: "discard-malformed-legacy",
+  });
+  assert.equal(providerOk.type, "preview");
+  if (providerOk.type !== "preview") return;
+  assert.equal((await actions.commitProviderIdentityAction(providerOk.token)).type, "success");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.dest!.models![0]!, "extraPayload"), false);
 }));
 
 function setOwnLegacy(payload: ReturnType<typeof emptyPayloadDocument>, key: string, value: Record<string, unknown>): void {
@@ -1130,3 +1212,115 @@ function setOwnLegacy(payload: ReturnType<typeof emptyPayloadDocument>, key: str
     configurable: true,
   });
 }
+
+test("createProvider and createModel migrate valid legacy rows with collision resolution", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, { providers: {} });
+  writePayload(agentDir, emptyPayloadDocument());
+
+  // No collision: migrate valid legacy.
+  const created = await actions.createProvider("p", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m1", { extraPayload: legacyRows({ temp: { type: "string", value: "hot" } }) })],
+  });
+  assert.equal(created.type, "success");
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "p", "m1"), { temp: "hot" });
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.p!.models![0]!, "extraPayload"), false);
+
+  // Collision + reuse: preserve target, strip native.
+  writeNative(agentDir, { providers: {} });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "p", "m1", { keep: true }));
+  const reused = await actions.createProvider("p", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m1", { extraPayload: legacyRows({ temp: { type: "string", value: "hot" } }) })],
+  }, { payloadCollisionResolution: "reuse-target" });
+  assert.equal(reused.type, "success");
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "p", "m1"), { keep: true });
+
+  // Collision + replace: write legacy.
+  writeNative(agentDir, { providers: {} });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "p", "m1", { keep: true }));
+  const replaced = await actions.createProvider("p", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m1", { extraPayload: legacyRows({ temp: { type: "string", value: "hot" } }) })],
+  }, { payloadCollisionResolution: "replace-target" });
+  assert.equal(replaced.type, "success");
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "p", "m1"), { temp: "hot" });
+
+  // createModel replace with valid legacy overwrites target.
+  writeNative(agentDir, {
+    providers: {
+      local: { baseUrl: "http://localhost", api: "openai-completions", models: [] },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "n", { keep: true }));
+  const modelCreated = await actions.createModel(
+    "local",
+    model("n", { extraPayload: legacyRows({ a: { type: "bool", value: "true" } }) }),
+    { payloadCollisionResolution: "replace-target" },
+  );
+  assert.equal(modelCreated.type, "success");
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "n"), { a: true });
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), false);
+
+  // Malformed create without discard is zero-write.
+  writeNative(agentDir, { providers: {} });
+  const before = fs.readFileSync(getModelsPath(agentDir));
+  const blocked = await actions.createProvider("bad", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m", { extraPayload: { not: "rows" } })],
+  });
+  assert.equal(blocked.type, "validation-error");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(before), true);
+}));
+
+test("legacy key provider/ enumerates as empty model id and participates in identity ops", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      source: { baseUrl: "http://localhost", api: "openai-completions", models: [model("n")] },
+    },
+  });
+  const payload = emptyPayloadDocument();
+  setOwnLegacy(payload, "source/", { empty: true });
+  setOwnLegacy(payload, "source/a/b", { inert: true });
+  writePayload(agentDir, payload);
+
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "source", ""), { empty: true });
+
+  const preview = await actions.previewProviderIdentityAction({
+    kind: "rename",
+    providerId: "source",
+    targetProviderId: "dest",
+  });
+  assert.equal(preview.type, "preview");
+  if (preview.type !== "preview") return;
+  assert.deepEqual(preview.affectedIdentities, [
+    ["source", ""],
+    ["source", "n"],
+    ["dest", ""],
+    ["dest", "n"],
+  ]);
+  assert.equal((await actions.commitProviderIdentityAction(preview.token)).type, "success");
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "dest", ""), { empty: true });
+  assert.equal(lookupModelPayload(readPayload(agentDir), "source", ""), undefined);
+  assert.equal(Object.hasOwn(readPayload(agentDir).extraPayloads, "source/a/b"), true);
+
+  // Delete discloses and removes empty-id identity.
+  writeNative(agentDir, {
+    providers: {
+      p: { baseUrl: "http://localhost", api: "openai-completions", models: [] },
+    },
+  });
+  const delPayload = emptyPayloadDocument();
+  setOwnLegacy(delPayload, "p/", { gone: true });
+  writePayload(agentDir, delPayload);
+  const delPreview = await actions.previewProviderIdentityAction({ kind: "delete", providerId: "p" });
+  assert.equal(delPreview.type, "preview");
+  if (delPreview.type !== "preview") return;
+  assert.deepEqual(delPreview.affectedIdentities, [["p", ""]]);
+  assert.equal((await actions.commitProviderIdentityAction(delPreview.token)).type, "success");
+  assert.equal(Object.keys(readPayload(agentDir).extraPayloads).length, 0);
+}));

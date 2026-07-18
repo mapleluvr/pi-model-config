@@ -104,6 +104,9 @@ export interface EditorSnapshot {
 
 export type PayloadCollisionResolution = "replace-target" | "reuse-target";
 
+/** Explicit resolution required before any write may strip malformed native legacy rows. */
+export type LegacyDiscardResolution = "discard-malformed-legacy";
+
 export type ProviderIdentityRequest =
   | {
     kind: "rename";
@@ -113,12 +116,14 @@ export type ProviderIdentityRequest =
     providerPatch?: ConfigPatch<ProviderConfig>;
     fieldBaselines?: Readonly<Record<string, unknown>>;
     payloadCollisionResolution?: PayloadCollisionResolution;
+    legacyDiscardResolution?: LegacyDiscardResolution;
   }
   | {
     kind: "copy";
     providerId: string;
     targetProviderId: string;
     payloadCollisionResolution?: PayloadCollisionResolution;
+    legacyDiscardResolution?: LegacyDiscardResolution;
   }
   | { kind: "delete"; providerId: string };
 
@@ -134,6 +139,7 @@ export type ModelIdentityRequest =
     payload?: Record<string, unknown> | null;
     migrateLegacyExtraPayload?: Record<string, unknown>;
     payloadCollisionResolution?: PayloadCollisionResolution;
+    legacyDiscardResolution?: LegacyDiscardResolution;
   }
   | {
     kind: "copy";
@@ -142,12 +148,19 @@ export type ModelIdentityRequest =
     targetModelId: string;
     modelPatch?: ConfigPatch<ModelConfig>;
     payloadCollisionResolution?: PayloadCollisionResolution;
+    legacyDiscardResolution?: LegacyDiscardResolution;
   }
   | { kind: "delete"; providerId: string; modelId: string };
 
 export interface FieldPatchOptions {
   /** Exact per-field baselines captured when the editor opened. Drift on an edited field conflicts. */
   fieldBaselines?: Readonly<Record<string, unknown>>;
+  /** Required to strip malformed native legacy rows during a field save. */
+  legacyDiscardResolution?: LegacyDiscardResolution;
+}
+
+export interface PreviewSchedulerHandle {
+  id: unknown;
 }
 
 export interface ModelConfigActionsOptions extends PayloadCoordinatorOptions {
@@ -159,6 +172,10 @@ export interface ModelConfigActionsOptions extends PayloadCoordinatorOptions {
   previewTtlMs?: number;
   /** Max retained bound previews. Default 32. */
   maxPreviews?: number;
+  /** Injectable timer schedule (default setTimeout). */
+  schedule?: (fn: () => void, delayMs: number) => PreviewSchedulerHandle;
+  /** Injectable timer cancel (default clearTimeout). */
+  cancel?: (handle: PreviewSchedulerHandle) => void;
 }
 
 interface BoundIdentityPreview {
@@ -462,16 +479,35 @@ function stripExtraPayloadFromProviderModels(provider: ProviderConfig): Provider
   return next;
 }
 
-function validateProviderLegacyPayloads(provider: ProviderConfig): ValidationIssue[] {
+function malformedLegacyIssue(path: string, reason: string): ValidationIssue {
+  return { path, message: reason };
+}
+
+function rejectMalformedLegacyUnlessDiscarded(
+  model: ModelConfig,
+  path: string,
+  discard?: LegacyDiscardResolution,
+): ValidationIssue | undefined {
+  const legacy = readLegacyExtraPayload(model);
+  if (legacy.kind === "invalid" && discard !== "discard-malformed-legacy") {
+    return malformedLegacyIssue(path, legacy.reason);
+  }
+  return undefined;
+}
+
+function collectProviderMalformedLegacyIssues(
+  provider: ProviderConfig,
+  pathPrefix: string,
+  discard?: LegacyDiscardResolution,
+): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   for (const model of provider.models ?? []) {
-    const legacy = readLegacyExtraPayload(model);
-    if (legacy.kind === "invalid") {
-      issues.push({
-        path: `$.models[id=${model.id}].legacy`,
-        message: legacy.reason,
-      });
-    }
+    const issue = rejectMalformedLegacyUnlessDiscarded(
+      model,
+      `${pathPrefix}.models[id=${model.id}].legacy`,
+      discard,
+    );
+    if (issue) issues.push(issue);
   }
   return issues;
 }
@@ -545,6 +581,9 @@ export class ModelConfigActions {
   private readonly now: () => number;
   private readonly previewTtlMs: number;
   private readonly maxPreviews: number;
+  private readonly schedule: (fn: () => void, delayMs: number) => PreviewSchedulerHandle;
+  private readonly cancelTimer: (handle: PreviewSchedulerHandle) => void;
+  private expiryTimer: PreviewSchedulerHandle | undefined;
 
   constructor(options: ModelConfigActionsOptions = {}) {
     this.options = options;
@@ -552,17 +591,30 @@ export class ModelConfigActions {
     this.now = options.now ?? (() => Date.now());
     this.previewTtlMs = options.previewTtlMs ?? DEFAULT_PREVIEW_TTL_MS;
     this.maxPreviews = options.maxPreviews ?? DEFAULT_MAX_PREVIEWS;
+    this.schedule = options.schedule ?? ((fn, delayMs) => {
+      const id = setTimeout(fn, delayMs);
+      if (typeof (id as NodeJS.Timeout).unref === "function") (id as NodeJS.Timeout).unref();
+      return { id };
+    });
+    this.cancelTimer = options.cancel ?? ((handle) => {
+      clearTimeout(handle.id as NodeJS.Timeout);
+    });
   }
 
   /** Explicitly discard a bound identity preview (cancel / final completion). */
   discardIdentityPreview(token: IdentityPreviewToken): void {
     this.previews.delete(token);
+    this.rescheduleExpiry();
   }
 
-  /** Test/introspection: number of currently retained bound previews. */
+  /** Test/introspection: number of currently retained bound previews (does not force prune). */
   boundPreviewCount(): number {
-    this.prunePreviews();
     return this.previews.size;
+  }
+
+  /** Test helper: force prune using current clock (does not fire scheduled callbacks). */
+  forcePruneExpiredPreviews(): void {
+    this.prunePreviews();
   }
 
   readEditorSnapshot(): EditorSnapshot | { type: "recovery-required" } {
@@ -632,7 +684,12 @@ export class ModelConfigActions {
         `providers.${providerId}.models.${modelId}`,
       );
       if (baselineConflict) return baselineConflict;
-      // Field save may strip invalid legacy rows (UI already warned); never migrate invalid rows.
+      const malformed = rejectMalformedLegacyUnlessDiscarded(
+        existing,
+        `$.providers.${providerId}.models[id=${modelId}].legacy`,
+        options?.legacyDiscardResolution,
+      );
+      if (malformed) return { type: "validation-error", issues: [malformed] };
       const next = cloneModels(snapshot.native.document!);
       const nextProvider = getProvider(next, providerId)!;
       const merged = mergeModelConfig(existing, patch);
@@ -657,16 +714,24 @@ export class ModelConfigActions {
   async createProvider(
     providerId: string,
     config: ProviderConfig,
-    options?: { payloadCollisionResolution?: PayloadCollisionResolution },
+    options?: {
+      payloadCollisionResolution?: PayloadCollisionResolution;
+      legacyDiscardResolution?: LegacyDiscardResolution;
+    },
   ): Promise<ActionResult> {
     return this.run((snapshot) => {
       if (hasProvider(snapshot.native.document!, providerId)) {
         return { type: "native-collision", target: providerId };
       }
-      const legacyIssues = validateProviderLegacyPayloads(config);
+      const legacyIssues = collectProviderMalformedLegacyIssues(
+        config,
+        `$.providers.${providerId}`,
+        options?.legacyDiscardResolution,
+      );
       if (legacyIssues.length > 0) return { type: "validation-error", issues: legacyIssues };
       const introduced = (config.models ?? []).map((entry) => [providerId, entry.id] as ModelIdentity);
       const collisions = targetPayloadCollisions(snapshot.payload.document!, introduced, new Set());
+      const collisionKeys = new Set(collisions.map(([p, m]) => identityKey(p, m)));
       if (
         collisions.length > 0
         && options?.payloadCollisionResolution !== "replace-target"
@@ -686,15 +751,29 @@ export class ModelConfigActions {
       if (issues.length > 0) return { type: "validation-error", issues };
       let payload = clonePayloadDocument(snapshot.payload.document!);
       const affected: ModelIdentity[] = [];
-      if (options?.payloadCollisionResolution === "replace-target") {
-        for (const [, modelId] of collisions) {
-          payload = removePayloadDocumentValue(payload, providerId, modelId);
-          affected.push([providerId, modelId]);
+      for (const model of config.models ?? []) {
+        const key = identityKey(providerId, model.id);
+        const targetExists = collisionKeys.has(key);
+        const legacyRead = readLegacyExtraPayload(model);
+        const legacy = legacyRead.kind === "valid" ? legacyRead.payload : undefined;
+        if (options?.payloadCollisionResolution === "reuse-target" && targetExists) {
+          affected.push([providerId, model.id]);
+          continue;
         }
-      } else if (options?.payloadCollisionResolution === "reuse-target") {
-        for (const identity of collisions) affected.push(identity);
+        if (options?.payloadCollisionResolution === "replace-target" && targetExists) {
+          if (legacy) {
+            payload = setPayloadDocumentValue(payload, providerId, model.id, legacy);
+          } else {
+            payload = removePayloadDocumentValue(payload, providerId, model.id);
+          }
+          affected.push([providerId, model.id]);
+          continue;
+        }
+        if (!targetExists && legacy) {
+          payload = setPayloadDocumentValue(payload, providerId, model.id, legacy);
+          affected.push([providerId, model.id]);
+        }
       }
-      // Never implicitly attach private payloads for createProvider.
       return {
         type: "mutation",
         native: next,
@@ -707,19 +786,23 @@ export class ModelConfigActions {
   async createModel(
     providerId: string,
     model: ModelConfig,
-    options?: { payload?: Record<string, unknown>; payloadCollisionResolution?: PayloadCollisionResolution },
+    options?: {
+      payload?: Record<string, unknown>;
+      payloadCollisionResolution?: PayloadCollisionResolution;
+      legacyDiscardResolution?: LegacyDiscardResolution;
+    },
   ): Promise<ActionResult> {
     return this.run((snapshot) => {
       const provider = getProvider(snapshot.native.document!, providerId);
       if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
       if (findModelIndex(provider, model.id) >= 0) return { type: "native-collision", target: model.id };
+      const malformed = rejectMalformedLegacyUnlessDiscarded(
+        model,
+        `$.providers.${providerId}.models[id=${model.id}].legacy`,
+        options?.legacyDiscardResolution,
+      );
+      if (malformed) return { type: "validation-error", issues: [malformed] };
       const legacyRead = readLegacyExtraPayload(model);
-      if (legacyRead.kind === "invalid") {
-        return {
-          type: "validation-error",
-          issues: [{ path: `$.providers.${providerId}.models[id=${model.id}].legacy`, message: legacyRead.reason }],
-        };
-      }
       const collisions = targetPayloadCollisions(
         snapshot.payload.document!,
         [[providerId, model.id]],
@@ -752,8 +835,11 @@ export class ModelConfigActions {
         payload = setPayloadDocumentValue(payload, providerId, model.id, options.payload);
         affected.push([providerId, model.id]);
       } else if (options?.payloadCollisionResolution === "replace-target" && targetExists) {
-        // Absent replacement clears collided private payload.
-        payload = removePayloadDocumentValue(payload, providerId, model.id);
+        if (legacyRead.kind === "valid") {
+          payload = setPayloadDocumentValue(payload, providerId, model.id, legacyRead.payload);
+        } else {
+          payload = removePayloadDocumentValue(payload, providerId, model.id);
+        }
         affected.push([providerId, model.id]);
       } else if (legacyRead.kind === "valid" && !targetExists) {
         payload = setPayloadDocumentValue(payload, providerId, model.id, legacyRead.payload);
@@ -878,10 +964,34 @@ export class ModelConfigActions {
     return this.commitIdentity(token);
   }
 
+  private clearExpiryTimer(): void {
+    if (this.expiryTimer === undefined) return;
+    this.cancelTimer(this.expiryTimer);
+    this.expiryTimer = undefined;
+  }
+
+  private rescheduleExpiry(): void {
+    this.clearExpiryTimer();
+    if (this.previews.size === 0) return;
+    const now = this.now();
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const bound of this.previews.values()) {
+      const expiresAt = bound.createdAt + this.previewTtlMs;
+      if (expiresAt < nearest) nearest = expiresAt;
+    }
+    if (!Number.isFinite(nearest)) return;
+    const delayMs = Math.max(0, nearest - now);
+    this.expiryTimer = this.schedule(() => {
+      this.expiryTimer = undefined;
+      this.prunePreviews();
+      this.rescheduleExpiry();
+    }, delayMs);
+  }
+
   private prunePreviews(): void {
     const now = this.now();
     for (const [token, bound] of this.previews) {
-      if (now - bound.createdAt > this.previewTtlMs) this.previews.delete(token);
+      if (now - bound.createdAt >= this.previewTtlMs) this.previews.delete(token);
     }
     while (this.previews.size > this.maxPreviews) {
       let oldestToken: string | undefined;
@@ -910,15 +1020,18 @@ export class ModelConfigActions {
       createdAt: this.now(),
     });
     this.prunePreviews();
+    this.rescheduleExpiry();
     return token;
   }
 
   private takeBound(token: IdentityPreviewToken): BoundIdentityPreview | undefined {
     this.prunePreviews();
+    this.rescheduleExpiry();
     const bound = this.previews.get(token);
     if (!bound) return undefined;
-    if (this.now() - bound.createdAt > this.previewTtlMs) {
+    if (this.now() - bound.createdAt >= this.previewTtlMs) {
       this.previews.delete(token);
+      this.rescheduleExpiry();
       return undefined;
     }
     return {
@@ -933,6 +1046,7 @@ export class ModelConfigActions {
 
   private forgetPreview(token: IdentityPreviewToken): void {
     this.previews.delete(token);
+    this.rescheduleExpiry();
   }
 
   private async previewIdentity(
@@ -1080,6 +1194,7 @@ export class ModelConfigActions {
 
     let refreshedOnDrift: ActionResult | undefined;
 
+    try {
     const result = await this.run((snapshot) => {
       const identitySet = bound.scope === "provider"
         ? providerIdentitySet(snapshot.native.document!)
@@ -1149,10 +1264,13 @@ export class ModelConfigActions {
         : this.buildModelIdentity(snapshot, bound.request as ModelIdentityRequest);
     });
 
-    // Consume token on every terminal commit attempt (success, lock, validation, stale, etc.).
-    this.forgetPreview(token);
-    if (refreshedOnDrift) return refreshedOnDrift;
-    return result;
+    // Consume the committed token even when coordinator/fault exceptions escape run().
+    // Refreshed drift tokens are newly bound and must survive.
+      if (refreshedOnDrift) return refreshedOnDrift;
+      return result;
+    } finally {
+      this.forgetPreview(token);
+    }
   }
 
   private buildProviderIdentity(snapshot: CoordinatedSnapshot, request: ProviderIdentityRequest): BuildOutcome {
@@ -1169,15 +1287,13 @@ export class ModelConfigActions {
       if (conflict) return conflict;
     }
 
-    // Provider identity: reject only when a model has invalid legacy AND no private payload to move/copy.
+    // Provider rename/copy: malformed legacy never vanishes without explicit discard (even with private present).
     if (request.kind !== "delete") {
-      const issues: ValidationIssue[] = [];
-      for (const model of source.models ?? []) {
-        const legacy = readLegacyExtraPayload(model);
-        if (legacy.kind !== "invalid") continue;
-        if (lookupModelPayload(snapshot.payload.document!, request.providerId, model.id) !== undefined) continue;
-        issues.push({ path: `$.models[id=${model.id}].legacy`, message: legacy.reason });
-      }
+      const issues = collectProviderMalformedLegacyIssues(
+        source,
+        `$.providers.${request.providerId}`,
+        request.legacyDiscardResolution,
+      );
       if (issues.length > 0) return { type: "validation-error", issues };
     }
 
@@ -1308,16 +1424,14 @@ export class ModelConfigActions {
 
     const sourcePrivate = lookupModelPayload(snapshot.payload.document!, request.providerId, request.modelId);
     const legacyRead = readLegacyExtraPayload(existing);
-    const hasExplicitPayload = request.kind === "rename" && hasOwnKey(request, "payload");
-    if (legacyRead.kind === "invalid" && sourcePrivate === undefined && !hasExplicitPayload) {
-      // Malformed legacy is the only migration source: refuse silent data loss / fake migration.
-      return {
-        type: "validation-error",
-        issues: [{
-          path: `$.providers.${request.providerId}.models[id=${request.modelId}].legacy`,
-          message: legacyRead.reason,
-        }],
-      };
+    const discard = request.kind === "delete" ? undefined : request.legacyDiscardResolution;
+    if (request.kind !== "delete") {
+      const malformed = rejectMalformedLegacyUnlessDiscarded(
+        existing,
+        `$.providers.${request.providerId}.models[id=${request.modelId}].legacy`,
+        discard,
+      );
+      if (malformed) return { type: "validation-error", issues: [malformed] };
     }
     const migrateLegacy = request.kind === "rename" && request.migrateLegacyExtraPayload !== undefined
       ? request.migrateLegacyExtraPayload

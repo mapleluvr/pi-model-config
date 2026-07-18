@@ -7,7 +7,12 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { ModelConfigActions, parseLegacyExtraPayload, type ActionResult } from "./config-actions.ts";
+import {
+  ModelConfigActions,
+  parseLegacyExtraPayload,
+  type ActionResult,
+  type LegacyDiscardResolution,
+} from "./config-actions.ts";
 import { getModelsPath, readModelsConfig } from "./config.ts";
 import { lookupModelPayload, mergePayloadIntoRequest } from "./payload-config.ts";
 import { resolveRequestPayload } from "./payload-coordinator.ts";
@@ -461,6 +466,8 @@ interface ModelEditResult {
   payload?: Record<string, unknown>;
   /** Present only when payload was loaded from native legacy extraPayload and should migrate on successful save. */
   migrateLegacy?: Record<string, unknown>;
+  /** True when native model carries malformed legacy rows that require explicit discard before save. */
+  hasMalformedLegacy?: boolean;
 }
 
 function parseLegacyPayload(value: unknown): Record<string, unknown> | undefined {
@@ -472,21 +479,43 @@ function loadModelPayload(
   ctx: ExtensionCommandContext,
   providerId: string,
   existing?: ModelConfig,
-): { payload?: Record<string, unknown>; migrateLegacy?: Record<string, unknown> } {
+): {
+  payload?: Record<string, unknown>;
+  migrateLegacy?: Record<string, unknown>;
+  hasMalformedLegacy?: boolean;
+} {
   if (!existing) return {};
   const snapshot = modelConfigActions().readEditorSnapshot();
   const privatePayload = snapshot.type === "snapshot"
     ? lookupModelPayload(snapshot.payload, providerId, existing.id)
     : undefined;
+  if (!Object.hasOwn(existing, "extraPayload")) {
+    return privatePayload ? { payload: privatePayload } : {};
+  }
   const legacy = (existing as Record<string, unknown>)["extraPayload"];
-  if (privatePayload) return { payload: privatePayload };
-  if (!Object.hasOwn(existing, "extraPayload")) return {};
   const migrated = parseLegacyPayload(legacy);
   if (!migrated) {
-    ctx.ui.notify("Legacy extraPayload could not be migrated; it will be removed after a successful save", "error");
-    return {};
+    // Malformed rows are preserved until the user explicitly confirms discard at save time.
+    ctx.ui.notify("Legacy extraPayload is malformed and will be kept until you confirm discard on save", "error");
+    return privatePayload
+      ? { payload: privatePayload, hasMalformedLegacy: true }
+      : { hasMalformedLegacy: true };
   }
+  if (privatePayload) return { payload: privatePayload };
   return { payload: migrated, migrateLegacy: migrated };
+}
+
+async function confirmLegacyDiscard(
+  ctx: ExtensionCommandContext,
+  hasMalformedLegacy: boolean | undefined,
+): Promise<LegacyDiscardResolution | undefined | "cancel"> {
+  if (!hasMalformedLegacy) return undefined;
+  const ok = await ctx.ui.confirm(
+    "Malformed legacy extraPayload",
+    "This model has malformed native legacy rows. Discard them on save? Cancel keeps the field unchanged.",
+  );
+  if (!ok) return "cancel";
+  return "discard-malformed-legacy";
 }
 
 function finiteNumberOr(value: string, fallback: number): number {
@@ -658,7 +687,12 @@ async function editModel(
     if (editedPayload !== undefined) payload = editedPayload;
   }
 
-  return { model, payload, migrateLegacy };
+  return {
+    model,
+    payload,
+    migrateLegacy,
+    hasMalformedLegacy: payloadState.hasMalformedLegacy,
+  };
 }
 
 // ═══════════════════════════════════════════════════════
@@ -999,6 +1033,11 @@ async function manageModels(
     }
     if (action.startsWith("复制")) {
       const targetModelId = `${existing.id}-copy`;
+      const discard = await confirmLegacyDiscard(
+        ctx,
+        Object.hasOwn(existing, "extraPayload") && !parseLegacyPayload((existing as Record<string, unknown>)["extraPayload"]),
+      );
+      if (discard === "cancel") continue;
       const saved = await commitModelIdentity(ctx, {
         kind: "copy",
         providerId,
@@ -1007,6 +1046,7 @@ async function manageModels(
         modelPatch: {
           name: `${existing.name || existing.id} (Copy)`,
         },
+        legacyDiscardResolution: discard,
       });
       if (saved) config = saved;
       continue;
@@ -1015,6 +1055,8 @@ async function manageModels(
       const fieldBaselines = managedModelBaselines(existing);
       const result = await editModel(ctx, providerId, existing);
       if (!result) continue;
+      const discard = await confirmLegacyDiscard(ctx, result.hasMalformedLegacy);
+      if (discard === "cancel") continue;
       const modelToSave = structuredClone(result.model);
       delete (modelToSave as Record<string, unknown>)["extraPayload"];
       const payloadOption = result.payload && Object.keys(result.payload).length > 0
@@ -1030,6 +1072,7 @@ async function manageModels(
           fieldBaselines,
           payload: payloadOption,
           migrateLegacyExtraPayload: payloadOption === null ? undefined : result.migrateLegacy,
+          legacyDiscardResolution: discard,
         });
         if (saved) config = saved;
       } else {
@@ -1037,7 +1080,7 @@ async function manageModels(
           providerId,
           existing.id,
           managedModelPatch(modelToSave),
-          { fieldBaselines, payload: payloadOption },
+          { fieldBaselines, payload: payloadOption, legacyDiscardResolution: discard },
         ));
         if (saved) config = saved;
       }

@@ -7,6 +7,7 @@ import {
   copyPayloadDocumentValue,
   copyProviderPayloadDocumentValues,
   emptyPayloadDocument,
+  listProviderPayloadIdentities,
   lookupModelPayload,
   mergePayloadIntoRequest,
   modelPayloadKey,
@@ -163,4 +164,25 @@ test("injects shallow payload values without mutating stored or event objects", 
   assert.deepEqual(result, { model: "model", temperature: 0.2, nested: { replace: true } });
   assert.deepEqual(eventPayload, { model: "model", nested: { keep: true } });
   assert.deepEqual(configuredPayload, { temperature: 0.2, nested: { replace: true } });
+});
+
+test("enumerates unambiguous empty-model legacy key provider/ and cleans it on provider removal", () => {
+  let config = emptyPayloadDocument();
+  Object.defineProperty(config.extraPayloads, "local/", {
+    value: { empty: true },
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  Object.defineProperty(config.extraPayloads, "local/a/b", {
+    value: { inert: true },
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  assert.deepEqual(listProviderPayloadIdentities(config, "local"), [["local", ""]]);
+  assert.deepEqual(lookupModelPayload(config, "local", ""), { empty: true });
+  config = removeProviderPayloadDocumentValues(config, "local");
+  assert.equal(Object.hasOwn(config.extraPayloads, "local/"), false);
+  assert.equal(Object.hasOwn(config.extraPayloads, "local/a/b"), true);
 });
