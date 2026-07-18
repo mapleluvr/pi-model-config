@@ -30,6 +30,9 @@ discovery as a first-class Provider action.
   object.
 - Endpoint-based Model discovery remains available for every Provider, whether
   or not that Provider already contains Models.
+- User-visible labels remain Chinese, matching the current extension; native
+  field identifiers may appear alongside those labels when useful.
+- The panel uses text and Pi theme states rather than emoji markers.
 
 ## Goals
 
@@ -87,13 +90,19 @@ theme states; color is not the only focus signal.
 
 ### Keyboard Behavior
 
-- `Tab`, `Left`, and `Right` switch between category and field panes.
+- In wide mode, `Tab`, `Left`, and `Right` switch pane focus. Moving in the
+  category pane previews that category immediately; Enter or Right moves focus
+  into its field pane. Enter in the field pane activates the selected field.
 - Pi's configured `tui.select.up` and `tui.select.down` bindings move within
-  the focused pane.
-- Pi's configured `tui.select.confirm` binding activates a category or field.
-- Pi's configured `tui.select.cancel` binding returns to the previous screen.
+  the focused pane. In wide mode, Pi's configured `tui.select.cancel` binding
+  closes the settings panel from either pane.
+- In narrow mode, the category list is one screen and the selected category's
+  field list is the next screen. Enter opens the field list; Left or Pi's
+  configured `tui.select.cancel` returns from fields to categories. Cancelling
+  from categories closes the settings panel.
 - `/` closes the panel into the existing searchable selector populated with all
-  exposed fields. Selecting a result reopens the panel at that category/field.
+  exposed fields. Selecting a result reopens the panel at that category/field;
+  cancelling search restores the previous panel state.
 - The footer always shows the active bindings and available actions.
 
 ### Responsive Layout
@@ -214,7 +223,6 @@ and explicit save/discard actions while preserving unknown compat fields.
 
 ### Actions
 
-- Fetch Models from endpoint
 - Copy Provider
 - Delete Provider
 
@@ -312,7 +320,9 @@ forced as part of creation.
 
 Headers, Model Overrides, Thinking Level Map, Cost Tiers, Compat, and Payload
 use cloned local drafts. Each nested editor exposes `Save and return` and
-`Discard changes`. Escape is equivalent to discard. A failed save retains the
+`Discard changes`. Escape is equivalent to discard. Model Override entry
+creation, rename, deletion, and child-field edits remain staged in the one
+Model Overrides draft until that editor is saved. A failed save retains the
 draft so the user can correct it or discard it.
 
 ### Fresh Reads and Preservation
@@ -331,7 +341,7 @@ rename success.
 ## Endpoint Model Discovery
 
 `Fetch Models from endpoint` is always present in the Provider's Models
-category and Actions category. The existing discovery request contract remains:
+category. The existing discovery request contract remains:
 
 - use the current Provider Base URL and credential resolution behavior;
 - try `{baseUrl}/models`, then `{baseUrl}/v1/models`;
