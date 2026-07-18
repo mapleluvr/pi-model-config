@@ -46,7 +46,7 @@ export const BUILT_IN_PROVIDERS_PI_0_80_6: ReadonlySet<string> = new Set([
 ]);
 
 const DEFAULT_OPTIONS: ValidationOptions = { builtInProviders: BUILT_IN_PROVIDERS_PI_0_80_6 };
-const THINKING_LEVEL_KEYS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const THINKING_LEVEL_KEYS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const INPUT_TYPES = new Set(["text", "image"]);
 const THINKING_FORMATS = new Set([
   "openai", "openrouter", "deepseek", "together", "zai", "qwen", "chat-template",
@@ -147,8 +147,8 @@ function validateThinkingLevelMap(value: unknown, path: string, issues: Validati
 }
 
 function validateInput(value: unknown, path: string, issues: ValidationIssue[]): void {
-  if (!Array.isArray(value) || value.length === 0) {
-    addIssue(issues, path, "must be a non-empty array");
+  if (!Array.isArray(value)) {
+    addIssue(issues, path, "must be an array");
     return;
   }
   value.forEach((input, index) => {
@@ -168,6 +168,107 @@ function validateStringArray(value: unknown, path: string, issues: ValidationIss
   });
 }
 
+function validateFiniteNumber(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (typeof value !== "number" || !Number.isFinite(value)) addIssue(issues, path, "must be a finite number");
+}
+
+function validateChatTemplateKwargs(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (!isObject(value)) {
+    addIssue(issues, path, "must be an object");
+    return;
+  }
+  for (const [key, kwarg] of Object.entries(value)) {
+    const kwargPath = childPath(path, key);
+    const isScalar = kwarg === null || typeof kwarg === "string" || typeof kwarg === "boolean"
+      || (typeof kwarg === "number" && Number.isFinite(kwarg));
+    if (isScalar) continue;
+    if (!isObject(kwarg)) {
+      addIssue(issues, kwargPath, "must be a scalar or thinking variable object");
+      continue;
+    }
+    if (kwarg.$var !== "thinking.enabled" && kwarg.$var !== "thinking.effort") {
+      addIssue(issues, childPath(kwargPath, "$var"), "must be thinking.enabled or thinking.effort");
+    }
+    if (kwarg.omitWhenOff !== undefined && typeof kwarg.omitWhenOff !== "boolean") {
+      addIssue(issues, childPath(kwargPath, "omitWhenOff"), "must be a boolean when present");
+    }
+  }
+}
+
+const OPEN_ROUTER_BOOLEAN_FIELDS = [
+  "allow_fallbacks", "require_parameters", "zdr", "enforce_distillable_text",
+] as const;
+const OPEN_ROUTER_ARRAY_FIELDS = ["order", "only", "ignore", "quantizations"] as const;
+const OPEN_ROUTER_PRICE_FIELDS = ["prompt", "completion", "image", "audio", "request"] as const;
+const PERCENTILE_FIELDS = ["p50", "p75", "p90", "p99"] as const;
+
+function validatePercentileOrNumber(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (typeof value === "number") {
+    validateFiniteNumber(value, path, issues);
+    return;
+  }
+  if (!isObject(value)) {
+    addIssue(issues, path, "must be a finite number or percentile object");
+    return;
+  }
+  for (const key of PERCENTILE_FIELDS) {
+    if (value[key] !== undefined) validateFiniteNumber(value[key], childPath(path, key), issues);
+  }
+}
+
+function validateOpenRouterRouting(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (!isObject(value)) {
+    addIssue(issues, path, "must be an object");
+    return;
+  }
+  for (const key of OPEN_ROUTER_BOOLEAN_FIELDS) validateBoolean(value, key, path, issues);
+  for (const key of OPEN_ROUTER_ARRAY_FIELDS) {
+    if (value[key] !== undefined) validateStringArray(value[key], childPath(path, key), issues);
+  }
+  if (value.data_collection !== undefined && value.data_collection !== "deny" && value.data_collection !== "allow") {
+    addIssue(issues, childPath(path, "data_collection"), "must be deny or allow");
+  }
+  if (value.sort !== undefined) {
+    const sortPath = childPath(path, "sort");
+    if (typeof value.sort !== "string" && !isObject(value.sort)) addIssue(issues, sortPath, "must be a string or object");
+    else if (isObject(value.sort)) {
+      if (value.sort.by !== undefined && typeof value.sort.by !== "string") {
+        addIssue(issues, childPath(sortPath, "by"), "must be a string when present");
+      }
+      if (value.sort.partition !== undefined && value.sort.partition !== null && typeof value.sort.partition !== "string") {
+        addIssue(issues, childPath(sortPath, "partition"), "must be a string or null when present");
+      }
+    }
+  }
+  if (value.max_price !== undefined) {
+    const pricePath = childPath(path, "max_price");
+    if (!isObject(value.max_price)) addIssue(issues, pricePath, "must be an object");
+    else {
+      for (const key of OPEN_ROUTER_PRICE_FIELDS) {
+        const price = value.max_price[key];
+        if (price !== undefined && typeof price !== "string" && (typeof price !== "number" || !Number.isFinite(price))) {
+          addIssue(issues, childPath(pricePath, key), "must be a finite number or string");
+        }
+      }
+    }
+  }
+  if (value.preferred_min_throughput !== undefined) {
+    validatePercentileOrNumber(value.preferred_min_throughput, childPath(path, "preferred_min_throughput"), issues);
+  }
+  if (value.preferred_max_latency !== undefined) {
+    validatePercentileOrNumber(value.preferred_max_latency, childPath(path, "preferred_max_latency"), issues);
+  }
+}
+
+function validateVercelGatewayRouting(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (!isObject(value)) {
+    addIssue(issues, path, "must be an object");
+    return;
+  }
+  if (value.only !== undefined) validateStringArray(value.only, childPath(path, "only"), issues);
+  if (value.order !== undefined) validateStringArray(value.order, childPath(path, "order"), issues);
+}
+
 function validateCompat(value: unknown, path: string, issues: ValidationIssue[]): void {
   if (!isObject(value)) {
     addIssue(issues, path, "must be an object");
@@ -185,24 +286,14 @@ function validateCompat(value: unknown, path: string, issues: ValidationIssue[])
   if (value.cacheControlFormat !== undefined && value.cacheControlFormat !== "anthropic") {
     addIssue(issues, childPath(path, "cacheControlFormat"), "must be anthropic");
   }
-
-  for (const key of ["chatTemplateKwargs", "openRouterRouting"] as const) {
-    if (value[key] !== undefined && !isObject(value[key])) {
-      addIssue(issues, childPath(path, key), "must be an object");
-    }
+  if (value.chatTemplateKwargs !== undefined) {
+    validateChatTemplateKwargs(value.chatTemplateKwargs, childPath(path, "chatTemplateKwargs"), issues);
   }
-
+  if (value.openRouterRouting !== undefined) {
+    validateOpenRouterRouting(value.openRouterRouting, childPath(path, "openRouterRouting"), issues);
+  }
   if (value.vercelGatewayRouting !== undefined) {
-    const routingPath = childPath(path, "vercelGatewayRouting");
-    if (!isObject(value.vercelGatewayRouting)) addIssue(issues, routingPath, "must be an object");
-    else {
-      if (value.vercelGatewayRouting.only !== undefined) {
-        validateStringArray(value.vercelGatewayRouting.only, childPath(routingPath, "only"), issues);
-      }
-      if (value.vercelGatewayRouting.order !== undefined) {
-        validateStringArray(value.vercelGatewayRouting.order, childPath(routingPath, "order"), issues);
-      }
-    }
+    validateVercelGatewayRouting(value.vercelGatewayRouting, childPath(path, "vercelGatewayRouting"), issues);
   }
 }
 
@@ -238,7 +329,11 @@ function validateOverrideCost(value: unknown, path: string, issues: ValidationIs
   for (const key of COST_RATE_KEYS) {
     if (value[key] !== undefined) validateRate(value[key], childPath(path, key), issues);
   }
-  if (value.tiers !== undefined) addIssue(issues, childPath(path, "tiers"), "is not supported for model overrides");
+  if (value.tiers !== undefined) {
+    const tiersPath = childPath(path, "tiers");
+    if (!Array.isArray(value.tiers)) addIssue(issues, tiersPath, "must be an array");
+    else value.tiers.forEach((tier, index) => validateCostTier(tier, `${tiersPath}[${index}]`, issues));
+  }
 }
 
 function validateModelLikeFields(

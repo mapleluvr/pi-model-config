@@ -118,7 +118,7 @@ test("successful model rename keeps an explicitly edited destination payload and
   await withRuntimeAgentDir(async () => {
     writeModelsConfig({
       providers: {
-        local: { models: [{ id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] },
+        local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] },
       },
     });
     setModelPayload("local", "old", { inherited: true });
@@ -137,7 +137,7 @@ test("successful model rename keeps an explicitly cleared destination payload cl
   await withRuntimeAgentDir(async () => {
     writeModelsConfig({
       providers: {
-        local: { models: [{ id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] },
+        local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] },
       },
     });
     setModelPayload("local", "old", { inherited: true });
@@ -156,6 +156,8 @@ test("successful model edit removes an invalid legacy extraPayload instead of pe
     writeModelsConfig({
       providers: {
         local: {
+          baseUrl: "http://localhost:11434",
+          api: "openai-completions",
           models: [{
             id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384,
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -178,6 +180,8 @@ test("successful model copy removes legacy extraPayload and copies the private p
     writeModelsConfig({
       providers: {
         local: {
+          baseUrl: "http://localhost:11434",
+          api: "openai-completions",
           models: [{
             id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384,
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -209,11 +213,13 @@ test("provider rename collision preserves both native providers and private payl
       providers: {
         source: {
           name: "Source",
+          baseUrl: "http://localhost:11434",
           api: "openai-completions",
           models: [{ id: "source/model" }],
         },
         target: {
           name: "Target",
+          baseUrl: "http://localhost:11434",
           api: "anthropic-messages",
           models: [{ id: "target/model" }],
         },
@@ -246,8 +252,8 @@ test("provider copy collision preserves both native providers and private payloa
   await withRuntimeAgentDir(async () => {
     const initial = {
       providers: {
-        source: { models: [{ id: "source/model" }] },
-        target: { models: [{ id: "target/model" }] },
+        source: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "source/model" }] },
+        target: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "target/model" }] },
       },
     };
     writeModelsConfig(initial);
@@ -274,6 +280,8 @@ test("successful provider copy copies payloads for every copied model", async ()
     writeModelsConfig({
       providers: {
         "source/provider": {
+          baseUrl: "http://localhost:11434",
+          api: "openai-completions",
           models: [{ id: "model/one" }, { id: "model/two" }],
         },
       },
@@ -296,7 +304,7 @@ test("successful provider copy copies payloads for every copied model", async ()
 
 test("provider copy does not write payloads when blank native persistence fails", async () => {
   await withRuntimeAgentDir(async (agentDir) => {
-    writeModelsConfig({ providers: { source: { models: [{ id: "model" }] } } });
+    writeModelsConfig({ providers: { source: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "model" }] } } });
     setModelPayload("source", "model", { seed: 7 });
     const modelsPath = path.join(agentDir, "models.json");
     const blank = " \r\n\t";
@@ -323,7 +331,7 @@ test("provider copy does not write payloads when blank native persistence fails"
 
 test("model copy does not write payloads when blank native persistence fails", async () => {
   await withRuntimeAgentDir(async (agentDir) => {
-    writeModelsConfig({ providers: { local: { models: [{ id: "model" }] } } });
+    writeModelsConfig({ providers: { local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "model" }] } } });
     setModelPayload("local", "model", { seed: 7 });
     const modelsPath = path.join(agentDir, "models.json");
     const blank = " \r\n\t";
@@ -350,7 +358,7 @@ test("model copy does not write payloads when blank native persistence fails", a
 
 test("diagnostics reports a whitespace-only models file as unreadable", async () => {
   await withRuntimeAgentDir(async (agentDir) => {
-    writeModelsConfig({ providers: { local: { models: [] } } });
+    writeModelsConfig({ providers: { local: { baseUrl: "http://localhost:11434", models: [] } } });
     const modelsPath = path.join(agentDir, "models.json");
     const blank = " \r\n\t";
     const notifications: Array<{ message: string; level: string }> = [];

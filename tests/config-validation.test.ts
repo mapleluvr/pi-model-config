@@ -34,8 +34,11 @@ test("accepts complete built-in and custom providers without changing unknown fi
         models: [{ id: "native-model", modelPreview: true }],
         modelOverrides: {
           "native-model": {
-            name: "Native override", reasoning: true, thinkingLevelMap: { off: null, high: "high" },
-            input: ["text", "image"], cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+            name: "Native override", reasoning: true, thinkingLevelMap: { off: null, high: "high", max: "maximum" },
+            input: ["text", "image"], cost: {
+              input: 1, output: 2, cacheRead: 0, cacheWrite: 0,
+              tiers: [{ inputTokensAbove: 2000, input: 2, output: 3, cacheRead: 0.2, cacheWrite: 0.4 }],
+            },
             contextWindow: 1000, maxTokens: 100, headers: { "X-Test": "yes" },
             compat: { supportsStore: true, futureCompat: "keep" }, legacyPreview: "keep",
           },
@@ -47,11 +50,27 @@ test("accepts complete built-in and custom providers without changing unknown fi
         compat: { thinkingFormat: "openrouter", maxTokensField: "max_tokens", futureCompat: 1 },
         models: [{
           id: "custom-model", name: "Custom model", reasoning: false,
-          thinkingLevelMap: { off: null, minimal: "minimal", xhigh: "max" }, input: ["text"],
+          thinkingLevelMap: { off: null, minimal: "minimal", xhigh: "xhigh", max: "max" }, input: ["text"],
           contextWindow: 128000, maxTokens: 4096,
           cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2,
             tiers: [{ inputTokensAbove: 1000, input: 2, output: 3, cacheRead: 0.2, cacheWrite: 0.4 }] },
-          headers: { "X-Model": "yes" }, compat: { supportsTemperature: true, futureCompat: true },
+          headers: { "X-Model": "yes" }, compat: {
+            supportsTemperature: true,
+            chatTemplateKwargs: {
+              scalar: "auto", count: 2, enabled: true, empty: null,
+              effort: { $var: "thinking.effort", omitWhenOff: true, futureVariableField: "keep" },
+            },
+            openRouterRouting: {
+              allow_fallbacks: true, require_parameters: false, data_collection: "deny", zdr: true,
+              enforce_distillable_text: false, order: ["one"], only: ["two"], ignore: ["three"],
+              quantizations: ["fp8"], sort: { by: "price", partition: null, futureSortField: true },
+              max_price: { prompt: 1, completion: "2", futurePriceField: true },
+              preferred_min_throughput: { p50: 1, p99: 2, futureCutoff: true },
+              preferred_max_latency: 500, futureRoutingField: true,
+            },
+            vercelGatewayRouting: { only: ["one"], order: ["two"], futureVercelField: true },
+            futureCompat: true,
+          },
           modelPreview: "keep",
         }],
       },
@@ -95,9 +114,8 @@ test("rejects malformed model values, costs, tiers, and known compat fields", ()
     [model({ api: "" }), "$.providers.native.models[0].api"],
     [model({ baseUrl: " " }), "$.providers.native.models[0].baseUrl"],
     [model({ reasoning: 1 }), "$.providers.native.models[0].reasoning"],
-    [model({ thinkingLevelMap: { max: "max" } }), "$.providers.native.models[0].thinkingLevelMap.max"],
+    [model({ thinkingLevelMap: { future: "future" } }), "$.providers.native.models[0].thinkingLevelMap.future"],
     [model({ thinkingLevelMap: { high: "" } }), "$.providers.native.models[0].thinkingLevelMap.high"],
-    [model({ input: [] }), "$.providers.native.models[0].input"],
     [model({ input: ["audio"] }), "$.providers.native.models[0].input[0]"],
     [model({ contextWindow: 0 }), "$.providers.native.models[0].contextWindow"],
     [model({ maxTokens: 1.5 }), "$.providers.native.models[0].maxTokens"],
@@ -112,9 +130,31 @@ test("rejects malformed model values, costs, tiers, and known compat fields", ()
     [model({ compat: { thinkingFormat: "future" } }), "$.providers.native.models[0].compat.thinkingFormat"],
     [model({ compat: { cacheControlFormat: "future" } }), "$.providers.native.models[0].compat.cacheControlFormat"],
     [model({ compat: { chatTemplateKwargs: [] } }), "$.providers.native.models[0].compat.chatTemplateKwargs"],
+    [model({ compat: { chatTemplateKwargs: { bad: [] } } }), "$.providers.native.models[0].compat.chatTemplateKwargs.bad"],
+    [model({ compat: { chatTemplateKwargs: { bad: { $var: "future" } } } }), "$.providers.native.models[0].compat.chatTemplateKwargs.bad.$var"],
+    [model({ compat: { chatTemplateKwargs: { bad: { $var: "thinking.enabled", omitWhenOff: "yes" } } } }), "$.providers.native.models[0].compat.chatTemplateKwargs.bad.omitWhenOff"],
+    [model({ compat: { openRouterRouting: { allow_fallbacks: "yes" } } }), "$.providers.native.models[0].compat.openRouterRouting.allow_fallbacks"],
+    [model({ compat: { openRouterRouting: { data_collection: "always" } } }), "$.providers.native.models[0].compat.openRouterRouting.data_collection"],
+    [model({ compat: { openRouterRouting: { order: [1] } } }), "$.providers.native.models[0].compat.openRouterRouting.order[0]"],
+    [model({ compat: { openRouterRouting: { sort: [] } } }), "$.providers.native.models[0].compat.openRouterRouting.sort"],
+    [model({ compat: { openRouterRouting: { sort: { by: 1 } } } }), "$.providers.native.models[0].compat.openRouterRouting.sort.by"],
+    [model({ compat: { openRouterRouting: { sort: { partition: false } } } }), "$.providers.native.models[0].compat.openRouterRouting.sort.partition"],
+    [model({ compat: { openRouterRouting: { max_price: { prompt: false } } } }), "$.providers.native.models[0].compat.openRouterRouting.max_price.prompt"],
+    [model({ compat: { openRouterRouting: { preferred_min_throughput: { p50: "fast" } } } }), "$.providers.native.models[0].compat.openRouterRouting.preferred_min_throughput.p50"],
+    [model({ compat: { openRouterRouting: { preferred_max_latency: [] } } }), "$.providers.native.models[0].compat.openRouterRouting.preferred_max_latency"],
     [model({ compat: { vercelGatewayRouting: { only: [1] } } }), "$.providers.native.models[0].compat.vercelGatewayRouting.only[0]"],
   ];
   for (const [candidate, path] of cases) assert.ok(issuePaths(candidate).includes(path), path);
+});
+
+test("accepts max thinking maps, empty input arrays, and override cost tiers", () => {
+  assert.deepEqual(issuePaths({ providers: { native: {
+    models: [{ id: "model", thinkingLevelMap: { max: "maximum" }, input: [] }],
+    modelOverrides: { model: {
+      thinkingLevelMap: { max: null }, input: [],
+      cost: { tiers: [{ inputTokensAbove: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }] },
+    } },
+  } } }), []);
 });
 
 test("enforces custom-provider and empty-provider cross-rules", () => {
@@ -140,10 +180,10 @@ test("validates override descriptors without exposing full-model fields as known
     [override(null), "$.providers.native.modelOverrides.m"],
     [override({ name: "" }), "$.providers.native.modelOverrides.m.name"],
     [override({ reasoning: "yes" }), "$.providers.native.modelOverrides.m.reasoning"],
-    [override({ input: [] }), "$.providers.native.modelOverrides.m.input"],
+    [override({ input: ["audio"] }), "$.providers.native.modelOverrides.m.input[0]"],
     [override({ contextWindow: -1 }), "$.providers.native.modelOverrides.m.contextWindow"],
     [override({ cost: { input: -1 } }), "$.providers.native.modelOverrides.m.cost.input"],
-    [override({ cost: { tiers: [] } }), "$.providers.native.modelOverrides.m.cost.tiers"],
+    [override({ cost: { tiers: [{}] } }), "$.providers.native.modelOverrides.m.cost.tiers[0].inputTokensAbove"],
   ];
   for (const [candidate, path] of cases) assert.ok(issuePaths(candidate).includes(path), path);
 

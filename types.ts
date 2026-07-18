@@ -40,6 +40,7 @@ export interface ModelOverrideCost {
   output?: number;
   cacheRead?: number;
   cacheWrite?: number;
+  tiers?: ModelCostTier[];
 }
 
 export interface ModelOverrideConfig {
@@ -133,5 +134,5 @@ export const API_TYPES = [
 ] as const;
 
 /** Thinking level keys */
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
