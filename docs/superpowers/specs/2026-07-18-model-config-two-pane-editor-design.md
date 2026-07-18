@@ -422,9 +422,18 @@ On macOS, the port is `49152 + (firstUnsigned16BitWord(hash) % 16384)`.
 `EADDRINUSE` followed by a valid matching identity handshake means the same
 agent directory is busy. A valid different identity, unrecognized listener,
 handshake timeout, unsupported adapter, or endpoint error fails closed as a lock
-collision and never tries another port or triggers takeover. The handshake
-contains only protocol version, endpoint identity hash, opaque owner token, and
-PID; it contains no path, key, payload, or model data.
+collision and never tries another port or triggers takeover. The handshake contains only protocol version, endpoint identity hash, opaque
+owner token, and PID; it contains no path, key, payload, or model data.
+
+Every accepted socket receives `error`, peer-`end`, and `close` handlers before
+any write and is tracked by the owning handle. Windows and Linux do not need an
+owner response for contention diagnosis, so their accepted sockets are destroyed
+immediately. macOS writes at most one bounded handshake; the write callback or
+an injectable lifetime timer destroys the socket, and pre-response disconnect,
+`EPIPE`, or `ECONNRESET` is contained as a client-socket event rather than an
+owner-server error. Release first destroys every tracked accepted socket and
+only then awaits `server.close()`, so a disconnected diagnostic client cannot
+crash the owner or keep clean release pending.
 
 `listen` success is the sole mutation-ownership transition. A paused owner keeps
 the endpoint because the OS still owns its server handle. Process exit or crash
@@ -441,7 +450,8 @@ before each journal, native, and payload replacement. The check and synchronous
 atomic replacement occur in one JavaScript turn with no intervening `await`.
 Handle loss stops before that write and leaves any existing journal for the next
 owner to recover.
-Release awaits `server.close()` and no mutation occurs afterward. A process that
+Release marks closure expected, destroys and drains the tracked client-socket
+set, awaits `server.close()`, and permits no mutation afterward. A process that
 crashes cannot resume, while a paused process cannot lose its OS endpoint.
 
 Human confirmation is never awaited while holding the lock. A preview records
@@ -623,13 +633,17 @@ Implementation follows TDD for new behavior. Focused tests cover:
 - before/after request-hook resolution for current-session Models, built-in
   fallback identities, and dynamically registered identities;
 - the full Windows owner/contender matrix (Node/Node, Node/Bun, Bun/Node,
-  Bun/Bun) returns `busy` under a paused owner, plus real cross-process IPC
-  exclusion, clean release, and immediate reacquisition after owner kill;
+  Bun/Bun) returns `busy` under a paused owner; after the diagnostic client has
+  disconnected, the owner resumes without uncaught socket error, a second
+  contender remains `busy`, clean release completes, and the next contender
+  acquires; owner kill also permits immediate reacquisition;
 - Windows named-pipe and Linux abstract-socket full-hash endpoint derivation,
   plus macOS deterministic-port handshake for matching, different, unrecognized,
   and timed-out identities;
 - endpoint bind/error/close faults before journal, native step 3, and payload
-  step 4 writes are fenced before replacement, and crash leftovers are recovered
+  step 4 writes are fenced before replacement; accepted-client pre-response
+  disconnect, `EPIPE`, `ECONNRESET`, timeout, and forced release destruction do
+  not revoke server authority or hang release; crash leftovers are recovered
   only after a new process acquires the OS endpoint;
 - valid-journal recovery with a malformed current payload, malformed-journal
   quarantine with valid files, malformed-payload quarantine/reset, and invalid
