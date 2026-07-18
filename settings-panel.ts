@@ -144,6 +144,7 @@ export class TwoPaneSettingsPanel implements Component {
   private readonly maxVisibleRows: number;
   private state: SettingsPanelState;
   private lastWidth = WIDE_MIN_COLUMNS;
+  private lastRenderedWide: boolean | undefined;
 
   constructor(options: TwoPaneSettingsPanelOptions) {
     this.title = options.title;
@@ -165,10 +166,15 @@ export class TwoPaneSettingsPanel implements Component {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.floor(width));
+    const wide = safeWidth >= WIDE_MIN_COLUMNS;
+    if (this.lastRenderedWide !== undefined && this.lastRenderedWide !== wide) {
+      this.state = wide
+        ? { ...this.state, focusedPane: this.state.narrowScreen }
+        : { ...this.state, narrowScreen: this.state.focusedPane };
+    }
+    this.lastRenderedWide = wide;
     this.lastWidth = safeWidth;
-    const lines = safeWidth >= WIDE_MIN_COLUMNS
-      ? this.renderWide(safeWidth)
-      : this.renderNarrow(safeWidth);
+    const lines = wide ? this.renderWide(safeWidth) : this.renderNarrow(safeWidth);
     return lines.map((line) => truncateToWidth(line, safeWidth, ""));
   }
 
@@ -350,8 +356,8 @@ export class TwoPaneSettingsPanel implements Component {
       this.theme.fg("accent", this.title),
       ...(this.subtitle ? [this.theme.fg("muted", this.subtitle)] : []),
       compose(
-        this.state.focusedPane === "categories" ? "Categories [FOCUS]" : "Categories",
-        this.state.focusedPane === "fields" ? "Fields [FOCUS]" : "Fields",
+        this.state.focusedPane === "categories" ? "分类 [焦点]" : "分类",
+        this.state.focusedPane === "fields" ? "字段 [焦点]" : "字段",
       ),
     ];
     const rowCount = Math.max(visibleCategories.length, visibleFields.length, 1);
@@ -380,7 +386,7 @@ export class TwoPaneSettingsPanel implements Component {
       );
       lines.push(this.theme.fg("accent", this.title));
       if (this.subtitle) lines.push(this.theme.fg("muted", this.subtitle));
-      lines.push("Categories [FOCUS]");
+      lines.push("分类 [焦点]");
       for (const entry of this.categories.slice(window.startIndex, window.endIndex)) {
         lines.push(this.renderCategoryRow(entry));
       }
@@ -398,7 +404,7 @@ export class TwoPaneSettingsPanel implements Component {
     );
     lines.push(this.theme.fg("accent", `${this.title} > ${category?.label ?? ""}`));
     if (this.subtitle) lines.push(this.theme.fg("muted", this.subtitle));
-    lines.push("Fields [FOCUS]");
+    lines.push("字段 [焦点]");
     for (const entry of fields.slice(window.startIndex, window.endIndex)) {
       lines.push(this.renderFieldRow(entry));
     }
@@ -428,15 +434,15 @@ export class TwoPaneSettingsPanel implements Component {
   }
 
   private wideFooter(): string {
-    return `Tab/Left/Right switch pane  ${this.configuredMovement()} move  ${formatKeys(this.keybindings, "tui.select.confirm")} activate  / search  ${formatKeys(this.keybindings, "tui.select.cancel")} back`;
+    return `Tab/Left/Right 切换面板  ${this.configuredMovement()} 移动  ${formatKeys(this.keybindings, "tui.select.confirm")} 打开  / 搜索  ${formatKeys(this.keybindings, "tui.select.cancel")} 返回`;
   }
 
   private narrowCategoryFooter(): string {
-    return `${this.configuredMovement()} move  ${formatKeys(this.keybindings, "tui.select.confirm")} open  / search  ${formatKeys(this.keybindings, "tui.select.cancel")} back`;
+    return `${this.configuredMovement()} 移动  Right/${formatKeys(this.keybindings, "tui.select.confirm")} 打开  / 搜索  ${formatKeys(this.keybindings, "tui.select.cancel")} 返回`;
   }
 
   private narrowFieldFooter(): string {
-    return `${this.configuredMovement()} move  ${formatKeys(this.keybindings, "tui.select.confirm")} activate  Left/${formatKeys(this.keybindings, "tui.select.cancel")} categories  / search`;
+    return `${this.configuredMovement()} 移动  ${formatKeys(this.keybindings, "tui.select.confirm")} 打开  Left/${formatKeys(this.keybindings, "tui.select.cancel")} 返回分类  / 搜索`;
   }
 }
 

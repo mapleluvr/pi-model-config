@@ -8,7 +8,7 @@ export type ConfigPatch<T extends Record<string, unknown>> = {
 export type ProviderSubtreeKey = "headers" | "compat" | "modelOverrides";
 export type ModelSubtreeKey = "headers" | "compat" | "thinkingLevelMap" | "cost";
 
-export const THINKING_MAP_INACTIVE_WARNING = "Thinking Level Map is inactive while reasoning is false";
+export const THINKING_MAP_INACTIVE_WARNING = "reasoning 为 false 时未启用思考级别映射";
 
 export function getThinkingMapWarning(reasoning: boolean | undefined): string | undefined {
   return reasoning === false ? THINKING_MAP_INACTIVE_WARNING : undefined;

@@ -15,17 +15,17 @@ import {
 const categories: SettingsCategoryDescriptor[] = [
   {
     id: "general",
-    label: "General",
+    label: "常规",
     fields: [
-      { id: "name", label: "Display name", displayValue: "Example", searchText: "name label", action: "edit-field" },
-      { id: "limits", label: "Limits", displayValue: "2 entries", warning: "Review limits", action: "open-section" },
+      { id: "name", label: "显示名称", displayValue: "示例", searchText: "名称 标签", action: "edit-field" },
+      { id: "limits", label: "限制", displayValue: "2 项", warning: "请检查限制", action: "open-section" },
     ],
   },
   {
     id: "actions",
-    label: "Actions",
+    label: "操作",
     fields: [
-      { id: "delete", label: "Delete", displayValue: "Permanent", action: "run-action" },
+      { id: "delete", label: "删除", displayValue: "永久", action: "run-action" },
     ],
   },
 ];
@@ -65,8 +65,8 @@ function makePanel(options: {
   const results: SettingsPanelResult[] = [];
   let renderRequests = 0;
   const panel = new TwoPaneSettingsPanel({
-    title: "Provider: example",
-    subtitle: "Settings",
+    title: "提供商: example",
+    subtitle: "设置",
     categories,
     initialState: options.initialState,
     theme: options.theme ?? plainTheme,
@@ -115,36 +115,36 @@ test("keeps selected rows inside a bounded visible window", () => {
 test("renders wide at 120 and 88, narrow at 87 and 40, with bounded ANSI widths", () => {
   const snapshots = new Map<number, string[]>([
     [120, [
-      "Provider: example",
-      "Settings",
-      "Categories [FOCUS]             | Fields",
-      "> General                      | * Display name  Example",
-      "  Actions                      |   Limits  2 entries",
-      "Tab/Left/Right switch pane  ctrl+p/ctrl+n move  ctrl+j activate  / search  ctrl+x back",
+      "提供商: example",
+      "设置",
+      "分类 [焦点]                    | 字段",
+      "> 常规                         | * 显示名称  示例",
+      "  操作                         |   限制  2 项",
+      "Tab/Left/Right 切换面板  ctrl+p/ctrl+n 移动  ctrl+j 打开  / 搜索  ctrl+x 返回",
     ]],
     [88, [
-      "Provider: example",
-      "Settings",
-      "Categories [FOCUS]         | Fields",
-      "> General                  | * Display name  Example",
-      "  Actions                  |   Limits  2 entries",
-      "Tab/Left/Right switch pane  ctrl+p/ctrl+n move  ctrl+j activate  / search  ctrl+x back",
+      "提供商: example",
+      "设置",
+      "分类 [焦点]                | 字段",
+      "> 常规                     | * 显示名称  示例",
+      "  操作                     |   限制  2 项",
+      "Tab/Left/Right 切换面板  ctrl+p/ctrl+n 移动  ctrl+j 打开  / 搜索  ctrl+x 返回",
     ]],
     [87, [
-      "Provider: example",
-      "Settings",
-      "Categories [FOCUS]",
-      "> General",
-      "  Actions",
-      "ctrl+p/ctrl+n move  ctrl+j open  / search  ctrl+x back",
+      "提供商: example",
+      "设置",
+      "分类 [焦点]",
+      "> 常规",
+      "  操作",
+      "ctrl+p/ctrl+n 移动  Right/ctrl+j 打开  / 搜索  ctrl+x 返回",
     ]],
     [40, [
-      "Provider: example",
-      "Settings",
-      "Categories [FOCUS]",
-      "> General",
-      "  Actions",
-      "ctrl+p/ctrl+n move  ctrl+j open  / searc",
+      "提供商: example",
+      "设置",
+      "分类 [焦点]",
+      "> 常规",
+      "  操作",
+      "ctrl+p/ctrl+n 移动  Right/ctrl+j 打开  /",
     ]],
   ]);
 
@@ -160,14 +160,14 @@ test("renders wide at 120 and 88, narrow at 87 and 40, with bounded ANSI widths"
 
 test("wide navigation previews categories, marks focus textually, and activates field semantics", () => {
   const { panel, results, renderRequests } = makePanel();
-  assert.match(text(panel.render(120)), /> General/);
+  assert.match(text(panel.render(120)), /> 常规/);
   panel.handleInput("DOWN");
   assert.equal(panel.getState().categoryId, "actions");
   assert.equal(panel.getState().fieldId, "delete");
-  assert.match(text(panel.render(120)), /> Actions/);
+  assert.match(text(panel.render(120)), /> 操作/);
   panel.handleInput("OK");
   assert.equal(panel.getState().focusedPane, "fields");
-  assert.match(text(panel.render(120)), /Fields \[FOCUS\]/);
+  assert.match(text(panel.render(120)), /字段 \[焦点\]/);
   panel.handleInput("OK");
   assert.equal(results[0]?.type, "run-action");
   assert.equal(results[0]?.fieldId, "delete");
@@ -177,8 +177,8 @@ test("wide navigation previews categories, marks focus textually, and activates 
 test("wide pane controls and warning rendering retain semantic field IDs", () => {
   const { panel, results } = makePanel({ initialState: { focusedPane: "fields", fieldId: "limits" } });
   const rendered = text(panel.render(88));
-  assert.match(rendered, /! Review limits/);
-  assert.match(rendered, /> Limits/);
+  assert.match(rendered, /! 请检查限制/);
+  assert.match(rendered, /> 限制/);
   panel.handleInput("\x1b[D");
   assert.equal(panel.getState().focusedPane, "categories");
   panel.handleInput("\t");
@@ -206,12 +206,32 @@ test("narrow confirm enters fields, cancel returns to categories, then closes", 
   panel.render(87);
   panel.handleInput("OK");
   assert.equal(panel.getState().narrowScreen, "fields");
-  assert.match(text(panel.render(87)), /Provider: example > General/);
+  assert.match(text(panel.render(87)), /提供商: example > 常规/);
   panel.handleInput("CANCEL");
   assert.equal(panel.getState().narrowScreen, "categories");
   assert.equal(results.length, 0);
   panel.handleInput("CANCEL");
   assert.equal(results[0]?.type, "back");
+});
+
+test("synchronizes pane state across live wide/narrow transitions and returns the synchronized state", () => {
+  const wideFirst = makePanel({ initialState: { focusedPane: "fields", narrowScreen: "categories" } });
+  assert.match(text(wideFirst.panel.render(120)), /字段 \[焦点\]/);
+  assert.equal(wideFirst.panel.getState().narrowScreen, "categories");
+  assert.match(text(wideFirst.panel.render(87)), /字段 \[焦点\]/);
+  assert.equal(wideFirst.panel.getState().narrowScreen, "fields");
+  wideFirst.panel.handleInput("/");
+  assert.equal(wideFirst.results[0]?.state.focusedPane, "fields");
+  assert.equal(wideFirst.results[0]?.state.narrowScreen, "fields");
+
+  const narrowFirst = makePanel({ initialState: { focusedPane: "categories", narrowScreen: "fields" } });
+  assert.match(text(narrowFirst.panel.render(87)), /字段 \[焦点\]/);
+  assert.equal(narrowFirst.panel.getState().focusedPane, "categories");
+  assert.match(text(narrowFirst.panel.render(120)), /字段 \[焦点\]/);
+  assert.equal(narrowFirst.panel.getState().focusedPane, "fields");
+  narrowFirst.panel.handleInput("/");
+  assert.equal(narrowFirst.results[0]?.state.focusedPane, "fields");
+  assert.equal(narrowFirst.results[0]?.state.narrowScreen, "fields");
 });
 
 test("restores category, field, focus, offsets, and narrow screen", () => {
@@ -225,15 +245,15 @@ test("restores category, field, focus, offsets, and narrow screen", () => {
   };
   const { panel } = makePanel({ initialState });
   assert.deepEqual(panel.getState(), initialState);
-  assert.match(text(panel.render(40)), /> Limits/);
+  assert.match(text(panel.render(40)), /> 限制/);
 });
 
 test("footer uses injected configured action labels and only literal custom controls", () => {
   const { panel } = makePanel();
   const rendered = text(panel.render(120));
-  assert.match(rendered, /ctrl\+p\/ctrl\+n move/);
-  assert.match(rendered, /ctrl\+j activate/);
-  assert.match(rendered, /ctrl\+x back/);
+  assert.match(rendered, /ctrl\+p\/ctrl\+n 移动/);
+  assert.match(rendered, /ctrl\+j 打开/);
+  assert.match(rendered, /ctrl\+x 返回/);
   assert.match(rendered, /Tab\/Left\/Right/);
   assert.doesNotMatch(rendered, /Enter|Esc|Up\/Down/);
 });
@@ -251,7 +271,7 @@ test("openSettingsPanel uses the sole non-overlay custom wrapper", async () => {
       },
     },
   };
-  const result = await openSettingsPanel(ctx as any, { title: "Title", categories });
+  const result = await openSettingsPanel(ctx as any, { title: "标题", categories });
   assert.equal(result, expected);
   assert.deepEqual(options, { overlay: false });
 });

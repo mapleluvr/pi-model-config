@@ -44,7 +44,7 @@ export interface FieldEditorUiContext {
 export type SettingAbsence = "not-set" | "inherited";
 
 function absentValue(absence: SettingAbsence): string {
-  return absence === "inherited" ? "(inherited)" : "(not set)";
+  return absence === "inherited" ? "(继承)" : "(未设置)";
 }
 
 export function formatSettingValue(value: unknown, absence: SettingAbsence = "not-set"): string {
@@ -56,7 +56,7 @@ export function formatSettingValue(value: unknown, absence: SettingAbsence = "no
 
 export function formatNestedCount(
   value: unknown,
-  noun = "entries",
+  noun = "项",
   absence: SettingAbsence = "not-set",
 ): string {
   if (value === undefined) return absentValue(absence);
@@ -71,7 +71,7 @@ export function maskApiKey(value: string): string {
 }
 
 export function formatApiKeyReference(value: string | undefined): string {
-  if (value === undefined) return "(not set)";
+  if (value === undefined) return "(未设置)";
   if (value.startsWith("$") || value.startsWith("!")) return value;
   return maskApiKey(value);
 }
@@ -81,9 +81,9 @@ export async function collectOptionalString(
   title: string,
   placeholder?: string,
 ): Promise<ScalarCollectionResult<string>> {
-  const action = await ctx.ui.select(title, ["Enter a value", "Clear value", "Cancel"]);
-  if (action === undefined || action === "Cancel") return { status: "cancel" };
-  if (action === "Clear value") return { status: "clear" };
+  const action = await ctx.ui.select(title, ["输入值", "清除值", "取消"]);
+  if (action === undefined || action === "取消") return { status: "cancel" };
+  if (action === "清除值") return { status: "clear" };
   return await collectRequiredString(ctx, title, placeholder);
 }
 
@@ -97,7 +97,7 @@ export async function collectRequiredString(
     if (raw === undefined) return { status: "cancel" };
     const value = raw.trim();
     if (value.length > 0) return { status: "value", value };
-    ctx.ui.notify("A non-empty value is required", "error");
+    ctx.ui.notify("请输入非空值", "error");
   }
 }
 
@@ -111,7 +111,7 @@ export async function collectPositiveInteger(
     if (raw === undefined) return { status: "cancel" };
     const value = Number(raw.trim());
     if (Number.isInteger(value) && value > 0) return { status: "value", value };
-    ctx.ui.notify("Enter a positive integer", "error");
+    ctx.ui.notify("请输入正整数", "error");
   }
 }
 
@@ -123,9 +123,12 @@ export async function collectNonNegativeRate(
   while (true) {
     const raw = await ctx.ui.input(title, placeholder);
     if (raw === undefined) return { status: "cancel" };
-    const value = Number(raw.trim());
-    if (Number.isFinite(value) && value >= 0) return { status: "value", value };
-    ctx.ui.notify("Enter a finite non-negative number", "error");
+    const normalized = raw.trim();
+    if (normalized.length > 0) {
+      const value = Number(normalized);
+      if (Number.isFinite(value) && value >= 0) return { status: "value", value };
+    }
+    ctx.ui.notify("请输入有限的非负数", "error");
   }
 }
 
@@ -133,17 +136,17 @@ export async function collectApiKeyAction(
   ctx: FieldEditorUiContext,
   _storedValue?: string,
 ): Promise<ApiKeyActionResult> {
-  const action = await ctx.ui.select("API Key", ["Keep", "Replace", "Clear"]);
+  const action = await ctx.ui.select("API Key", ["保留", "替换", "清除"]);
   if (action === undefined) return { status: "cancel" };
-  if (action === "Keep") return { status: "keep" };
-  if (action === "Clear") return { status: "clear" };
-  ctx.ui.notify("The replacement will be visible while you type it", "warning");
+  if (action === "保留") return { status: "keep" };
+  if (action === "清除") return { status: "clear" };
+  ctx.ui.notify("输入替换值时内容将可见", "warning");
   while (true) {
-    const value = await ctx.ui.input("Replace API Key", "Enter new API key");
+    const value = await ctx.ui.input("替换 API Key", "输入新的 API Key");
     if (value === undefined) return { status: "cancel" };
     const normalized = value.trim();
     if (normalized.length > 0) return { status: "replace", value: normalized };
-    ctx.ui.notify("API Key cannot be blank; use Clear instead", "error");
+    ctx.ui.notify("API Key 不能为空；如需移除请使用“清除”", "error");
   }
 }
 
@@ -177,34 +180,34 @@ export async function editStringMapDraft(
     const keys = Object.keys(draft);
     const choice = await ctx.ui.select(title, [
       ...keys.map((key) => `${key} = string`),
-      "Add entry",
-      "Save and return",
-      "Discard changes",
+      "新增条目",
+      "保存并返回",
+      "放弃更改",
     ]);
-    if (choice === undefined || choice === "Discard changes") return { status: "discard" };
-    if (choice === "Save and return") return { status: "save", value: draft };
-    if (choice === "Add entry") {
-      const keyResult = await collectRequiredString(ctx, `${title} - New key`, "Header name");
+    if (choice === undefined || choice === "放弃更改") return { status: "discard" };
+    if (choice === "保存并返回") return { status: "save", value: draft };
+    if (choice === "新增条目") {
+      const keyResult = await collectRequiredString(ctx, `${title} - 新键`, "请求头名称");
       if (keyResult.status === "cancel") return { status: "discard" };
       if (hasOwnKey(draft, keyResult.value)) {
-        ctx.ui.notify("That key already exists", "error");
+        ctx.ui.notify("该键已存在", "error");
         continue;
       }
-      const valueResult = await collectRequiredString(ctx, `${title} - New value`, "Header value");
+      const valueResult = await collectRequiredString(ctx, `${title} - 新值`, "请求头值");
       if (valueResult.status === "cancel") return { status: "discard" };
       setOwnValue(draft, keyResult.value, valueResult.value);
       continue;
     }
     const key = keys.find((candidate) => `${candidate} = string` === choice);
     if (!key) continue;
-    const action = await ctx.ui.select(`${title} - ${key}`, ["Edit value", "Delete entry", "Back"]);
+    const action = await ctx.ui.select(`${title} - ${key}`, ["编辑值", "删除条目", "返回"]);
     if (action === undefined) return { status: "discard" };
-    if (action === "Back") continue;
-    if (action === "Delete entry") {
+    if (action === "返回") continue;
+    if (action === "删除条目") {
       deleteOwnKey(draft, key);
       continue;
     }
-    const valueResult = await collectRequiredString(ctx, `${title} - ${key}`, "New value");
+    const valueResult = await collectRequiredString(ctx, `${title} - ${key}`, "新值");
     if (valueResult.status === "cancel") return { status: "discard" };
     setOwnValue(draft, key, valueResult.value);
   }
@@ -218,7 +221,7 @@ const COMPAT_STRING_FIELDS = [
 
 function compatBooleanLabel(draft: Record<string, unknown>, key: string, label: string): string {
   const value = getOwnValue(draft, key);
-  const state = value === true ? "true" : value === false ? "false" : "default";
+  const state = value === true ? "true" : value === false ? "false" : "默认";
   return `[${state}] ${label}`;
 }
 
@@ -231,23 +234,23 @@ export async function editCompatDraft(
   while (true) {
     const booleanLabels = COMPAT_BOOLEAN_FIELDS.map((field) => compatBooleanLabel(draft, field.key, field.label));
     const stringLabels = COMPAT_STRING_FIELDS.map((field) => `${field.key} = ${formatSettingValue(getOwnValue(draft, field.key))}`);
-    const objectLabels = COMPAT_JSON_OBJECT_FIELDS.map((field) => `[object] ${field.label}`);
+    const objectLabels = COMPAT_JSON_OBJECT_FIELDS.map((field) => `[对象] ${field.label}`);
     const choice = await ctx.ui.select(title, [
       ...booleanLabels,
       ...stringLabels,
       ...objectLabels,
-      "Save and return",
-      "Discard changes",
+      "保存并返回",
+      "放弃更改",
     ]);
-    if (choice === undefined || choice === "Discard changes") return { status: "discard" };
-    if (choice === "Save and return") return { status: "save", value: draft };
+    if (choice === undefined || choice === "放弃更改") return { status: "discard" };
+    if (choice === "保存并返回") return { status: "save", value: draft };
 
     const booleanIndex = booleanLabels.indexOf(choice);
     if (booleanIndex >= 0) {
       const field = COMPAT_BOOLEAN_FIELDS[booleanIndex]!;
-      const selected = await ctx.ui.select(`${title} - ${field.label}`, ["Use default", "false", "true", "Back"]);
+      const selected = await ctx.ui.select(`${title} - ${field.label}`, ["使用默认值", "false", "true", "返回"]);
       if (selected === undefined) return { status: "discard" };
-      if (selected === "Back") continue;
+      if (selected === "返回") continue;
       const compatChoice = selected === "true" ? "true" : selected === "false" ? "false" : "default";
       draft = applyCompatBooleanChoice(draft, field.key, compatChoice);
       continue;
@@ -256,10 +259,10 @@ export async function editCompatDraft(
     const stringIndex = stringLabels.indexOf(choice);
     if (stringIndex >= 0) {
       const field = COMPAT_STRING_FIELDS[stringIndex]!;
-      const selected = await ctx.ui.select(`${title} - ${field.key}`, [...field.values, "Clear", "Back"]);
+      const selected = await ctx.ui.select(`${title} - ${field.key}`, [...field.values, "清除", "返回"]);
       if (selected === undefined) return { status: "discard" };
-      if (selected === "Back") continue;
-      if (selected === "Clear") deleteOwnKey(draft, field.key);
+      if (selected === "返回") continue;
+      if (selected === "清除") deleteOwnKey(draft, field.key);
       else setOwnValue(draft, field.key, selected);
       continue;
     }
@@ -267,10 +270,10 @@ export async function editCompatDraft(
     const objectIndex = objectLabels.indexOf(choice);
     if (objectIndex < 0) continue;
     const field = COMPAT_JSON_OBJECT_FIELDS[objectIndex]!;
-    const action = await ctx.ui.select(`${title} - ${field.label}`, ["Edit JSON object", "Clear", "Back"]);
+    const action = await ctx.ui.select(`${title} - ${field.label}`, ["编辑 JSON 对象", "清除", "返回"]);
     if (action === undefined) return { status: "discard" };
-    if (action === "Back") continue;
-    if (action === "Clear") {
+    if (action === "返回") continue;
+    if (action === "清除") {
       draft = applyCompatObjectChoice(draft, field.key, undefined);
       continue;
     }
@@ -284,15 +287,15 @@ export async function editCompatDraft(
       if (!isPlainObject(parsed)) throw new Error();
       draft = applyCompatObjectPatch(draft, field.key, parsed);
     } catch {
-      ctx.ui.notify("Enter a valid JSON object", "error");
+      ctx.ui.notify("请输入有效的 JSON 对象", "error");
     }
   }
 }
 
 function thinkingValueLabel(value: unknown): string {
-  if (value === undefined) return "(not set)";
+  if (value === undefined) return "(未设置)";
   if (value === null) return "null";
-  return typeof value === "string" ? value : "(preserved value)";
+  return typeof value === "string" ? value : "(保留值)";
 }
 
 export async function editThinkingMapDraft(
@@ -306,26 +309,26 @@ export async function editThinkingMapDraft(
   const menuTitle = warning ? `${title} - ${warning}` : title;
   while (true) {
     const labels = THINKING_LEVELS.map((level) => `${level} = ${thinkingValueLabel(getOwnValue(draft, level))}`);
-    const choice = await ctx.ui.select(menuTitle, [...labels, "Save and return", "Discard changes"]);
-    if (choice === undefined || choice === "Discard changes") return { status: "discard" };
-    if (choice === "Save and return") return { status: "save", value: draft };
+    const choice = await ctx.ui.select(menuTitle, [...labels, "保存并返回", "放弃更改"]);
+    if (choice === undefined || choice === "放弃更改") return { status: "discard" };
+    if (choice === "保存并返回") return { status: "save", value: draft };
     const index = labels.indexOf(choice);
     if (index < 0) continue;
     const level = THINKING_LEVELS[index]!;
     const action = await ctx.ui.select(`${title} - ${level}`, [
-      "Set mapped value", "Set null", "Clear mapping", "Back",
+      "设置映射值", "设为 null", "清除映射", "返回",
     ]);
     if (action === undefined) return { status: "discard" };
-    if (action === "Back") continue;
-    if (action === "Set null") {
+    if (action === "返回") continue;
+    if (action === "设为 null") {
       setOwnValue(draft, level, null);
       continue;
     }
-    if (action === "Clear mapping") {
+    if (action === "清除映射") {
       deleteOwnKey(draft, level);
       continue;
     }
-    const result = await collectRequiredString(ctx, `${title} - ${level}`, "Provider value");
+    const result = await collectRequiredString(ctx, `${title} - ${level}`, "提供商值");
     if (result.status === "cancel") return { status: "discard" };
     setOwnValue(draft, level, result.value);
   }
@@ -333,10 +336,10 @@ export async function editThinkingMapDraft(
 
 const COST_RATE_KEYS = ["input", "output", "cacheRead", "cacheWrite"] as const;
 const TIER_RATE_LABELS = [
-  ["input", "Input rate"],
-  ["output", "Output rate"],
-  ["cacheRead", "Cache read rate"],
-  ["cacheWrite", "Cache write rate"],
+  ["input", "输入费率"],
+  ["output", "输出费率"],
+  ["cacheRead", "缓存读取费率"],
+  ["cacheWrite", "缓存写入费率"],
 ] as const;
 
 type TierEditorResult =
@@ -351,7 +354,7 @@ async function collectTier(
   const draft = cloneRecord(current);
   const threshold = await collectPositiveInteger(
     ctx,
-    `${title} - Input tokens above`,
+    `${title} - 输入令牌数大于`,
     current ? String(getOwnValue(current, "inputTokensAbove") ?? "") : undefined,
   );
   if (threshold.status === "cancel") return { status: "discard" };
@@ -375,40 +378,40 @@ async function editCostTiersDraft(
 ): Promise<TierEditorResult> {
   const tiers = deepCloneJson(current);
   while (true) {
-    const labels = tiers.map((tier, index) => `Tier ${index + 1}: above ${formatSettingValue(getOwnValue(tier, "inputTokensAbove"))}`);
-    const choice = await ctx.ui.select(`${title} - Cost tiers`, [
+    const labels = tiers.map((tier, index) => `第 ${index + 1} 层: 高于 ${formatSettingValue(getOwnValue(tier, "inputTokensAbove"))}`);
+    const choice = await ctx.ui.select(`${title} - 成本分层`, [
       ...labels,
-      "Add tier",
-      "Back to cost",
+      "新增分层",
+      "返回成本",
     ]);
     if (choice === undefined) return { status: "discard" };
-    if (choice === "Back to cost") return { status: "back", tiers };
-    if (choice === "Add tier") {
-      const result = await collectTier(ctx, `${title} - New tier`);
+    if (choice === "返回成本") return { status: "back", tiers };
+    if (choice === "新增分层") {
+      const result = await collectTier(ctx, `${title} - 新分层`);
       if (result.status === "discard") return result;
       tiers.push(result.value);
       continue;
     }
     const index = labels.indexOf(choice);
     if (index < 0) continue;
-    const action = await ctx.ui.select(`${title} - Tier ${index + 1}`, [
-      "Edit tier", "Move up", "Move down", "Delete tier", "Back",
+    const action = await ctx.ui.select(`${title} - 第 ${index + 1} 层`, [
+      "编辑分层", "上移", "下移", "删除分层", "返回",
     ]);
     if (action === undefined) return { status: "discard" };
-    if (action === "Back") continue;
-    if (action === "Delete tier") {
+    if (action === "返回") continue;
+    if (action === "删除分层") {
       tiers.splice(index, 1);
       continue;
     }
-    if (action === "Move up") {
+    if (action === "上移") {
       if (index > 0) [tiers[index - 1], tiers[index]] = [tiers[index]!, tiers[index - 1]!];
       continue;
     }
-    if (action === "Move down") {
+    if (action === "下移") {
       if (index < tiers.length - 1) [tiers[index], tiers[index + 1]] = [tiers[index + 1]!, tiers[index]!];
       continue;
     }
-    const result = await collectTier(ctx, `${title} - Tier ${index + 1}`, tiers[index]);
+    const result = await collectTier(ctx, `${title} - 第 ${index + 1} 层`, tiers[index]);
     if (result.status === "discard") return result;
     tiers[index] = result.value;
   }
@@ -426,12 +429,12 @@ export async function editCostDraft(
     const tierCount = Array.isArray(tiers) ? tiers.length : 0;
     const choice = await ctx.ui.select(title, [
       ...rateLabels,
-      `Cost tiers (${tierCount})`,
-      "Save and return",
-      "Discard changes",
+      `成本分层 (${tierCount})`,
+      "保存并返回",
+      "放弃更改",
     ]);
-    if (choice === undefined || choice === "Discard changes") return { status: "discard" };
-    if (choice === "Save and return") return { status: "save", value: draft };
+    if (choice === undefined || choice === "放弃更改") return { status: "discard" };
+    if (choice === "保存并返回") return { status: "save", value: draft };
     const rateIndex = rateLabels.indexOf(choice);
     if (rateIndex >= 0) {
       const key = COST_RATE_KEYS[rateIndex]!;
@@ -440,7 +443,7 @@ export async function editCostDraft(
       setOwnValue(draft, key, result.value);
       continue;
     }
-    if (choice !== `Cost tiers (${tierCount})`) continue;
+    if (choice !== `成本分层 (${tierCount})`) continue;
     const currentTiers = Array.isArray(tiers)
       ? tiers.filter(isPlainObject).map((tier) => deepCloneJson(tier))
       : [];
@@ -466,7 +469,7 @@ async function collectJsonValue(
       const parsed: unknown = JSON.parse(raw);
       return { status: "value", value: deepCloneJson(parsed) };
     } catch {
-      ctx.ui.notify("Enter valid JSON", "error");
+      ctx.ui.notify("请输入有效的 JSON", "error");
     }
   }
 }
@@ -477,7 +480,10 @@ async function collectPayloadValue(
   type: "string" | "Boolean" | "JSON",
   current?: unknown,
 ): Promise<RequiredCollectionResult<unknown>> {
-  if (type === "string") return await collectRequiredString(ctx, title, "String value");
+  if (type === "string") {
+    const value = await ctx.ui.input(title, "字符串值");
+    return value === undefined ? { status: "cancel" } : { status: "value", value };
+  }
   if (type === "Boolean") {
     const selected = await ctx.ui.select(title, ["true", "false"]);
     if (selected === undefined) return { status: "cancel" };
@@ -497,17 +503,17 @@ export async function editPayloadDraft(
     const labels = keys.map((key) => `[${storedType(getOwnValue(draft, key))}] ${key}`);
     const choice = await ctx.ui.select(title, [
       ...labels,
-      "Add entry",
-      "Save and return",
-      "Discard changes",
+      "新增条目",
+      "保存并返回",
+      "放弃更改",
     ]);
-    if (choice === undefined || choice === "Discard changes") return { status: "discard" };
-    if (choice === "Save and return") return { status: "save", value: draft };
-    if (choice === "Add entry") {
-      const keyResult = await collectRequiredString(ctx, `${title} - New key`, "Payload key");
+    if (choice === undefined || choice === "放弃更改") return { status: "discard" };
+    if (choice === "保存并返回") return { status: "save", value: draft };
+    if (choice === "新增条目") {
+      const keyResult = await collectRequiredString(ctx, `${title} - 新键`, "Payload 键");
       if (keyResult.status === "cancel") return { status: "discard" };
       if (hasOwnKey(draft, keyResult.value)) {
-        ctx.ui.notify("That key already exists", "error");
+        ctx.ui.notify("该键已存在", "error");
         continue;
       }
       const type = await ctx.ui.select(`${title} - ${keyResult.value}`, ["string", "Boolean", "JSON"]);
@@ -521,10 +527,10 @@ export async function editPayloadDraft(
     if (index < 0) continue;
     const key = keys[index]!;
     const current = getOwnValue(draft, key);
-    const action = await ctx.ui.select(`${title} - ${key}`, ["Edit value", "Delete entry", "Back"]);
+    const action = await ctx.ui.select(`${title} - ${key}`, ["编辑值", "删除条目", "返回"]);
     if (action === undefined) return { status: "discard" };
-    if (action === "Back") continue;
-    if (action === "Delete entry") {
+    if (action === "返回") continue;
+    if (action === "删除条目") {
       deleteOwnKey(draft, key);
       continue;
     }
