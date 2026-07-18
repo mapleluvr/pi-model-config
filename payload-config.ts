@@ -1,7 +1,17 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { cloneOwnMap, deleteOwnKey, emptyOwnMap, getOwnValue, hasOwnKey, ownKeys, setOwnValue } from "./own-keys.ts";
+import {
+  cloneOwnJsonData,
+  cloneOwnMap,
+  deleteOwnKey,
+  emptyOwnMap,
+  getOwnValue,
+  hasOwnKey,
+  ownKeys,
+  setOwnValue,
+  stringifyOwnJsonData,
+} from "./own-keys.ts";
 
 export interface PayloadConfig {
   version: 1;
@@ -13,18 +23,26 @@ export type ModelPayloadIdentity = readonly [provider: string, modelId: string];
 const EMPTY_CONFIG: PayloadConfig = { version: 1, extraPayloads: emptyOwnMap() };
 
 export function isPlainPayloadObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function cloneJson<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  return cloneOwnJsonData(value, { objectPrototype: "ordinary" });
 }
 
 export function clonePayloadDocument(config: PayloadConfig): PayloadConfig {
+  const normalized = cloneOwnJsonData(config);
+  if (!isPlainPayloadObject(normalized) || getOwnValue(normalized, "version") !== 1) {
+    throw new Error("Payload document must be versioned JSON data");
+  }
+  const source = getOwnValue<Record<string, Record<string, unknown>>>(normalized, "extraPayloads");
+  if (!isPlainPayloadObject(source)) throw new Error("Payload document must be versioned JSON data");
   const extraPayloads = emptyOwnMap<Record<string, unknown>>();
-  for (const key of ownKeys(config.extraPayloads)) {
-    const value = getOwnValue(config.extraPayloads, key);
-    if (value === undefined) continue;
+  for (const key of ownKeys(source)) {
+    const value = getOwnValue(source, key);
+    if (!isPlainPayloadObject(value)) throw new Error("Payload entry must be JSON data");
     setOwnValue(extraPayloads, key, cloneJson(value));
   }
   return { version: 1, extraPayloads };
@@ -35,7 +53,7 @@ export function getPayloadConfigPath(agentDir = process.env.PI_CODING_AGENT_DIR 
 }
 
 export function modelPayloadKey(provider: string, modelId: string): string {
-  return JSON.stringify([provider, modelId] satisfies ModelPayloadIdentity);
+  return stringifyOwnJsonData([provider, modelId] satisfies ModelPayloadIdentity);
 }
 
 export function parseModelPayloadKey(key: string): ModelPayloadIdentity | undefined {
@@ -75,6 +93,11 @@ export function parsePayloadDocument(raw: string | Uint8Array, filePath = getPay
   } catch {
     throw new PayloadConfigError(filePath, "invalid JSON document");
   }
+  try {
+    parsed = cloneOwnJsonData(parsed);
+  } catch {
+    throw new PayloadConfigError(filePath, "payload document must be JSON data");
+  }
   if (!isPlainPayloadObject(parsed)) {
     throw new PayloadConfigError(filePath, "expected versioned payload document");
   }
@@ -101,8 +124,8 @@ export function parsePayloadDocument(raw: string | Uint8Array, filePath = getPay
 }
 
 export function serializePayloadDocument(config: PayloadConfig): Buffer {
-  const validated = parsePayloadDocument(JSON.stringify(config), "payload document");
-  return Buffer.from(`${JSON.stringify(validated, null, 2)}\n`, "utf8");
+  const validated = clonePayloadDocument(config);
+  return Buffer.from(`${stringifyOwnJsonData(validated, 2)}\n`, "utf8");
 }
 
 export function emptyPayloadDocument(): PayloadConfig {
@@ -193,7 +216,7 @@ export function listProviderPayloadIdentities(config: PayloadConfig, providerId:
     if (!hasOwnKey(config.extraPayloads, key)) continue;
     const identity = parseModelPayloadKey(key);
     if (identity && identity[0] === providerId) {
-      map.set(JSON.stringify(identity), identity);
+      map.set(stringifyOwnJsonData(identity), identity);
       continue;
     }
     if (
@@ -205,10 +228,10 @@ export function listProviderPayloadIdentities(config: PayloadConfig, providerId:
       // Empty model id is supported: key `provider/` maps to [provider, ""].
       const modelId = key.slice(legacyPrefix.length);
       const entry: ModelPayloadIdentity = [providerId, modelId];
-      map.set(JSON.stringify(entry), entry);
+      map.set(stringifyOwnJsonData(entry), entry);
     }
   }
-  return [...map.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return [...map.values()].sort((a, b) => stringifyOwnJsonData(a).localeCompare(stringifyOwnJsonData(b)));
 }
 
 export function removeProviderPayloadDocumentValues(config: PayloadConfig, provider: string): PayloadConfig {
@@ -253,7 +276,18 @@ export function moveProviderPayloadDocumentValues(
 
 export function mergePayloadIntoRequest(payload: unknown, extraPayload: unknown): Record<string, unknown> | undefined {
   if (!isPlainPayloadObject(payload) || !isPlainPayloadObject(extraPayload)) return undefined;
-  return { ...payload, ...cloneJson(extraPayload) };
+  let normalizedPayload: Record<string, unknown>;
+  let normalizedExtra: Record<string, unknown>;
+  try {
+    normalizedPayload = cloneJson(payload);
+    normalizedExtra = cloneJson(extraPayload);
+  } catch {
+    return undefined;
+  }
+  const merged: Record<string, unknown> = {};
+  for (const key of ownKeys(normalizedPayload)) setOwnValue(merged, key, getOwnValue(normalizedPayload, key));
+  for (const key of ownKeys(normalizedExtra)) setOwnValue(merged, key, getOwnValue(normalizedExtra, key));
+  return merged;
 }
 
 export { cloneOwnMap, emptyOwnMap, getOwnValue, hasOwnKey, setOwnValue, deleteOwnKey };

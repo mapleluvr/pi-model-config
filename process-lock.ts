@@ -2,6 +2,8 @@ import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
 
+import { stringifyOwnJsonData } from "./own-keys.ts";
+
 const HANDSHAKE_LIMIT = 512;
 const DEFAULT_PROBE_TIMEOUT_MS = 750;
 const DEFAULT_SOCKET_LIFETIME_MS = 250;
@@ -94,7 +96,7 @@ export function deriveEndpointIdentity(
 }
 
 export function serializeIpcHandshake(handshake: IpcHandshakeV1): string {
-  const serialized = `${JSON.stringify(handshake)}\n`;
+  const serialized = `${stringifyOwnJsonData(handshake)}\n`;
   if (Buffer.byteLength(serialized) > HANDSHAKE_LIMIT) {
     throw new Error("IPC handshake exceeds the protocol limit");
   }

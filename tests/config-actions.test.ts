@@ -7,7 +7,7 @@ import {
   ModelConfigActions, type ActionResult,
   parseLegacyExtraPayload,
 } from "../config-actions.ts";
-import { getModelsPath } from "../config.ts";
+import { getModelsPath, parseModelsDocument } from "../config.ts";
 import {
   commitCoordinatedMutation,
   getTransactionJournalPath,
@@ -76,8 +76,7 @@ function seedBasic(agentDir: string): void {
 const SECRET_MARKERS = ["sk-secret", "top_secret", "extraPayload", "\"temperature\"", "\"phase\""];
 
 function assertDiagnosticSecretFree(result: ActionResult): void {
-  if (result.type === "success") return;
-  // Never put serialized diagnostics into assertion messages (may contain private values).
+  // Never put serialized results into assertion messages (may contain private values on regression).
   const text = JSON.stringify(result);
   for (const marker of SECRET_MARKERS) {
     const leaked = text.includes(marker);
@@ -2093,4 +2092,399 @@ test("refreshed identity tokens clear own and inherited resolution fields", asyn
     if (previousToken) Object.defineProperty(Object.prototype, "resolutionToken", previousToken);
     else delete (Object.prototype as Record<string, unknown>).resolutionToken;
   }
+}));
+
+test("serialization hooks and accessors cannot authorize or alter action writes", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      source: { baseUrl: "http://localhost", api: "openai-completions", models: [model("m")] },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "dest", "m", { keep: true }));
+  let hookCalls = 0;
+  const providerRequest = Object.assign(Object.create({
+    toJSON() {
+      hookCalls += 1;
+      return {
+        kind: "rename",
+        providerId: "source",
+        targetProviderId: "dest",
+        payloadCollisionResolution: "replace-target",
+      };
+    },
+  }), {
+    kind: "rename" as const,
+    providerId: "source",
+    targetProviderId: "dest",
+  });
+  let nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+  let payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+  const collision = await actions.previewProviderIdentityAction(providerRequest);
+  assert.equal(collision.type, "payload-collision");
+  assert.equal(hookCalls, 0);
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("bad", { extraPayload: { malformed: true } })],
+      },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "new", "m", { keep: true }));
+  nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+  payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+  const previousToJSON = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON");
+  let injectedMode: "identity-discard" | "simple-replace" | "simple-discard" | "create-fields" = "identity-discard";
+  try {
+    Object.defineProperty(Object.prototype, "toJSON", {
+      configurable: true,
+      value(this: Record<string, unknown>) {
+        hookCalls += 1;
+        if (injectedMode === "identity-discard") {
+          return {
+            kind: "delete",
+            providerId: this.providerId,
+            modelId: this.modelId,
+            legacyDiscardResolution: "discard-malformed-legacy",
+          };
+        }
+        if (injectedMode === "simple-replace") {
+          return {
+            resolutionToken: this.resolutionToken,
+            payloadCollisionResolution: "replace-target",
+          };
+        }
+        if (injectedMode === "simple-discard") {
+          return {
+            resolutionToken: this.resolutionToken,
+            legacyDiscardResolution: "discard-malformed-legacy",
+          };
+        }
+        return {
+          baseUrl: "http://hook.invalid",
+          api: "openai-completions",
+          models: [model("hooked")],
+        };
+      },
+    });
+
+    const identityBlocked = await actions.previewModelIdentityAction({
+      kind: "delete",
+      providerId: "local",
+      modelId: "bad",
+    });
+    assert.equal(identityBlocked.type, "validation-error");
+
+    injectedMode = "simple-replace";
+    const collisionFirst = await actions.createProvider("new", {
+      baseUrl: "http://localhost",
+      api: "openai-completions",
+      models: [model("m")],
+    });
+    assert.equal(collisionFirst.type, "payload-collision");
+    if (collisionFirst.type !== "payload-collision" || !collisionFirst.resolutionToken) return;
+    const collisionRetry = await actions.createProvider("ignored", { models: [] }, {
+      resolutionToken: collisionFirst.resolutionToken,
+    });
+    assert.equal(collisionRetry.type, "stale-target");
+    if (collisionRetry.type === "stale-target" && collisionRetry.resolutionToken) {
+      actions.discardResolutionToken(collisionRetry.resolutionToken);
+    }
+
+    injectedMode = "simple-discard";
+    const malformedFirst = await actions.patchModel("local", "bad", { name: "Changed" });
+    assert.equal(malformedFirst.type, "validation-error");
+    if (malformedFirst.type !== "validation-error" || !malformedFirst.resolutionToken) return;
+    const malformedRetry = await actions.patchModel("ignored", "ignored", {}, {
+      resolutionToken: malformedFirst.resolutionToken,
+    });
+    assert.equal(malformedRetry.type, "stale-target");
+    if (malformedRetry.type === "stale-target" && malformedRetry.resolutionToken) {
+      actions.discardResolutionToken(malformedRetry.resolutionToken);
+    }
+
+    injectedMode = "create-fields";
+    const invalidGlobalCreate = await actions.createProvider("hook-created", { models: [model("hooked")] } as never);
+    assert.equal(invalidGlobalCreate.type, "validation-error");
+
+    assert.equal(hookCalls, 0);
+    assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+    assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+  } finally {
+    if (previousToJSON) Object.defineProperty(Object.prototype, "toJSON", previousToJSON);
+    else delete (Object.prototype as Record<string, unknown>).toJSON;
+  }
+
+  writeNative(agentDir, { providers: {} });
+  writePayload(agentDir, emptyPayloadDocument());
+  hookCalls = 0;
+  const invalidConfig = Object.assign(Object.create({
+    toJSON() {
+      hookCalls += 1;
+      return {
+        baseUrl: "http://hook.invalid",
+        api: "openai-completions",
+        models: [model("hooked")],
+      };
+    },
+  }), { models: [model("hooked")] }) as never;
+  nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+  payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+  const invalidCreate = await actions.createProvider("hooked", invalidConfig);
+  assert.equal(invalidCreate.type, "validation-error");
+  assert.equal(hookCalls, 0);
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+
+  writeNative(agentDir, {
+    providers: {
+      local: { baseUrl: "http://localhost", api: "openai-completions", models: [model("m")] },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  let getterCalls = 0;
+  const accessorPatch: Record<string, unknown> = {};
+  Object.defineProperty(accessorPatch, "name", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return "hooked";
+    },
+  });
+  nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+  payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+  const invalidPatch = await actions.patchProvider("local", accessorPatch);
+  assert.equal(invalidPatch.type, "validation-error");
+  assert.equal(getterCalls, 0);
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+
+  const cyclicPatch: Record<string, unknown> = {};
+  cyclicPatch.name = cyclicPatch;
+  const cyclic = await actions.patchProvider("local", cyclicPatch);
+  assert.equal(cyclic.type, "validation-error");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+}));
+
+test("polluted stored Provider model fields never affect previews or persisted rename copy patch", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      source: { baseUrl: "http://localhost" },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  const previousModels = Object.getOwnPropertyDescriptor(Object.prototype, "models");
+  try {
+    Object.defineProperty(Object.prototype, "models", {
+      value: [model("phantom")],
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+
+    const rename = await actions.previewProviderIdentityAction({
+      kind: "rename",
+      providerId: "source",
+      targetProviderId: "dest",
+    });
+    assert.equal(rename.type, "preview");
+    if (rename.type !== "preview") return;
+    assert.deepEqual(rename.affectedIdentities, []);
+    assert.equal((await actions.commitProviderIdentityAction(rename.token)).type, "success");
+
+    const copy = await actions.previewProviderIdentityAction({
+      kind: "copy",
+      providerId: "dest",
+      targetProviderId: "copied",
+    });
+    assert.equal(copy.type, "preview");
+    if (copy.type !== "preview") return;
+    assert.deepEqual(copy.affectedIdentities, []);
+    assert.equal((await actions.commitProviderIdentityAction(copy.token)).type, "success");
+    assert.equal((await actions.patchProvider("dest", { name: "Renamed" })).type, "success");
+
+    const raw = JSON.parse(fs.readFileSync(getModelsPath(agentDir), "utf8")) as ModelsConfig;
+    assert.equal(Object.hasOwn(raw.providers.dest!, "models"), false);
+    assert.equal(Object.hasOwn(raw.providers.copied!, "models"), false);
+    assert.equal(raw.providers.dest!.name, "Renamed");
+  } finally {
+    if (previousModels) Object.defineProperty(Object.prototype, "models", previousModels);
+    else delete (Object.prototype as Record<string, unknown>).models;
+  }
+
+  const parsed = parseModelsDocument(getModelsPath(agentDir), fs.readFileSync(getModelsPath(agentDir)));
+  assert.equal(Object.hasOwn(parsed.providers.dest!, "models"), false);
+  assert.equal(Object.hasOwn(parsed.providers.copied!, "models"), false);
+  assert.equal(actions.readEditorSnapshot().type, "snapshot");
+}));
+
+test("success ActionResult serializes without native or private secrets", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        apiKey: "sk-secret",
+        models: [model("m")],
+      },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "m", { top_secret: true }));
+  const result = await actions.patchProvider("local", { name: "Saved" });
+  assert.equal(result.type, "success");
+  assertDiagnosticSecretFree(result);
+  assert.equal(Object.hasOwn(result as object, "snapshot"), false);
+  assert.equal(Object.hasOwn(result as object, "native"), false);
+  assert.equal(Object.hasOwn(result as object, "payload"), false);
+}));
+
+test("every ActionResult variant has a secret-free serialized public shape", () => {
+  const descriptor: Extract<ActionResult, { type: "preview" }>["descriptor"] = {
+    scope: "model",
+    kind: "rename",
+    sourceProviderId: "source",
+    sourceModelId: "old",
+    targetProviderId: "source",
+    targetModelId: "new",
+    nativeHash: "native-hash",
+    payloadHash: "payload-hash",
+    affectedIdentities: [["source", "old"], ["source", "new"]],
+    collisions: [],
+  };
+  const variants = [
+    { type: "success" },
+    { type: "stale-target", nativeHash: "native-hash", payloadHash: "payload-hash", path: "providers.source" },
+    { type: "validation-error", issues: [{ path: "$.providers.source", message: "invalid" }] },
+    { type: "subtree-conflict", path: "providers.source.headers", nativeHash: "native-hash", payloadHash: "payload-hash" },
+    { type: "native-collision", target: "target" },
+    {
+      type: "payload-collision", collisions: [["source", "new"]], affectedIdentities: [["source", "new"]],
+      nativeHash: "native-hash", payloadHash: "payload-hash", scope: "model", kind: "rename",
+    },
+    { type: "preview", token: "opaque-token", affectedIdentities: [["source", "old"]], collisions: [], descriptor },
+    { type: "lock-busy" },
+    { type: "lock-collision" },
+    { type: "lock-unsupported" },
+    { type: "recovery-required" },
+  ] satisfies ActionResult[];
+  for (const variant of variants) assertDiagnosticSecretFree(variant);
+});
+
+test("every terminal token API consumes before kind checks, throws, and successful reuse", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, { providers: {} });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "new", "m", { keep: true }));
+  const simple = await actions.createProvider("new", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m")],
+  });
+  assert.equal(simple.type, "payload-collision");
+  if (simple.type !== "payload-collision" || !simple.resolutionToken) return;
+  assert.equal((await actions.commitProviderIdentityAction(simple.resolutionToken)).type, "stale-target");
+  assert.equal((await actions.createProvider("ignored", { models: [] }, {
+    resolutionToken: simple.resolutionToken,
+    payloadCollisionResolution: "reuse-target",
+  })).type, "stale-target");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers, "new"), false);
+
+  writeNative(agentDir, {
+    providers: {
+      source: { baseUrl: "http://localhost", api: "openai-completions", models: [model("m")] },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  const providerPreview = await actions.previewProviderIdentityAction({
+    kind: "copy", providerId: "source", targetProviderId: "provider-copy",
+  });
+  assert.equal(providerPreview.type, "preview");
+  if (providerPreview.type !== "preview") return;
+  assert.equal((await actions.commitModelIdentityAction(providerPreview.token)).type, "stale-target");
+  assert.equal((await actions.commitProviderIdentityAction(providerPreview.token)).type, "stale-target");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers, "provider-copy"), false);
+
+  const modelPreview = await actions.previewModelIdentityAction({
+    kind: "copy", providerId: "source", modelId: "m", targetModelId: "model-copy",
+  });
+  assert.equal(modelPreview.type, "preview");
+  if (modelPreview.type !== "preview") return;
+  assert.equal((await actions.commitProviderIdentityAction(modelPreview.token)).type, "stale-target");
+  assert.equal((await actions.commitModelIdentityAction(modelPreview.token)).type, "stale-target");
+  assert.equal(readNative(agentDir).providers.source!.models!.some((entry) => entry.id === "model-copy"), false);
+
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "other", "x", { keep: true }));
+  const wrongSimpleSource = await actions.createProvider("other", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("x")],
+  });
+  assert.equal(wrongSimpleSource.type, "payload-collision");
+  if (wrongSimpleSource.type !== "payload-collision" || !wrongSimpleSource.resolutionToken) return;
+  assert.equal((await actions.createModel("source", model("wrong"), {
+    resolutionToken: wrongSimpleSource.resolutionToken,
+    payloadCollisionResolution: "replace-target",
+  })).type, "stale-target");
+  assert.equal((await actions.createProvider("ignored", { models: [] }, {
+    resolutionToken: wrongSimpleSource.resolutionToken,
+    payloadCollisionResolution: "reuse-target",
+  })).type, "stale-target");
+
+  const identityForSimple = await actions.previewModelIdentityAction({
+    kind: "copy", providerId: "source", modelId: "m", targetModelId: "identity-simple",
+  });
+  assert.equal(identityForSimple.type, "preview");
+  if (identityForSimple.type !== "preview") return;
+  assert.equal((await actions.createProvider("ignored", { models: [] }, {
+    resolutionToken: identityForSimple.token,
+    payloadCollisionResolution: "replace-target",
+  })).type, "stale-target");
+  assert.equal((await actions.commitModelIdentityAction(identityForSimple.token)).type, "stale-target");
+
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "valid", "m", { keep: true }));
+  const valid = await actions.createProvider("valid", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m")],
+  });
+  assert.equal(valid.type, "payload-collision");
+  if (valid.type !== "payload-collision" || !valid.resolutionToken) return;
+  assert.equal((await actions.createProvider("ignored", { models: [] }, {
+    resolutionToken: valid.resolutionToken,
+    payloadCollisionResolution: "reuse-target",
+  })).type, "success");
+  assert.equal((await actions.createProvider("ignored", { models: [] }, {
+    resolutionToken: valid.resolutionToken,
+    payloadCollisionResolution: "reuse-target",
+  })).type, "stale-target");
+
+  writePayload(agentDir, setPayloadDocumentValue(readPayload(agentDir), "throwing", "m", { keep: true }));
+  let throwOnRetry = false;
+  const throwing = new ModelConfigActions({
+    agentDir,
+    commitMutation: async (request, options) => {
+      if (throwOnRetry) throw new Error("injected terminal failure");
+      return commitCoordinatedMutation(request, options);
+    },
+  });
+  const throwingFirst = await throwing.createProvider("throwing", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m")],
+  });
+  assert.equal(throwingFirst.type, "payload-collision");
+  if (throwingFirst.type !== "payload-collision" || !throwingFirst.resolutionToken) return;
+  throwOnRetry = true;
+  await assert.rejects(() => throwing.createProvider("ignored", { models: [] }, {
+    resolutionToken: throwingFirst.resolutionToken,
+    payloadCollisionResolution: "reuse-target",
+  }));
+  throwOnRetry = false;
+  assert.equal((await throwing.createProvider("ignored", { models: [] }, {
+    resolutionToken: throwingFirst.resolutionToken,
+    payloadCollisionResolution: "reuse-target",
+  })).type, "stale-target");
+  assert.equal(throwing.boundPreviewCount(), 0);
 }));

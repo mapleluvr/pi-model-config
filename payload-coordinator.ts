@@ -14,6 +14,7 @@ import {
   serializePayloadDocument,
   type PayloadConfig,
 } from "./payload-config.ts";
+import { cloneOwnJsonData, stringifyOwnJsonData } from "./own-keys.ts";
 import { tryAcquireMutationLock, type AcquireLockResult, type MutationLockHandle } from "./process-lock.ts";
 import type { ModelsConfig } from "./types.ts";
 
@@ -103,7 +104,7 @@ function readNormalized(read: (filePath: string) => ArtifactSnapshot, filePath: 
 }
 
 function cloneModelsDocument(document: ModelsConfig): ModelsConfig {
-  return JSON.parse(JSON.stringify(document)) as ModelsConfig;
+  return cloneOwnJsonData(document);
 }
 
 function cloneParsedArtifact<T>(artifact: ParsedArtifact<T>, clone: (document: T) => T): ParsedArtifact<T> {
@@ -134,6 +135,11 @@ function parseJournal(bytes: Uint8Array): TransactionJournalV1 {
   } catch {
     throw new Error("invalid transaction journal");
   }
+  try {
+    value = cloneOwnJsonData(value);
+  } catch {
+    throw new Error("invalid transaction journal");
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid transaction journal");
   const record = value as Record<string, unknown>;
   const expected = ["afterPayload", "nativeAfterHash", "nativeBeforeHash", "operationId", "payloadAfterHash", "payloadBeforeHash", "beforePayload", "version"].sort();
@@ -149,14 +155,15 @@ function parseJournal(bytes: Uint8Array): TransactionJournalV1 {
     nativeAfterHash: record.nativeAfterHash as string,
     payloadBeforeHash: record.payloadBeforeHash as string,
     payloadAfterHash: record.payloadAfterHash as string,
-    beforePayload: parsePayloadDocument(JSON.stringify(record.beforePayload), "transaction journal"),
-    afterPayload: parsePayloadDocument(JSON.stringify(record.afterPayload), "transaction journal"),
+    beforePayload: clonePayloadDocument(record.beforePayload as PayloadConfig),
+    afterPayload: clonePayloadDocument(record.afterPayload as PayloadConfig),
   };
 }
 
 function serializeJournal(journal: TransactionJournalV1): Buffer {
-  parseJournal(Buffer.from(JSON.stringify(journal), "utf8"));
-  return Buffer.from(`${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  const serialized = stringifyOwnJsonData(journal);
+  parseJournal(Buffer.from(serialized, "utf8"));
+  return Buffer.from(`${stringifyOwnJsonData(journal, 2)}\n`, "utf8");
 }
 
 export function readCoordinatedSnapshot(options: PayloadCoordinatorOptions = {}): CoordinatedSnapshot {
@@ -225,7 +232,7 @@ export function resolveRequestPayload(provider: string, modelId: string, options
 }
 
 function tokenFor(snapshot: CoordinatedSnapshot): string {
-  return JSON.stringify({
+  return stringifyOwnJsonData({
     nativeHash: snapshot.native.hash,
     payloadHash: snapshot.payload.hash,
     journalHash: snapshot.journal.hash,

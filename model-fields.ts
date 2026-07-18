@@ -1,3 +1,4 @@
+import { cloneOwnJsonData, getOwnValue, setOwnValue } from "./own-keys.ts";
 import type { ModelConfig, ModelCostTier, ProviderConfig } from "./types.ts";
 
 export type ConfigPatch<T extends Record<string, unknown>> = {
@@ -19,7 +20,7 @@ function mergeDefined<T extends Record<string, unknown>>(existing: T | undefined
 
 export function deepCloneJson<T>(value: T): T {
   if (value === undefined) return value;
-  return JSON.parse(JSON.stringify(value)) as T;
+  return cloneOwnJsonData(value, { objectPrototype: "ordinary" });
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -88,24 +89,24 @@ export function mergeModelConfig(existing: ModelConfig | undefined, changes: Con
 }
 
 export function readProviderSubtree(provider: ProviderConfig, key: ProviderSubtreeKey): unknown {
-  return deepCloneJson((provider as Record<string, unknown>)[key]);
+  return deepCloneJson(getOwnValue(provider as Record<string, unknown>, key));
 }
 
 export function writeProviderSubtree(provider: ProviderConfig, key: ProviderSubtreeKey, value: unknown): ProviderConfig {
   const next = deepCloneJson(provider);
   if (value === undefined || value === null) delete (next as Record<string, unknown>)[key];
-  else (next as Record<string, unknown>)[key] = deepCloneJson(value);
+  else setOwnValue(next as Record<string, unknown>, key, deepCloneJson(value));
   return next;
 }
 
 export function readModelSubtree(model: ModelConfig, key: ModelSubtreeKey): unknown {
-  return deepCloneJson((model as Record<string, unknown>)[key]);
+  return deepCloneJson(getOwnValue(model as Record<string, unknown>, key));
 }
 
 export function writeModelSubtree(model: ModelConfig, key: ModelSubtreeKey, value: unknown): ModelConfig {
   const next = deepCloneJson(model);
   if (value === undefined || value === null) delete (next as Record<string, unknown>)[key];
-  else (next as Record<string, unknown>)[key] = deepCloneJson(value);
+  else setOwnValue(next as Record<string, unknown>, key, deepCloneJson(value));
   return next;
 }
 

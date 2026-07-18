@@ -1,3 +1,5 @@
+import { cloneOwnJsonData } from "./own-keys.ts";
+
 export interface ValidationIssue {
   path: string;
   message: string;
@@ -86,20 +88,11 @@ function getOwn(object: object, key: string): unknown {
 }
 
 /**
- * Deep own-key materialization onto null prototypes.
- * Inherited Object.prototype / custom-prototype fields are never observed by validation.
+ * Deep own-data-property materialization onto null prototypes.
+ * Inherited fields and serialization/accessor hooks are never observed.
  */
 export function materializeOwnOnly(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((entry) => materializeOwnOnly(entry));
-  }
-  if (!isObject(value)) return value;
-  const out: Record<string, unknown> = Object.create(null);
-  for (const key of Object.keys(value)) {
-    if (!hasOwn(value, key)) continue;
-    out[key] = materializeOwnOnly(getOwn(value, key));
-  }
-  return out;
+  return cloneOwnJsonData(value, { allowNonFiniteNumbers: true });
 }
 
 function childPath(parent: string, key: string): string {
@@ -502,17 +495,21 @@ export function validateModelsCandidate(
   options: ValidationOptions = DEFAULT_OPTIONS,
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  if (!isObject(candidate)) {
+  let materialized: Record<string, unknown>;
+  try {
+    materialized = materializeOwnOnly(candidate) as Record<string, unknown>;
+  } catch {
+    addIssue(issues, "$", "must contain only own JSON data properties");
+    return issues;
+  }
+  if (!isObject(materialized)) {
     addIssue(issues, "$", "must be an object");
     return issues;
   }
-  // Own-key only: never treat inherited Object.prototype.providers as the document map.
-  if (!hasOwn(candidate, "providers") || !isObject(getOwn(candidate, "providers"))) {
+  if (!hasOwn(materialized, "providers") || !isObject(getOwn(materialized, "providers"))) {
     addIssue(issues, "$.providers", "must be an object");
     return issues;
   }
-  // Materialize onto null prototypes so inherited prototype fields never satisfy required validation.
-  const materialized = materializeOwnOnly(candidate) as Record<string, unknown>;
   const providers = getOwn(materialized, "providers") as Record<string, unknown>;
   for (const providerId of Object.keys(providers)) {
     if (!hasOwn(providers, providerId)) continue;

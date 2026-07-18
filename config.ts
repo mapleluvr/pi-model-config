@@ -5,7 +5,14 @@ import * as path from "node:path";
 import { parseTree, type Node, type ParseError } from "jsonc-parser";
 import { atomicReplace, readArtifact } from "./atomic-file.ts";
 import { assertValidModelsCandidate } from "./config-validation.ts";
-import { deleteOwnKey, getOwnValue, hasOwnKey, setOwnValue } from "./own-keys.ts";
+import {
+  cloneOwnJsonData,
+  deleteOwnKey,
+  getOwnValue,
+  hasOwnKey,
+  setOwnValue,
+  stringifyOwnJsonData,
+} from "./own-keys.ts";
 import type { ModelsConfig, ProviderConfig } from "./types.ts";
 
 export class ModelsConfigError extends Error {
@@ -104,17 +111,24 @@ export function readModelsConfig(filePath = getModelsPath()): ModelsConfig {
 }
 
 export function serializeModelsDocument(config: ModelsConfig): Buffer {
-  assertValidModelsCandidate(config);
-  return Buffer.from(`${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const normalized = cloneOwnJsonData(config);
+  assertValidModelsCandidate(normalized);
+  return Buffer.from(`${stringifyOwnJsonData(normalized, 2)}\n`, "utf8");
 }
 
 /** 写入 models.json */
 export function writeModelsConfig(config: ModelsConfig, filePath = getModelsPath()): void {
+  let normalized: ModelsConfig;
+  try {
+    normalized = cloneOwnJsonData(config);
+  } catch {
+    throw new ModelsConfigError(filePath, "input must contain only own JSON data properties");
+  }
   // Reject inputs without an own providers map before merge/validation (never read inherited prototypes).
-  if (!config || typeof config !== "object" || Array.isArray(config) || !hasOwnKey(config as object, "providers")) {
+  if (!normalized || typeof normalized !== "object" || Array.isArray(normalized) || !hasOwnKey(normalized as object, "providers")) {
     throw new ModelsConfigError(filePath, "input must include an own providers map");
   }
-  const inputProviders = getOwnValue(config as Record<string, unknown>, "providers");
+  const inputProviders = getOwnValue(normalized as Record<string, unknown>, "providers");
   if (!inputProviders || typeof inputProviders !== "object" || Array.isArray(inputProviders)) {
     throw new ModelsConfigError(filePath, "input must include an own providers map");
   }
@@ -122,7 +136,7 @@ export function writeModelsConfig(config: ModelsConfig, filePath = getModelsPath
   const existing = snapshot.exists
     ? parseModelsDocument(filePath, snapshot.bytes!.toString("utf8"))
     : { providers: {} };
-  const merged = { ...existing, ...config, providers: inputProviders as ModelsConfig["providers"] };
+  const merged = { ...existing, ...normalized, providers: inputProviders as ModelsConfig["providers"] };
   assertValidModelsCandidate(merged);
   atomicReplace(filePath, serializeModelsDocument(merged), { expectedHash: snapshot.hash });
 }

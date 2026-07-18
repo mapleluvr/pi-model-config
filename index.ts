@@ -280,10 +280,19 @@ function notifySaved(ctx: ExtensionCommandContext | undefined, config: ModelsCon
   );
 }
 
-function applyActionResult(ctx: ExtensionCommandContext, result: ActionResult): ModelsConfig | undefined {
+function applyActionResult(
+  ctx: ExtensionCommandContext,
+  actions: ModelConfigActions,
+  result: ActionResult,
+): ModelsConfig | undefined {
   if (result.type === "success") {
-    notifySaved(ctx, result.snapshot.native);
-    return cloneModelsConfig(result.snapshot.native);
+    const snapshot = actions.readEditorSnapshot();
+    if (snapshot.type === "recovery-required") {
+      notifyActionFailure(ctx, snapshot);
+      return undefined;
+    }
+    notifySaved(ctx, snapshot.native);
+    return cloneModelsConfig(snapshot.native);
   }
   notifyActionFailure(ctx, result);
   return undefined;
@@ -295,8 +304,8 @@ async function commitProviderIdentity(
 ): Promise<ModelsConfig | undefined> {
   const actions = modelConfigActions();
   const preview = await actions.previewProviderIdentityAction(request);
-  if (preview.type !== "preview") return applyActionResult(ctx, preview);
-  return applyActionResult(ctx, await actions.commitProviderIdentityAction(preview.token));
+  if (preview.type !== "preview") return applyActionResult(ctx, actions, preview);
+  return applyActionResult(ctx, actions, await actions.commitProviderIdentityAction(preview.token));
 }
 
 async function commitModelIdentity(
@@ -305,8 +314,8 @@ async function commitModelIdentity(
 ): Promise<ModelsConfig | undefined> {
   const actions = modelConfigActions();
   const preview = await actions.previewModelIdentityAction(request);
-  if (preview.type !== "preview") return applyActionResult(ctx, preview);
-  return applyActionResult(ctx, await actions.commitModelIdentityAction(preview.token));
+  if (preview.type !== "preview") return applyActionResult(ctx, actions, preview);
+  return applyActionResult(ctx, actions, await actions.commitModelIdentityAction(preview.token));
 }
 
 function managedProviderPatch(config: ProviderConfig): Record<string, unknown> {
@@ -338,11 +347,11 @@ function managedProviderBaselines(existing: ProviderConfig): Record<string, unkn
 function managedModelPatch(model: ModelConfig): Record<string, unknown> {
   return {
     name: model.name ?? null,
-    reasoning: model.reasoning,
-    input: model.input,
+    ...(model.reasoning !== undefined ? { reasoning: model.reasoning } : {}),
+    ...(model.input !== undefined ? { input: model.input } : {}),
     contextWindow: model.contextWindow ?? null,
     maxTokens: model.maxTokens ?? null,
-    cost: model.cost,
+    ...(model.cost !== undefined ? { cost: model.cost } : {}),
     thinkingLevelMap: model.thinkingLevelMap ?? null,
     compat: model.compat ?? null,
     headers: model.headers ?? null,
@@ -941,7 +950,7 @@ async function manageProviders(
         (resolution) => actions.createProvider(result.providerId, result.config, resolution),
         `Provider "${result.providerId}"`,
       );
-      const saved = applyActionResult(ctx, completed);
+      const saved = applyActionResult(ctx, actions, completed);
       if (saved) config = saved;
       continue;
     }
@@ -971,7 +980,7 @@ async function manageProviders(
       const saved = await commitProviderIdentity(ctx, {
         kind: "delete",
         providerId,
-        legacyDiscardResolution: discard,
+        ...(discard ? { legacyDiscardResolution: discard } : {}),
       });
       if (saved) config = saved;
       continue;
@@ -997,7 +1006,7 @@ async function manageProviders(
         kind: "copy",
         providerId,
         targetProviderId: copyId,
-        legacyDiscardResolution: discard,
+        ...(discard ? { legacyDiscardResolution: discard } : {}),
       });
       if (saved) config = saved;
       continue;
@@ -1028,7 +1037,7 @@ async function manageProviders(
         (resolution) => actions.patchProvider(providerId, { models }, resolution),
         `Provider "${providerId}" model list`,
       );
-      const saved = applyActionResult(ctx, completed);
+      const saved = applyActionResult(ctx, actions, completed);
       if (saved) config = saved;
       continue;
     }
@@ -1055,11 +1064,11 @@ async function manageProviders(
           targetProviderId: result.providerId,
           providerPatch: managedProviderPatch(result.config),
           fieldBaselines: managedProviderBaselines(existing),
-          legacyDiscardResolution: discard,
+          ...(discard ? { legacyDiscardResolution: discard } : {}),
         });
         if (saved) config = saved;
       } else {
-        const saved = applyActionResult(ctx, await actions.patchProvider(
+        const saved = applyActionResult(ctx, actions, await actions.patchProvider(
           providerId,
           managedProviderPatch(result.config),
           { fieldBaselines: managedProviderBaselines(existing) },
@@ -1113,7 +1122,7 @@ async function manageModels(
           ...resolution,
         }),
       );
-      const saved = applyActionResult(ctx, completed);
+      const saved = applyActionResult(ctx, actions, completed);
       if (saved) config = saved;
       continue;
     }
@@ -1141,7 +1150,7 @@ async function manageModels(
         kind: "delete",
         providerId,
         modelId: existing.id,
-        legacyDiscardResolution: discard,
+        ...(discard ? { legacyDiscardResolution: discard } : {}),
       });
       if (saved) config = saved;
       continue;
@@ -1165,7 +1174,7 @@ async function manageModels(
         modelPatch: {
           name: `${existing.name || existing.id} (Copy)`,
         },
-        legacyDiscardResolution: discard,
+        ...(discard ? { legacyDiscardResolution: discard } : {}),
       });
       if (saved) config = saved;
       continue;
@@ -1197,8 +1206,10 @@ async function manageModels(
           modelPatch: managedModelPatch(modelToSave),
           fieldBaselines,
           payload: payloadOption,
-          migrateLegacyExtraPayload: payloadOption === null ? undefined : result.migrateLegacy,
-          legacyDiscardResolution: discard,
+          ...(payloadOption !== null && result.migrateLegacy
+            ? { migrateLegacyExtraPayload: result.migrateLegacy }
+            : {}),
+          ...(discard ? { legacyDiscardResolution: discard } : {}),
         });
         if (saved) config = saved;
       } else {
@@ -1219,7 +1230,7 @@ async function manageModels(
             { fieldBaselines, payload: payloadOption, ...resolution },
           ),
         );
-        const saved = applyActionResult(ctx, completed);
+        const saved = applyActionResult(ctx, actions, completed);
         if (saved) config = saved;
       }
     }

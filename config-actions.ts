@@ -19,9 +19,16 @@ import {
   setPayloadDocumentValue,
   type PayloadConfig,
 } from "./payload-config.ts";
-import { deleteOwnKey, getOwnValue, hasOwnKey, setOwnValue } from "./own-keys.ts";
 import {
-  deepCloneJson,
+  cloneOwnJsonData,
+  deleteOwnKey,
+  getOwnValue,
+  hasOwnKey,
+  OwnJsonDataError,
+  setOwnValue,
+  stringifyOwnJsonData,
+} from "./own-keys.ts";
+import {
   deepEqualJson,
   describeSubtreePresence,
   mergeModelConfig,
@@ -37,7 +44,6 @@ import {
 } from "./model-fields.ts";
 import {
   assertValidModelsCandidate,
-  materializeOwnOnly,
   validateModelsCandidate,
   type ValidationIssue,
   type ValidationOptions,
@@ -64,7 +70,7 @@ export interface IdentityPreviewDescriptor {
 }
 
 export type ActionResult =
-  | { type: "success"; snapshot: EditorSnapshot }
+  | { type: "success" }
   | {
     type: "stale-target";
     nativeHash?: string;
@@ -323,24 +329,129 @@ interface OwnResolutionFields {
   legacyDiscardResolution?: LegacyDiscardResolution;
 }
 
-/** Read retry choices only from own properties; inherited prototype state is never authoritative. */
+/** Read retry choices only from own data properties; inherited/accessor state is never authoritative. */
 function ownResolutionFields(options?: object): OwnResolutionFields {
   const own = Object.create(null) as OwnResolutionFields;
   if (!options) return own;
-  if (hasOwnKey(options, "resolutionToken")) {
-    own.resolutionToken = getOwnValue<IdentityPreviewToken>(options, "resolutionToken");
-  }
-  if (hasOwnKey(options, "payloadCollisionResolution")) {
-    own.payloadCollisionResolution = getOwnValue<PayloadCollisionResolution>(options, "payloadCollisionResolution");
-  }
-  if (hasOwnKey(options, "legacyDiscardResolution")) {
-    own.legacyDiscardResolution = getOwnValue<LegacyDiscardResolution>(options, "legacyDiscardResolution");
-  }
+  const descriptors = Object.getOwnPropertyDescriptors(options);
+  const copy = (key: keyof OwnResolutionFields): void => {
+    const descriptor = descriptors[key];
+    if (descriptor?.enumerable && "value" in descriptor) setOwnValue(own, key, descriptor.value);
+  };
+  copy("resolutionToken");
+  copy("payloadCollisionResolution");
+  copy("legacyDiscardResolution");
   return own;
 }
 
 function cloneOwnOnlyJson<T>(value: T): T {
-  return materializeOwnOnly(deepCloneJson(value)) as T;
+  return cloneOwnJsonData(value);
+}
+
+/** Internal bindings retain explicit undefined baselines without reading hooks. */
+function cloneBoundData<T>(value: T, ancestors = new Set<object>()): T {
+  if (value === undefined || value === null || typeof value === "string" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new OwnJsonDataError();
+    return value;
+  }
+  if (typeof value !== "object") throw new OwnJsonDataError();
+  if (ancestors.has(value)) throw new OwnJsonDataError();
+  ancestors.add(value);
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Object.getOwnPropertySymbols(value).some((symbol) => descriptors[symbol]?.enumerable)) {
+      throw new OwnJsonDataError();
+    }
+    if (Array.isArray(value)) {
+      const lengthDescriptor = descriptors.length;
+      if (!lengthDescriptor || !("value" in lengthDescriptor)) throw new OwnJsonDataError();
+      const length = lengthDescriptor.value as number;
+      const output: unknown[] = new Array(length);
+      for (let index = 0; index < length; index += 1) {
+        const descriptor = descriptors[String(index)];
+        if (!descriptor || !("value" in descriptor)) throw new OwnJsonDataError();
+        output[index] = cloneBoundData(descriptor.value, ancestors);
+      }
+      for (const [key, descriptor] of Object.entries(descriptors)) {
+        if (key === "length" || /^(0|[1-9]\d*)$/.test(key) || !descriptor.enumerable) continue;
+        if (!("value" in descriptor)) throw new OwnJsonDataError();
+        setOwnValue(output as unknown as Record<string, unknown>, key, cloneBoundData(descriptor.value, ancestors));
+      }
+      return output as T;
+    }
+    const output = Object.create(null) as Record<string, unknown>;
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (!descriptor.enumerable) continue;
+      if (!("value" in descriptor)) throw new OwnJsonDataError();
+      setOwnValue(output, key, cloneBoundData(descriptor.value, ancestors));
+    }
+    return output as T;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function invalidActionInput(): ActionResult {
+  return {
+    type: "validation-error",
+    issues: [{ path: "$", message: "input must contain only own JSON data properties" }],
+  };
+}
+
+function enumerableDataDescriptors(value: object): Record<PropertyKey, PropertyDescriptor> {
+  const descriptors = Object.getOwnPropertyDescriptors(value) as Record<PropertyKey, PropertyDescriptor>;
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key]!;
+    if (!descriptor.enumerable) continue;
+    if (typeof key === "symbol" || !("value" in descriptor)) throw new OwnJsonDataError();
+  }
+  return descriptors;
+}
+
+/** Baselines use explicit undefined as the sole non-JSON sentinel for absent fields. */
+function cloneFieldBaselines(value: unknown): Readonly<Record<string, unknown>> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new OwnJsonDataError();
+  const descriptors = enumerableDataDescriptors(value);
+  const out: Record<string, unknown> = Object.create(null);
+  for (const key of Object.keys(descriptors)) {
+    const descriptor = descriptors[key]!;
+    if (!descriptor.enumerable) continue;
+    const child = descriptor.value;
+    setOwnValue(out, key, child === undefined ? undefined : cloneOwnOnlyJson(child));
+  }
+  return out;
+}
+
+function cloneActionOptions<T extends object>(options: T | undefined): T | undefined {
+  if (options === undefined) return undefined;
+  if (!options || typeof options !== "object" || Array.isArray(options)) throw new OwnJsonDataError();
+  const descriptors = enumerableDataDescriptors(options);
+  const out: Record<string, unknown> = Object.create(null);
+  for (const key of Object.keys(descriptors)) {
+    const descriptor = descriptors[key]!;
+    if (!descriptor.enumerable) continue;
+    if (key === "fieldBaselines") {
+      setOwnValue(out, key, cloneFieldBaselines(descriptor.value));
+    } else {
+      setOwnValue(out, key, cloneOwnOnlyJson(descriptor.value));
+    }
+  }
+  return out as T;
+}
+
+function cloneOptionalActionValue<T>(value: T): T {
+  return value === undefined ? value : cloneOwnOnlyJson(value);
+}
+
+function presentedResolutionToken(options: unknown): IdentityPreviewToken | undefined {
+  if (!options || typeof options !== "object" || Array.isArray(options)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(options, "resolutionToken");
+  return descriptor?.enumerable === true && "value" in descriptor && typeof descriptor.value === "string"
+    ? descriptor.value
+    : undefined;
 }
 
 function rejectBareSimpleResolution(options?: object): BuildOutcome | undefined {
@@ -357,7 +468,7 @@ function rejectBareSimpleResolution(options?: object): BuildOutcome | undefined 
 function clearIdentityResolutions(
   request: ProviderIdentityRequest | ModelIdentityRequest,
 ): ProviderIdentityRequest | ModelIdentityRequest {
-  const next = cloneOwnOnlyJson(request) as ProviderIdentityRequest | ModelIdentityRequest;
+  const next = cloneBoundData(request) as ProviderIdentityRequest | ModelIdentityRequest;
   deleteOwnKey(next, "resolutionToken");
   deleteOwnKey(next, "payloadCollisionResolution");
   deleteOwnKey(next, "legacyDiscardResolution");
@@ -365,11 +476,11 @@ function clearIdentityResolutions(
 }
 
 function cloneModels(config: ModelsConfig): ModelsConfig {
-  return deepCloneJson(config);
+  return cloneOwnOnlyJson(config);
 }
 
 function identityKey(provider: string, modelId: string): string {
-  return JSON.stringify([provider, modelId]);
+  return stringifyOwnJsonData([provider, modelId]);
 }
 
 function getProvider(config: ModelsConfig, providerId: string): ProviderConfig | undefined {
@@ -392,26 +503,35 @@ function providerIdentitySet(config: ModelsConfig): string[] {
   return Object.keys(config.providers).filter((key) => hasOwnKey(config.providers, key)).sort();
 }
 
+function providerModels(provider: ProviderConfig): ModelConfig[] {
+  const value = getOwnValue<unknown>(provider as Record<string, unknown>, "models");
+  return Array.isArray(value) ? value as ModelConfig[] : [];
+}
+
+function ownModelId(model: ModelConfig): unknown {
+  return getOwnValue<unknown>(model as Record<string, unknown>, "id");
+}
+
 function modelIdentitySet(config: ModelsConfig): string[] {
   const ids: string[] = [];
   for (const [providerId, provider] of Object.entries(config.providers)) {
-    for (const entry of provider.models ?? []) ids.push(identityKey(providerId, entry.id));
+    if (!hasOwnKey(config.providers, providerId)) continue;
+    for (const entry of providerModels(provider)) {
+      const id = ownModelId(entry);
+      if (typeof id === "string") ids.push(identityKey(providerId, id));
+    }
   }
   return ids.sort();
 }
 
 function findModelIndex(provider: ProviderConfig, modelId: string): number {
-  return (provider.models ?? []).findIndex((entry) => entry.id === modelId);
+  return providerModels(provider).findIndex((entry) => ownModelId(entry) === modelId);
 }
 
 function stripLegacyExtraPayload(model: ModelConfig): ModelConfig {
-  const next = deepCloneJson(model);
+  const next = cloneOwnOnlyJson(model);
   deleteOwnKey(next as object, "extraPayload");
   return next;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
 
 /**
@@ -486,6 +606,22 @@ function coordinatorOptions(options: ModelConfigActionsOptions): PayloadCoordina
   return rest;
 }
 
+function ownOnlyActionSnapshot(coordinated: CoordinatedSnapshot): CoordinatedSnapshot {
+  return {
+    ...coordinated,
+    native: {
+      ...coordinated.native,
+      document: coordinated.native.document === undefined ? undefined : cloneModels(coordinated.native.document),
+    },
+    payload: {
+      ...coordinated.payload,
+      document: coordinated.payload.document === undefined
+        ? undefined
+        : clonePayloadDocument(coordinated.payload.document),
+    },
+  };
+}
+
 function snapshotFrom(coordinated: CoordinatedSnapshot): EditorSnapshot {
   return {
     type: "snapshot",
@@ -517,7 +653,12 @@ export function providerPayloadIdentities(payload: PayloadConfig, providerId: st
 }
 
 function collectProviderModelIds(provider: ProviderConfig): string[] {
-  return (provider.models ?? []).map((entry) => entry.id);
+  const ids: string[] = [];
+  for (const entry of providerModels(provider)) {
+    const id = ownModelId(entry);
+    if (typeof id === "string") ids.push(id);
+  }
+  return ids;
 }
 
 /** Union of native model IDs and all private payload identities the commit can move/copy/delete. */
@@ -606,7 +747,7 @@ function applyPayloadDisposition(args: {
     if (args.explicitPayload === null) {
       payload = removePayloadDocumentValue(payload, args.toProvider, args.toModelId);
     } else {
-      payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, deepCloneJson(args.explicitPayload));
+      payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, cloneOwnOnlyJson(args.explicitPayload));
     }
     return payload;
   }
@@ -623,7 +764,7 @@ function applyPayloadDisposition(args: {
       payload = removePayloadDocumentValue(payload, args.fromProvider, args.fromModelId);
     }
     if (!targetExists || args.resolution === "replace-target") {
-      payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, deepCloneJson(args.migrateLegacy));
+      payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, cloneOwnOnlyJson(args.migrateLegacy));
     }
     return payload;
   }
@@ -639,9 +780,13 @@ function applyPayloadDisposition(args: {
 }
 
 function stripExtraPayloadFromProviderModels(provider: ProviderConfig): ProviderConfig {
-  const next = deepCloneJson(provider);
-  if (next.models) {
-    next.models = next.models.map((model) => stripLegacyExtraPayload(model));
+  const next = cloneOwnOnlyJson(provider);
+  if (hasOwnKey(next as object, "models")) {
+    setOwnValue(
+      next as Record<string, unknown>,
+      "models",
+      providerModels(next).map((model) => stripLegacyExtraPayload(model)),
+    );
   }
   return next;
 }
@@ -668,10 +813,10 @@ function collectProviderMalformedLegacyIssues(
   discard?: LegacyDiscardResolution,
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  for (const model of provider.models ?? []) {
+  for (const model of providerModels(provider)) {
     const issue = rejectMalformedLegacyUnlessDiscarded(
       model,
-      `${pathPrefix}.models[id=${model.id}].legacy`,
+      `${pathPrefix}.models[id=${String(ownModelId(model) ?? "")}].legacy`,
       discard,
     );
     if (issue) issues.push(issue);
@@ -692,7 +837,7 @@ function migrateProviderLegacyPayloads(
   const handled = new Set<string>();
   for (const modelId of modelIds) {
     handled.add(modelId);
-    const sourceModel = (provider.models ?? []).find((entry) => entry.id === modelId);
+    const sourceModel = providerModels(provider).find((entry) => ownModelId(entry) === modelId);
     const legacyRead = sourceModel ? readLegacyExtraPayload(sourceModel) : { kind: "none" as const };
     const legacy = legacyRead.kind === "valid" ? legacyRead.payload : undefined;
     const sourcePrivate = lookupModelPayload(next, fromProviderId, modelId);
@@ -807,6 +952,14 @@ export class ModelConfigActions {
     patch: ConfigPatch<ProviderConfig>,
     options?: FieldPatchOptions,
   ): Promise<ActionResult> {
+    const terminalToken = presentedResolutionToken(options);
+    const terminalBound = terminalToken ? this.takeSimple(terminalToken) : undefined;
+    try {
+      patch = cloneOwnOnlyJson(patch);
+      options = cloneActionOptions(options);
+    } catch {
+      return invalidActionInput();
+    }
     return this.run((snapshot) => {
       const existing = getProvider(snapshot.native.document!, providerId);
       if (!existing) return { type: "stale-target", path: `providers.${providerId}` };
@@ -818,7 +971,7 @@ export class ModelConfigActions {
       if (baselineConflict) return baselineConflict;
 
       if (hasOwnKey(patch, "models")) {
-        return this.buildProviderModelsPatch(snapshot, providerId, existing, patch, options);
+        return this.buildProviderModelsPatch(snapshot, providerId, existing, patch, options, terminalBound);
       }
 
       // Ordinary non-models patch must never accept own simple resolution flags/tokens.
@@ -850,6 +1003,14 @@ export class ModelConfigActions {
     patch: ConfigPatch<ModelConfig>,
     options?: FieldPatchOptions & { payload?: Record<string, unknown> | null },
   ): Promise<ActionResult> {
+    const terminalToken = presentedResolutionToken(options);
+    const terminalBound = terminalToken ? this.takeSimple(terminalToken) : undefined;
+    try {
+      patch = cloneOwnOnlyJson(patch);
+      options = cloneActionOptions(options);
+    } catch {
+      return invalidActionInput();
+    }
     return this.run((snapshot) => {
       const provider = getProvider(snapshot.native.document!, providerId);
       if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
@@ -885,7 +1046,7 @@ export class ModelConfigActions {
       let legacyResolution = resolution.legacyDiscardResolution;
 
       if (resolution.resolutionToken) {
-        const bound = this.takeSimple(resolution.resolutionToken);
+        const bound = terminalBound;
         if (!bound || bound.request.action !== "patch-model") {
           return { type: "stale-target", path: "resolution-token" };
         }
@@ -978,6 +1139,14 @@ export class ModelConfigActions {
       legacyDiscardResolution?: LegacyDiscardResolution;
     },
   ): Promise<ActionResult> {
+    const terminalToken = presentedResolutionToken(options);
+    const terminalBound = terminalToken ? this.takeSimple(terminalToken) : undefined;
+    try {
+      config = cloneOwnOnlyJson(config);
+      options = cloneActionOptions(options);
+    } catch {
+      return invalidActionInput();
+    }
     return this.run((snapshot) => {
       const bare = rejectBareSimpleResolution(options);
       if (bare) return bare;
@@ -989,7 +1158,7 @@ export class ModelConfigActions {
       let legacyResolution = resolution.legacyDiscardResolution;
 
       if (resolution.resolutionToken) {
-        const bound = this.takeSimple(resolution.resolutionToken);
+        const bound = terminalBound;
         if (!bound || bound.request.action !== "create-provider") {
           return { type: "stale-target", path: "resolution-token" };
         }
@@ -1040,7 +1209,7 @@ export class ModelConfigActions {
       const collisions = targetPayloadCollisions(snapshot.payload.document!, introduced, new Set());
       const collisionKeys = new Set(collisions.map(([p, m]) => identityKey(p, m)));
       const next = cloneModels(snapshot.native.document!);
-      setProvider(next, effectiveProviderId, stripExtraPayloadFromProviderModels(deepCloneJson(effectiveConfig)));
+      setProvider(next, effectiveProviderId, stripExtraPayloadFromProviderModels(cloneOwnOnlyJson(effectiveConfig)));
       const issues = validateOrIssues(next, this.options.validation);
       if (issues.length > 0) return { type: "validation-error", issues };
       let payload = clonePayloadDocument(snapshot.payload.document!);
@@ -1087,6 +1256,14 @@ export class ModelConfigActions {
       legacyDiscardResolution?: LegacyDiscardResolution;
     },
   ): Promise<ActionResult> {
+    const terminalToken = presentedResolutionToken(options);
+    const terminalBound = terminalToken ? this.takeSimple(terminalToken) : undefined;
+    try {
+      model = cloneOwnOnlyJson(model);
+      options = cloneActionOptions(options);
+    } catch {
+      return invalidActionInput();
+    }
     return this.run((snapshot) => {
       const bare = rejectBareSimpleResolution(options);
       if (bare) return bare;
@@ -1102,7 +1279,7 @@ export class ModelConfigActions {
       let legacyResolution = resolution.legacyDiscardResolution;
 
       if (resolution.resolutionToken) {
-        const bound = this.takeSimple(resolution.resolutionToken);
+        const bound = terminalBound;
         if (!bound || bound.request.action !== "create-model") {
           return { type: "stale-target", path: "resolution-token" };
         }
@@ -1165,7 +1342,7 @@ export class ModelConfigActions {
       );
       const next = cloneModels(snapshot.native.document!);
       const nextProvider = getProvider(next, effectiveProviderId)!;
-      nextProvider.models = [...(nextProvider.models ?? []), stripLegacyExtraPayload(deepCloneJson(effectiveModel))];
+      nextProvider.models = [...providerModels(nextProvider), stripLegacyExtraPayload(cloneOwnOnlyJson(effectiveModel))];
       const issues = validateOrIssues(next, this.options.validation);
       if (issues.length > 0) return { type: "validation-error", issues };
       let payload = clonePayloadDocument(snapshot.payload.document!);
@@ -1201,6 +1378,12 @@ export class ModelConfigActions {
     baseline: unknown,
     nextValue: unknown,
   ): Promise<ActionResult> {
+    try {
+      baseline = cloneOptionalActionValue(baseline);
+      nextValue = cloneOptionalActionValue(nextValue);
+    } catch {
+      return invalidActionInput();
+    }
     return this.run((snapshot) => {
       const provider = getProvider(snapshot.native.document!, providerId);
       if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
@@ -1230,6 +1413,12 @@ export class ModelConfigActions {
     baseline: unknown,
     nextValue: unknown,
   ): Promise<ActionResult> {
+    try {
+      baseline = cloneOptionalActionValue(baseline);
+      nextValue = cloneOptionalActionValue(nextValue);
+    } catch {
+      return invalidActionInput();
+    }
     return this.run((snapshot) => {
       const provider = getProvider(snapshot.native.document!, providerId);
       if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
@@ -1263,6 +1452,12 @@ export class ModelConfigActions {
     baseline: Record<string, unknown> | undefined,
     nextValue: Record<string, unknown> | undefined,
   ): Promise<ActionResult> {
+    try {
+      baseline = cloneOptionalActionValue(baseline);
+      nextValue = cloneOptionalActionValue(nextValue);
+    } catch {
+      return invalidActionInput();
+    }
     return this.run((snapshot) => {
       const provider = getProvider(snapshot.native.document!, providerId);
       if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
@@ -1293,7 +1488,7 @@ export class ModelConfigActions {
   }
 
   async commitProviderIdentityAction(token: IdentityPreviewToken): Promise<ActionResult> {
-    return this.commitIdentity(token);
+    return this.commitIdentity("provider", token);
   }
 
   async previewModelIdentityAction(request: ModelIdentityRequest): Promise<ActionResult> {
@@ -1301,7 +1496,7 @@ export class ModelConfigActions {
   }
 
   async commitModelIdentityAction(token: IdentityPreviewToken): Promise<ActionResult> {
-    return this.commitIdentity(token);
+    return this.commitIdentity("model", token);
   }
 
   private clearExpiryTimer(): void {
@@ -1353,11 +1548,11 @@ export class ModelConfigActions {
     this.previews.set(token, {
       binding: "identity",
       ...bound,
-      request: cloneOwnOnlyJson(bound.request),
+      request: cloneBoundData(bound.request),
       collisions: bound.collisions.map((entry) => [entry[0], entry[1]] as ModelIdentity),
       affectedIdentities: bound.affectedIdentities.map((entry) => [entry[0], entry[1]] as ModelIdentity),
       identitySet: [...bound.identitySet],
-      descriptor: deepCloneJson(bound.descriptor),
+      descriptor: cloneBoundData(bound.descriptor),
       createdAt: this.now(),
     });
     this.prunePreviews();
@@ -1370,7 +1565,7 @@ export class ModelConfigActions {
     const token = randomUUID();
     this.previews.set(token, {
       binding: "simple",
-      request: deepCloneJson(bound.request),
+      request: cloneBoundData(bound.request),
       nativeHash: bound.nativeHash,
       payloadHash: bound.payloadHash,
       collisionSet: [...bound.collisionSet],
@@ -1382,37 +1577,38 @@ export class ModelConfigActions {
     return token;
   }
 
-  private takeBound(token: IdentityPreviewToken): BoundIdentityPreview | undefined {
-    this.prunePreviews();
-    this.rescheduleExpiry();
-    const bound = this.previews.get(token);
-    if (!bound || bound.binding !== "identity") return undefined;
-    if (this.now() - bound.createdAt >= this.previewTtlMs) {
-      this.previews.delete(token);
-      this.rescheduleExpiry();
-      return undefined;
-    }
-    return {
-      ...bound,
-      request: cloneOwnOnlyJson(bound.request),
-      collisions: bound.collisions.map((entry) => [entry[0], entry[1]] as ModelIdentity),
-      affectedIdentities: bound.affectedIdentities.map((entry) => [entry[0], entry[1]] as ModelIdentity),
-      identitySet: [...bound.identitySet],
-      descriptor: deepCloneJson(bound.descriptor),
-    };
-  }
-
-  /** Consumes a simple resolution token (deleted even when returned). */
-  private takeSimple(token: IdentityPreviewToken): BoundSimpleResolution | undefined {
+  private takeBound(
+    token: IdentityPreviewToken,
+    expectedScope: "provider" | "model",
+  ): BoundIdentityPreview | undefined {
     this.prunePreviews();
     const bound = this.previews.get(token);
-    if (!bound || bound.binding !== "simple") return undefined;
+    // Every terminal attempt consumes atomically before binding/scope/type checks.
     this.previews.delete(token);
     this.rescheduleExpiry();
+    if (!bound || bound.binding !== "identity" || bound.scope !== expectedScope) return undefined;
     if (this.now() - bound.createdAt >= this.previewTtlMs) return undefined;
     return {
       ...bound,
-      request: deepCloneJson(bound.request),
+      request: cloneBoundData(bound.request),
+      collisions: bound.collisions.map((entry) => [entry[0], entry[1]] as ModelIdentity),
+      affectedIdentities: bound.affectedIdentities.map((entry) => [entry[0], entry[1]] as ModelIdentity),
+      identitySet: [...bound.identitySet],
+      descriptor: cloneBoundData(bound.descriptor),
+    };
+  }
+
+  /** Consumes a token before checking whether it is a simple binding. */
+  private takeSimple(token: IdentityPreviewToken): BoundSimpleResolution | undefined {
+    this.prunePreviews();
+    const bound = this.previews.get(token);
+    this.previews.delete(token);
+    this.rescheduleExpiry();
+    if (!bound || bound.binding !== "simple") return undefined;
+    if (this.now() - bound.createdAt >= this.previewTtlMs) return undefined;
+    return {
+      ...bound,
+      request: cloneBoundData(bound.request),
       collisionSet: [...bound.collisionSet],
       malformedSet: [...bound.malformedSet],
     };
@@ -1474,10 +1670,14 @@ export class ModelConfigActions {
     scope: "provider" | "model",
     request: ProviderIdentityRequest | ModelIdentityRequest,
   ): Promise<ActionResult> {
-    request = cloneOwnOnlyJson(request);
+    try {
+      request = cloneActionOptions(request)!;
+    } catch {
+      return invalidActionInput();
+    }
     let coordinated: CoordinatedSnapshot;
     try {
-      coordinated = readCoordinatedSnapshot(coordinatorOptions(this.options));
+      coordinated = ownOnlyActionSnapshot(readCoordinatedSnapshot(coordinatorOptions(this.options)));
     } catch {
       return { type: "recovery-required" };
     }
@@ -1511,7 +1711,7 @@ export class ModelConfigActions {
     const descriptor = this.descriptorFor(scope, request, coordinated.native.hash, coordinated.payload.hash, affected, collisions);
     const token = this.bindPreview({
       scope,
-      request: cloneOwnOnlyJson(request),
+      request: cloneBoundData(request),
       nativeHash: coordinated.native.hash,
       payloadHash: coordinated.payload.hash,
       identitySet,
@@ -1608,8 +1808,11 @@ export class ModelConfigActions {
     };
   }
 
-  private async commitIdentity(token: IdentityPreviewToken): Promise<ActionResult> {
-    const bound = this.takeBound(token);
+  private async commitIdentity(
+    expectedScope: "provider" | "model",
+    token: IdentityPreviewToken,
+  ): Promise<ActionResult> {
+    const bound = this.takeBound(token, expectedScope);
     if (!bound) {
       return { type: "stale-target", path: "identity-preview" };
     }
@@ -1858,7 +2061,8 @@ export class ModelConfigActions {
     providerId: string,
     existing: ProviderConfig,
     patch: ConfigPatch<ProviderConfig>,
-    options?: FieldPatchOptions,
+    options: FieldPatchOptions | undefined,
+    terminalBound: BoundSimpleResolution | undefined,
   ): BuildOutcome {
     const bare = rejectBareSimpleResolution(options);
     if (bare) return bare;
@@ -1879,7 +2083,7 @@ export class ModelConfigActions {
     }
 
     if (resolution.resolutionToken) {
-      const bound = this.takeSimple(resolution.resolutionToken);
+      const bound = terminalBound;
       if (!bound || bound.request.action !== "patch-provider-models") {
         return { type: "stale-target", path: "resolution-token" };
       }
@@ -1949,7 +2153,7 @@ export class ModelConfigActions {
         : legacyOld.kind === "valid"
           ? legacyOld.payload
           : undefined;
-      stripped.push(stripLegacyExtraPayload(deepCloneJson(model)));
+      stripped.push(stripLegacyExtraPayload(cloneOwnOnlyJson(model)));
 
       const privateExists = lookupModelPayload(payload, effectiveProviderId, model.id) !== undefined;
       const isNew = !oldById.has(model.id);
@@ -2055,7 +2259,7 @@ export class ModelConfigActions {
     }
 
     // Start from fresh source; apply managed patch without replacing models from stale controller state.
-    let providerBody = deepCloneJson(source);
+    let providerBody = cloneOwnOnlyJson(source);
     if (request.kind === "rename" && request.providerPatch) {
       providerBody = mergeProviderConfig(providerBody, stripModelsFromProviderPatch(request.providerPatch));
     }
@@ -2149,7 +2353,7 @@ export class ModelConfigActions {
 
     const patched = request.modelPatch
       ? mergeModelConfig(existing, request.modelPatch)
-      : deepCloneJson(existing);
+      : cloneOwnOnlyJson(existing);
     const body = stripLegacyExtraPayload(patched);
     body.id = request.targetModelId;
 
@@ -2299,9 +2503,7 @@ export class ModelConfigActions {
     const lockMapped = mapLockResult(result);
     if (lockMapped) return lockMapped;
     if (result.type === "committed" || result.type === "unchanged") {
-      const snapshot = this.readEditorSnapshot();
-      if (snapshot.type === "recovery-required") return snapshot;
-      return { type: "success", snapshot };
+      return { type: "success" };
     }
     return { type: "recovery-required" };
   }
