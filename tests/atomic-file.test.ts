@@ -66,6 +66,21 @@ test("preserves old bytes and cleans its temp when failure is injected before re
   assert.deepEqual(temporaryEntries(agentDir), []);
 }));
 
+test("rejects a destination changed by a non-throwing hook after the initial precondition", () => withTempAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "models.json");
+  fs.writeFileSync(filePath, "old");
+
+  assert.throws(() => atomicReplace(filePath, Buffer.from("new"), {
+    expectedHash: hashArtifact(Buffer.from("old")),
+    beforeRename() {
+      fs.writeFileSync(filePath, "concurrent");
+    },
+  }), /changed before replacement/);
+
+  assert.equal(fs.readFileSync(filePath, "utf8"), "concurrent");
+  assert.deepEqual(temporaryEntries(agentDir), []);
+}));
+
 test("rejects a changed destination precondition without replacing it", () => withTempAgentDir((agentDir) => {
   const filePath = path.join(agentDir, "models.json");
   fs.writeFileSync(filePath, "changed");

@@ -92,6 +92,8 @@ export function atomicReplace(filePath: string, bytes: Uint8Array, options: Atom
     fs.closeSync(descriptor);
     descriptor = undefined;
 
+    options.beforeRename?.();
+
     if (options.expectedHash !== undefined) {
       const currentHash = readArtifact(filePath).hash;
       if (currentHash !== options.expectedHash) {
@@ -99,7 +101,6 @@ export function atomicReplace(filePath: string, bytes: Uint8Array, options: Atom
       }
     }
 
-    options.beforeRename?.();
     fs.renameSync(temporary.tempPath, filePath);
     syncDirectory(directory);
   } catch (error) {
