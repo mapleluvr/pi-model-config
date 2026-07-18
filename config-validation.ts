@@ -77,6 +77,31 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function hasOwn(object: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function getOwn(object: object, key: string): unknown {
+  return hasOwn(object, key) ? (object as Record<string, unknown>)[key] : undefined;
+}
+
+/**
+ * Deep own-key materialization onto null prototypes.
+ * Inherited Object.prototype / custom-prototype fields are never observed by validation.
+ */
+export function materializeOwnOnly(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => materializeOwnOnly(entry));
+  }
+  if (!isObject(value)) return value;
+  const out: Record<string, unknown> = Object.create(null);
+  for (const key of Object.keys(value)) {
+    if (!hasOwn(value, key)) continue;
+    out[key] = materializeOwnOnly(getOwn(value, key));
+  }
+  return out;
+}
+
 function childPath(parent: string, key: string): string {
   return `${parent}.${key}`;
 }
@@ -91,7 +116,9 @@ function validateOptionalNonEmptyString(
   path: string,
   issues: ValidationIssue[],
 ): void {
-  if (object[key] !== undefined && (typeof object[key] !== "string" || object[key].trim().length === 0)) {
+  if (!hasOwn(object, key)) return;
+  const value = getOwn(object, key);
+  if (typeof value !== "string" || value.trim().length === 0) {
     addIssue(issues, childPath(path, key), "must be a non-empty string when present");
   }
 }
@@ -102,7 +129,8 @@ function validateBoolean(
   path: string,
   issues: ValidationIssue[],
 ): void {
-  if (object[key] !== undefined && typeof object[key] !== "boolean") {
+  if (!hasOwn(object, key)) return;
+  if (typeof getOwn(object, key) !== "boolean") {
     addIssue(issues, childPath(path, key), "must be a boolean when present");
   }
 }
@@ -112,8 +140,9 @@ function validateHeaders(value: unknown, path: string, issues: ValidationIssue[]
     addIssue(issues, path, "must be an object with string values");
     return;
   }
-  for (const [key, headerValue] of Object.entries(value)) {
-    if (typeof headerValue !== "string") addIssue(issues, childPath(path, key), "must be a string");
+  for (const key of Object.keys(value)) {
+    if (!hasOwn(value, key)) continue;
+    if (typeof getOwn(value, key) !== "string") addIssue(issues, childPath(path, key), "must be a string");
   }
 }
 
@@ -344,17 +373,24 @@ function validateModelLikeFields(
 ): void {
   validateOptionalNonEmptyString(value, "name", path, issues);
   validateBoolean(value, "reasoning", path, issues);
-  if (value.thinkingLevelMap !== undefined) validateThinkingLevelMap(value.thinkingLevelMap, childPath(path, "thinkingLevelMap"), issues);
-  if (value.input !== undefined) validateInput(value.input, childPath(path, "input"), issues);
-  if (value.contextWindow !== undefined) validatePositiveInteger(value.contextWindow, childPath(path, "contextWindow"), issues);
-  if (value.maxTokens !== undefined) validatePositiveInteger(value.maxTokens, childPath(path, "maxTokens"), issues);
-  if (value.cost !== undefined) {
-    const costPath = childPath(path, "cost");
-    if (override) validateOverrideCost(value.cost, costPath, issues);
-    else validateModelCost(value.cost, costPath, issues);
+  if (hasOwn(value, "thinkingLevelMap")) {
+    validateThinkingLevelMap(getOwn(value, "thinkingLevelMap"), childPath(path, "thinkingLevelMap"), issues);
   }
-  if (value.headers !== undefined) validateHeaders(value.headers, childPath(path, "headers"), issues);
-  if (value.compat !== undefined) validateCompat(value.compat, childPath(path, "compat"), issues);
+  if (hasOwn(value, "input")) validateInput(getOwn(value, "input"), childPath(path, "input"), issues);
+  if (hasOwn(value, "contextWindow")) {
+    validatePositiveInteger(getOwn(value, "contextWindow"), childPath(path, "contextWindow"), issues);
+  }
+  if (hasOwn(value, "maxTokens")) {
+    validatePositiveInteger(getOwn(value, "maxTokens"), childPath(path, "maxTokens"), issues);
+  }
+  if (hasOwn(value, "cost")) {
+    const costPath = childPath(path, "cost");
+    const cost = getOwn(value, "cost");
+    if (override) validateOverrideCost(cost, costPath, issues);
+    else validateModelCost(cost, costPath, issues);
+  }
+  if (hasOwn(value, "headers")) validateHeaders(getOwn(value, "headers"), childPath(path, "headers"), issues);
+  if (hasOwn(value, "compat")) validateCompat(getOwn(value, "compat"), childPath(path, "compat"), issues);
 }
 
 function validateModel(value: unknown, path: string, issues: ValidationIssue[]): Record<string, unknown> | undefined {
@@ -362,7 +398,8 @@ function validateModel(value: unknown, path: string, issues: ValidationIssue[]):
     addIssue(issues, path, "must be an object");
     return undefined;
   }
-  if (typeof value.id !== "string" || value.id.trim().length === 0) {
+  const id = getOwn(value, "id");
+  if (typeof id !== "string" || id.trim().length === 0) {
     addIssue(issues, childPath(path, "id"), "must be a non-empty string");
   }
   validateOptionalNonEmptyString(value, "api", path, issues);
@@ -395,55 +432,66 @@ function validateProvider(
     validateOptionalNonEmptyString(value, key, path, issues);
   }
   validateBoolean(value, "authHeader", path, issues);
-  if (value.headers !== undefined) validateHeaders(value.headers, childPath(path, "headers"), issues);
-  if (value.compat !== undefined) validateCompat(value.compat, childPath(path, "compat"), issues);
+  if (hasOwn(value, "headers")) validateHeaders(getOwn(value, "headers"), childPath(path, "headers"), issues);
+  if (hasOwn(value, "compat")) validateCompat(getOwn(value, "compat"), childPath(path, "compat"), issues);
 
   let models: Array<Record<string, unknown> | undefined> | undefined;
-  if (value.models !== undefined) {
+  const modelsValue = hasOwn(value, "models") ? getOwn(value, "models") : undefined;
+  if (modelsValue !== undefined) {
     const modelsPath = childPath(path, "models");
-    if (!Array.isArray(value.models)) addIssue(issues, modelsPath, "must be an array");
+    if (!Array.isArray(modelsValue)) addIssue(issues, modelsPath, "must be an array");
     else {
-      models = value.models.map((model, index) => validateModel(model, `${modelsPath}[${index}]`, issues));
+      models = modelsValue.map((model, index) => validateModel(model, `${modelsPath}[${index}]`, issues));
       const seenIds = new Set<string>();
-      value.models.forEach((model, index) => {
-        if (!isObject(model) || typeof model.id !== "string" || model.id.trim().length === 0) return;
-        if (seenIds.has(model.id)) {
+      modelsValue.forEach((model, index) => {
+        if (!isObject(model)) return;
+        const modelId = getOwn(model, "id");
+        if (typeof modelId !== "string" || modelId.trim().length === 0) return;
+        if (seenIds.has(modelId)) {
           addIssue(issues, `${modelsPath}[${index}].id`, "must be unique within the provider");
         } else {
-          seenIds.add(model.id);
+          seenIds.add(modelId);
         }
       });
     }
   }
 
   let overrideCount = 0;
-  if (value.modelOverrides !== undefined) {
+  if (hasOwn(value, "modelOverrides")) {
     const overridesPath = childPath(path, "modelOverrides");
-    if (!isObject(value.modelOverrides)) addIssue(issues, overridesPath, "must be an object");
+    const overrides = getOwn(value, "modelOverrides");
+    if (!isObject(overrides)) addIssue(issues, overridesPath, "must be an object");
     else {
-      overrideCount = Object.keys(value.modelOverrides).length;
-      for (const [modelId, override] of Object.entries(value.modelOverrides)) {
-        validateOverride(override, childPath(overridesPath, modelId), issues);
+      overrideCount = Object.keys(overrides).filter((key) => hasOwn(overrides, key)).length;
+      for (const modelId of Object.keys(overrides)) {
+        if (!hasOwn(overrides, modelId)) continue;
+        validateOverride(getOwn(overrides, modelId), childPath(overridesPath, modelId), issues);
       }
     }
   }
 
-  const hasModels = Array.isArray(value.models) && value.models.length > 0;
+  const hasModels = Array.isArray(modelsValue) && modelsValue.length > 0;
+  const ownBaseUrl = hasOwn(value, "baseUrl") ? getOwn(value, "baseUrl") : undefined;
+  const ownApi = hasOwn(value, "api") ? getOwn(value, "api") : undefined;
   if (!options.builtInProviders.has(providerId) && hasModels) {
-    if (typeof value.baseUrl !== "string" || value.baseUrl.trim().length === 0) {
+    if (typeof ownBaseUrl !== "string" || ownBaseUrl.trim().length === 0) {
       addIssue(issues, childPath(path, "baseUrl"), "is required for a custom provider with models");
     }
     models?.forEach((model, index) => {
-      if (model !== undefined && (typeof value.api !== "string" || value.api.trim().length === 0)
-        && (typeof model.api !== "string" || model.api.trim().length === 0)) {
+      if (model === undefined) return;
+      const modelApi = hasOwn(model, "api") ? getOwn(model, "api") : undefined;
+      if ((typeof ownApi !== "string" || ownApi.trim().length === 0)
+        && (typeof modelApi !== "string" || modelApi.trim().length === 0)) {
         addIssue(issues, `${childPath(path, "models")}[${index}].api`, "must be defined by the model or inherited from its provider");
       }
     });
   }
 
   const isEmptyProvider = !hasModels;
-  const retainsEmptyProviderData = value.baseUrl !== undefined || value.headers !== undefined
-    || value.compat !== undefined || overrideCount > 0;
+  const retainsEmptyProviderData = ownBaseUrl !== undefined
+    || hasOwn(value, "headers")
+    || hasOwn(value, "compat")
+    || overrideCount > 0;
   if (isEmptyProvider && !retainsEmptyProviderData) {
     addIssue(issues, path, "an empty provider must retain baseUrl, headers, compat, or non-empty modelOverrides");
   }
@@ -459,14 +507,16 @@ export function validateModelsCandidate(
     return issues;
   }
   // Own-key only: never treat inherited Object.prototype.providers as the document map.
-  if (!Object.prototype.hasOwnProperty.call(candidate, "providers") || !isObject((candidate as { providers?: unknown }).providers)) {
+  if (!hasOwn(candidate, "providers") || !isObject(getOwn(candidate, "providers"))) {
     addIssue(issues, "$.providers", "must be an object");
     return issues;
   }
-  const providers = (candidate as { providers: Record<string, unknown> }).providers;
+  // Materialize onto null prototypes so inherited prototype fields never satisfy required validation.
+  const materialized = materializeOwnOnly(candidate) as Record<string, unknown>;
+  const providers = getOwn(materialized, "providers") as Record<string, unknown>;
   for (const providerId of Object.keys(providers)) {
-    if (!Object.prototype.hasOwnProperty.call(providers, providerId)) continue;
-    validateProvider(providerId, providers[providerId], childPath("$.providers", providerId), options, issues);
+    if (!hasOwn(providers, providerId)) continue;
+    validateProvider(providerId, getOwn(providers, providerId), childPath("$.providers", providerId), options, issues);
   }
   return issues;
 }

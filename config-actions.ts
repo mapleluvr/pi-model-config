@@ -23,11 +23,12 @@ import { deleteOwnKey, getOwnValue, hasOwnKey, setOwnValue } from "./own-keys.ts
 import {
   deepCloneJson,
   deepEqualJson,
+  describeSubtreePresence,
   mergeModelConfig,
   mergeProviderConfig,
-  normalizeSubtreeBaseline,
   readModelSubtree,
   readProviderSubtree,
+  subtreePresenceEqual,
   writeModelSubtree,
   writeProviderSubtree,
   type ConfigPatch,
@@ -69,6 +70,10 @@ export type ActionResult =
     payloadHash?: string;
     path?: string;
     preview?: IdentityPreviewDescriptor & { token: IdentityPreviewToken };
+    /** Fresh simple-action resolution token when drift still requires user review. */
+    resolutionToken?: IdentityPreviewToken;
+    collisions?: ModelIdentity[];
+    malformedIdentities?: ModelIdentity[];
   }
   | {
     type: "validation-error";
@@ -165,7 +170,12 @@ export type ModelIdentityRequest =
     payloadCollisionResolution?: PayloadCollisionResolution;
     legacyDiscardResolution?: LegacyDiscardResolution;
   }
-  | { kind: "delete"; providerId: string; modelId: string };
+  | {
+    kind: "delete";
+    providerId: string;
+    modelId: string;
+    legacyDiscardResolution?: LegacyDiscardResolution;
+  };
 
 export interface FieldPatchOptions {
   /** Exact per-field baselines captured when the editor opened. Drift on an edited field conflicts. */
@@ -256,7 +266,13 @@ const DEFAULT_MAX_PREVIEWS = 32;
 
 type BuildOutcome =
   | { type: "mutation"; native: ModelsConfig; payload: PayloadConfig; affectedIdentities: ModelIdentity[] }
-  | { type: "stale-target"; path?: string }
+  | {
+    type: "stale-target";
+    path?: string;
+    simpleBind?: Omit<BoundSimpleResolution, "createdAt" | "binding">;
+    collisions?: ModelIdentity[];
+    malformedIdentities?: ModelIdentity[];
+  }
   | {
     type: "validation-error";
     issues: ValidationIssue[];
@@ -311,6 +327,20 @@ function rejectBareSimpleResolution(options?: {
     return { type: "stale-target", path: "resolution-token" };
   }
   return undefined;
+}
+
+/** Strip prior payload/legacy resolutions so a refreshed identity preview cannot auto-apply them. */
+function clearIdentityResolutions(
+  request: ProviderIdentityRequest | ModelIdentityRequest,
+): ProviderIdentityRequest | ModelIdentityRequest {
+  const next = deepCloneJson(request) as ProviderIdentityRequest | ModelIdentityRequest;
+  if ("payloadCollisionResolution" in next) {
+    delete (next as { payloadCollisionResolution?: PayloadCollisionResolution }).payloadCollisionResolution;
+  }
+  if ("legacyDiscardResolution" in next) {
+    delete (next as { legacyDiscardResolution?: LegacyDiscardResolution }).legacyDiscardResolution;
+  }
+  return next;
 }
 
 function cloneModels(config: ModelsConfig): ModelsConfig {
@@ -376,22 +406,26 @@ export function parseLegacyExtraPayload(
   if (value.length === 0) return { ok: true, payload: {}, empty: true };
   const payload: Record<string, unknown> = {};
   for (const row of value) {
-    if (
-      !isPlainObject(row)
-      || typeof row.key !== "string"
-      || !row.key.trim()
-      || typeof row.type !== "string"
-      || typeof row.value !== "string"
-    ) {
+    // Require own key/type/value — never inherit from Object.prototype under polluted {}.row.
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
       return { ok: false, reason: "legacy row is malformed" };
     }
-    if (row.type === "string") {
-      setOwnValue(payload, row.key, row.value);
-    } else if (row.type === "bool" && (row.value === "true" || row.value === "false")) {
-      setOwnValue(payload, row.key, row.value === "true");
-    } else if (row.type === "json") {
+    if (!hasOwnKey(row, "key") || !hasOwnKey(row, "type") || !hasOwnKey(row, "value")) {
+      return { ok: false, reason: "legacy row is malformed" };
+    }
+    const key = getOwnValue(row as Record<string, unknown>, "key");
+    const type = getOwnValue(row as Record<string, unknown>, "type");
+    const rowValue = getOwnValue(row as Record<string, unknown>, "value");
+    if (typeof key !== "string" || !key.trim() || typeof type !== "string" || typeof rowValue !== "string") {
+      return { ok: false, reason: "legacy row is malformed" };
+    }
+    if (type === "string") {
+      setOwnValue(payload, key, rowValue);
+    } else if (type === "bool" && (rowValue === "true" || rowValue === "false")) {
+      setOwnValue(payload, key, rowValue === "true");
+    } else if (type === "json") {
       try {
-        setOwnValue(payload, row.key, JSON.parse(row.value));
+        setOwnValue(payload, key, JSON.parse(rowValue));
       } catch {
         return { ok: false, reason: "legacy json row is invalid" };
       }
@@ -766,6 +800,15 @@ export class ModelConfigActions {
         return this.buildProviderModelsPatch(snapshot, providerId, existing, patch, options);
       }
 
+      // Ordinary non-models patch must never accept simple resolution flags/tokens.
+      if (
+        options?.resolutionToken !== undefined
+        || options?.payloadCollisionResolution !== undefined
+        || options?.legacyDiscardResolution !== undefined
+      ) {
+        return { type: "stale-target", path: "resolution-token" };
+      }
+
       const next = cloneModels(snapshot.native.document!);
       setProvider(next, providerId, mergeProviderConfig(existing, stripModelsFromProviderPatch(patch)));
       const issues = validateOrIssues(next, this.options.validation);
@@ -1132,10 +1175,10 @@ export class ModelConfigActions {
     return this.run((snapshot) => {
       const provider = getProvider(snapshot.native.document!, providerId);
       if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
-      const current = readProviderSubtree(provider, key);
-      const normalizedCurrent = current === undefined || current === null ? {} : current;
-      const normalizedBaseline = baseline === undefined || baseline === null ? {} : baseline;
-      if (!deepEqualJson(normalizedCurrent, normalizedBaseline)) {
+      const current = Object.hasOwn(provider as object, key)
+        ? (provider as Record<string, unknown>)[key]
+        : undefined;
+      if (!subtreePresenceEqual(describeSubtreePresence(current), describeSubtreePresence(baseline))) {
         return { type: "subtree-conflict", path: `providers.${providerId}.${key}` };
       }
       const next = cloneModels(snapshot.native.document!);
@@ -1164,17 +1207,11 @@ export class ModelConfigActions {
       const index = findModelIndex(provider, modelId);
       if (index < 0) return { type: "stale-target", path: `providers.${providerId}.models:${modelId}` };
       const model = provider.models![index]!;
-      const current = readModelSubtree(model, key);
-      if (key === "cost") {
-        if (!deepEqualJson(normalizeSubtreeBaseline(current), normalizeSubtreeBaseline(baseline))) {
-          return { type: "subtree-conflict", path: `providers.${providerId}.models.${modelId}.${key}` };
-        }
-      } else {
-        const normalizedCurrent = current === undefined || current === null ? {} : current;
-        const normalizedBaseline = baseline === undefined || baseline === null ? {} : baseline;
-        if (!deepEqualJson(normalizedCurrent, normalizedBaseline)) {
-          return { type: "subtree-conflict", path: `providers.${providerId}.models.${modelId}.${key}` };
-        }
+      const current = Object.hasOwn(model as object, key)
+        ? (model as Record<string, unknown>)[key]
+        : undefined;
+      if (!subtreePresenceEqual(describeSubtreePresence(current), describeSubtreePresence(baseline))) {
+        return { type: "subtree-conflict", path: `providers.${providerId}.models.${modelId}.${key}` };
       }
       const next = cloneModels(snapshot.native.document!);
       const nextProvider = getProvider(next, providerId)!;
@@ -1385,7 +1422,18 @@ export class ModelConfigActions {
           : undefined,
       };
     }
-    if (outcome.type === "stale-target") return { type: "stale-target", path: outcome.path };
+    if (outcome.type === "stale-target") {
+      const token = outcome.simpleBind ? this.bindSimple(outcome.simpleBind) : undefined;
+      return {
+        type: "stale-target",
+        path: outcome.path,
+        nativeHash: outcome.simpleBind?.nativeHash,
+        payloadHash: outcome.simpleBind?.payloadHash,
+        resolutionToken: token,
+        collisions: outcome.collisions,
+        malformedIdentities: outcome.malformedIdentities,
+      };
+    }
     if (outcome.type === "native-collision") return outcome;
     if (outcome.type === "subtree-conflict") {
       return { type: "subtree-conflict", path: outcome.path, nativeHash: "", payloadHash: "" };
@@ -1548,58 +1596,43 @@ export class ModelConfigActions {
         || snapshot.payload.hash !== bound.payloadHash
         || !deepEqualJson(identitySet, bound.identitySet)
       ) {
-        // Rebuild a refreshed preview from the bound request under the live snapshot.
+        // Clear prior resolutions so a refreshed token cannot silently apply an old choice.
+        const clearedRequest = clearIdentityResolutions(bound.request);
         const rebuilt = bound.scope === "provider"
-          ? this.buildProviderIdentity(snapshot, bound.request as ProviderIdentityRequest)
-          : this.buildModelIdentity(snapshot, bound.request as ModelIdentityRequest);
-        if (rebuilt.type === "payload-collision") {
-          refreshedOnDrift = {
-            type: "payload-collision",
-            collisions: rebuilt.collisions,
-            affectedIdentities: rebuilt.affectedIdentities,
-            nativeHash: snapshot.native.hash,
-            payloadHash: snapshot.payload.hash,
-            scope: rebuilt.scope,
-            kind: rebuilt.kind,
-          };
-          return { type: "stale-target", path: "identity-preview" };
-        }
-        if (rebuilt.type === "mutation" || rebuilt.type === "unchanged") {
-          const affected = rebuilt.type === "mutation"
-            ? rebuilt.affectedIdentities
-            : this.previewAffected(bound.scope, bound.request, snapshot);
-          const collisions = this.resolvedCollisions(bound.scope, bound.request, snapshot);
-          const identitySetNow = bound.scope === "provider"
-            ? providerIdentitySet(snapshot.native.document!)
-            : modelIdentitySet(snapshot.native.document!);
-          const descriptor = this.descriptorFor(
-            bound.scope,
-            bound.request,
-            snapshot.native.hash,
-            snapshot.payload.hash,
-            affected,
-            collisions,
-          );
-          const newToken = this.bindPreview({
-            scope: bound.scope,
-            request: deepCloneJson(bound.request),
-            nativeHash: snapshot.native.hash,
-            payloadHash: snapshot.payload.hash,
-            identitySet: identitySetNow,
-            collisions,
-            affectedIdentities: affected,
-            descriptor,
-          });
-          refreshedOnDrift = {
-            type: "stale-target",
-            nativeHash: snapshot.native.hash,
-            payloadHash: snapshot.payload.hash,
-            path: "identity-preview",
-            preview: { ...descriptor, token: newToken },
-          };
-          return { type: "stale-target", path: "identity-preview" };
-        }
-        refreshedOnDrift = this.mapBuildFailure(rebuilt, snapshot);
+          ? this.buildProviderIdentity(snapshot, clearedRequest as ProviderIdentityRequest)
+          : this.buildModelIdentity(snapshot, clearedRequest as ModelIdentityRequest);
+        const affected = rebuilt.type === "mutation"
+          ? rebuilt.affectedIdentities
+          : this.previewAffected(bound.scope, clearedRequest, snapshot);
+        const collisions = this.resolvedCollisions(bound.scope, clearedRequest, snapshot);
+        const identitySetNow = bound.scope === "provider"
+          ? providerIdentitySet(snapshot.native.document!)
+          : modelIdentitySet(snapshot.native.document!);
+        const descriptor = this.descriptorFor(
+          bound.scope,
+          clearedRequest,
+          snapshot.native.hash,
+          snapshot.payload.hash,
+          affected,
+          collisions,
+        );
+        const newToken = this.bindPreview({
+          scope: bound.scope,
+          request: deepCloneJson(clearedRequest),
+          nativeHash: snapshot.native.hash,
+          payloadHash: snapshot.payload.hash,
+          identitySet: identitySetNow,
+          collisions,
+          affectedIdentities: affected,
+          descriptor,
+        });
+        refreshedOnDrift = {
+          type: "stale-target",
+          nativeHash: snapshot.native.hash,
+          payloadHash: snapshot.payload.hash,
+          path: "identity-preview",
+          preview: { ...descriptor, token: newToken },
+        };
         return { type: "stale-target", path: "identity-preview" };
       }
 
@@ -1764,12 +1797,22 @@ export class ModelConfigActions {
     request: SimpleBoundRequest,
     live: { collisionSet: string[]; malformedSet: string[]; collisions: ModelIdentity[]; malformed: ModelIdentity[]; issues: ValidationIssue[] },
   ): BuildOutcome {
-    const scope = request.action === "create-model" || request.action === "patch-model" ? "model" : "provider";
-    const kind = request.action === "patch-provider-models" ? "models-patch" : "create";
+    // Drift always returns stale-target. If review is still required, bind a fresh token (never auto-apply).
     if (live.collisionSet.length > 0 || live.malformedSet.length > 0) {
-      return this.simpleNeedsResolution(snapshot, request, live, scope, kind);
+      return {
+        type: "stale-target",
+        path: "resolution-token",
+        simpleBind: {
+          request,
+          nativeHash: snapshot.native.hash,
+          payloadHash: snapshot.payload.hash,
+          collisionSet: live.collisionSet,
+          malformedSet: live.malformedSet,
+        },
+        collisions: live.collisions,
+        malformedIdentities: live.malformed,
+      };
     }
-    // Drift cleared requirements — still stale so caller re-reads; rebind empty sets would allow unreviewed write.
     return {
       type: "stale-target",
       path: "resolution-token",
@@ -2027,6 +2070,15 @@ export class ModelConfigActions {
     const nextProvider = next.providers[request.providerId]!;
     nextProvider.models = [...(nextProvider.models ?? [])];
 
+    // Malformed legacy must be checked for every model identity op including delete, before mutation.
+    const discard = request.legacyDiscardResolution;
+    const malformed = rejectMalformedLegacyUnlessDiscarded(
+      existing,
+      `$.providers.${request.providerId}.models[id=${request.modelId}].legacy`,
+      discard,
+    );
+    if (malformed) return { type: "validation-error", issues: [malformed] };
+
     if (request.kind === "delete") {
       nextProvider.models.splice(index, 1);
       payload = removePayloadDocumentValue(payload, request.providerId, request.modelId);
@@ -2072,15 +2124,6 @@ export class ModelConfigActions {
 
     const sourcePrivate = lookupModelPayload(snapshot.payload.document!, request.providerId, request.modelId);
     const legacyRead = readLegacyExtraPayload(existing);
-    const discard = request.kind === "delete" ? undefined : request.legacyDiscardResolution;
-    if (request.kind !== "delete") {
-      const malformed = rejectMalformedLegacyUnlessDiscarded(
-        existing,
-        `$.providers.${request.providerId}.models[id=${request.modelId}].legacy`,
-        discard,
-      );
-      if (malformed) return { type: "validation-error", issues: [malformed] };
-    }
     const migrateLegacy = request.kind === "rename" && request.migrateLegacyExtraPayload !== undefined
       ? request.migrateLegacyExtraPayload
       : legacyRead.kind === "valid" ? legacyRead.payload : undefined;
@@ -2185,6 +2228,7 @@ export class ModelConfigActions {
           coordinated = undefined;
         }
         if (buildError.type === "stale-target") {
+          if (buildError.simpleBind) return this.attachSimpleToken(buildError);
           return {
             type: "stale-target",
             nativeHash: coordinated?.native.hash,

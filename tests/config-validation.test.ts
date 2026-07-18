@@ -216,3 +216,60 @@ test("rejects duplicate model ids within a provider", () => {
   });
   assert.ok(paths.includes("$.providers.native.models[1].id"));
 });
+
+
+test("inherited Object.prototype and custom-prototype fields never satisfy validation", () => {
+  const proto = Object.prototype as Record<string, unknown>;
+  const previousBase = proto.baseUrl;
+  const previousApi = proto.api;
+  const previousModels = proto.models;
+  try {
+    Object.defineProperty(Object.prototype, "baseUrl", {
+      value: "http://evil",
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+    Object.defineProperty(Object.prototype, "api", {
+      value: "openai-completions",
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+    Object.defineProperty(Object.prototype, "models", {
+      value: [{ id: "evil" }],
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+
+    const polluted = {
+      providers: {
+        custom: {
+          models: [{ id: "m1" }],
+        },
+      },
+    };
+    const paths = issuePaths(polluted);
+    assert.ok(paths.includes("$.providers.custom.baseUrl"));
+
+    const customProto = { baseUrl: "http://custom", api: "openai-completions" };
+    const provider = Object.create(customProto) as Record<string, unknown>;
+    provider.models = [{ id: "m2" }];
+    const paths2 = issuePaths({ providers: { custom2: provider } });
+    assert.ok(paths2.includes("$.providers.custom2.baseUrl"));
+  } finally {
+    if (previousBase === undefined) delete proto.baseUrl;
+    else Object.defineProperty(Object.prototype, "baseUrl", {
+      value: previousBase, configurable: true, enumerable: true, writable: true,
+    });
+    if (previousApi === undefined) delete proto.api;
+    else Object.defineProperty(Object.prototype, "api", {
+      value: previousApi, configurable: true, enumerable: true, writable: true,
+    });
+    if (previousModels === undefined) delete proto.models;
+    else Object.defineProperty(Object.prototype, "models", {
+      value: previousModels, configurable: true, enumerable: true, writable: true,
+    });
+  }
+});

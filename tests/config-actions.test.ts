@@ -3,7 +3,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { ModelConfigActions, type ActionResult } from "../config-actions.ts";
+import {
+  ModelConfigActions, type ActionResult,
+  parseLegacyExtraPayload,
+} from "../config-actions.ts";
 import { getModelsPath } from "../config.ts";
 import {
   commitCoordinatedMutation,
@@ -170,8 +173,9 @@ test("nested subtree save conflicts only on the exact edited subtree", async () 
   const snapshot = actions.readEditorSnapshot();
   assert.equal(snapshot.type, "snapshot");
   if (snapshot.type !== "snapshot") return;
-  const baselineHeaders = structuredClone(snapshot.native.providers.local!.headers ?? {});
-  const baselineCompat = structuredClone(snapshot.native.providers.local!.compat ?? {});
+  // Exact presence: absent provider headers/compat (not normalized to {}).
+  const baselineHeaders = snapshot.native.providers.local!.headers;
+  const baselineCompat = snapshot.native.providers.local!.compat;
 
   const external = readNative(agentDir);
   external.providers.local!.compat = { supportsStore: true };
@@ -182,6 +186,7 @@ test("nested subtree save conflicts only on the exact edited subtree", async () 
   assert.deepEqual(readNative(agentDir).providers.local!.headers, { "X-New": "2" });
   assert.deepEqual(readNative(agentDir).providers.local!.compat, { supportsStore: true });
 
+  // Baseline was absent; external wrote {}-like object so exact presence differs.
   const conflict = await actions.saveProviderSubtree("local", "compat", baselineCompat, { supportsTemperature: false });
   assert.equal(conflict.type, "subtree-conflict");
   assertDiagnosticSecretFree(conflict);
@@ -1575,8 +1580,21 @@ test("simple-action resolution tokens reject drift and forged bare resolutions",
     resolutionToken: first.resolutionToken,
     payloadCollisionResolution: "replace-target",
   });
-  assert.ok(drifted.type === "stale-target" || drifted.type === "payload-collision");
+  assert.equal(drifted.type, "stale-target");
   assert.equal(Object.hasOwn(readNative(agentDir).providers, "p"), false);
+  if (drifted.type === "stale-target" && drifted.resolutionToken) {
+    // Fresh token requires new confirmation; old replace resolution must not auto-apply.
+    const auto = await actions.createProvider("ignored", { baseUrl: "x", api: "openai-completions", models: [] }, {
+      resolutionToken: drifted.resolutionToken,
+    });
+    assert.ok(auto.type === "payload-collision" || auto.type === "stale-target" || auto.type === "validation-error");
+    assert.equal(Object.hasOwn(readNative(agentDir).providers, "p"), false);
+    if (auto.type === "payload-collision" && auto.resolutionToken) {
+      actions.discardResolutionToken(auto.resolutionToken);
+    } else if (auto.type === "stale-target" && auto.resolutionToken) {
+      actions.discardResolutionToken(auto.resolutionToken);
+    }
+  }
 
   writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "p", "m1", { a: 1 }));
   const again = await actions.createProvider("p", {
@@ -1591,9 +1609,12 @@ test("simple-action resolution tokens reject drift and forged bare resolutions",
     resolutionToken: again.resolutionToken,
     payloadCollisionResolution: "reuse-target",
   });
-  assert.ok(hashDrift.type === "stale-target" || hashDrift.type === "payload-collision");
+  assert.equal(hashDrift.type, "stale-target");
   assert.equal(Object.hasOwn(readNative(agentDir).providers, "p"), false);
   assert.equal(Object.hasOwn(readNative(agentDir).providers, "ignored"), false);
+  if (hashDrift.type === "stale-target" && hashDrift.resolutionToken) {
+    actions.discardResolutionToken(hashDrift.resolutionToken);
+  }
 
   const forged = await actions.createProvider("p", {
     baseUrl: "http://localhost",
@@ -1618,4 +1639,234 @@ test("simple-action resolution tokens reject drift and forged bare resolutions",
   assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), false);
   assert.equal(lookupModelPayload(readPayload(agentDir), "local", "e"), undefined);
   assert.equal(Object.keys(readPayload(agentDir).extraPayloads).length, 0);
+}));
+
+
+test("exact subtree presence distinguishes absent null and empty object", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("one", { name: "One" })],
+      },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+
+  const writeAbsent = await actions.saveProviderSubtree("local", "headers", undefined, { "X": "1" });
+  assert.equal(writeAbsent.type, "success");
+
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("one", { name: "One" })],
+      },
+    },
+  });
+  const n = readNative(agentDir);
+  n.providers.local!.headers = {};
+  writeNative(agentDir, n);
+  const absentVsEmpty = await actions.saveProviderSubtree("local", "headers", undefined, { "X": "1" });
+  assert.equal(absentVsEmpty.type, "subtree-conflict");
+
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("one", { name: "One" })],
+      },
+    },
+  });
+  const modelConflict = await actions.saveModelSubtree("local", "one", "headers", {}, { "H": "1" });
+  assert.equal(modelConflict.type, "subtree-conflict");
+
+  const nullConflict = await actions.saveModelSubtree("local", "one", "compat", null, { supportsStore: true });
+  assert.equal(nullConflict.type, "subtree-conflict");
+
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        headers: { b: "2", a: "1" },
+        models: [model("one", { headers: { z: "9", y: "8" }, thinkingLevelMap: { off: null, high: "high" } })],
+      },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  const okP = await actions.saveProviderSubtree("local", "headers", { a: "1", b: "2" }, { a: "1", b: "2", c: "3" });
+  assert.equal(okP.type, "success");
+  const okM = await actions.saveModelSubtree("local", "one", "headers", { y: "8", z: "9" }, { y: "8" });
+  assert.equal(okM.type, "success");
+  const okMap = await actions.saveModelSubtree("local", "one", "thinkingLevelMap", { high: "high", off: null }, { off: null });
+  assert.equal(okMap.type, "success");
+}));
+
+test("legacy rows require own key type value; polluted empty rows are malformed", async () => withAgentDir(async (agentDir, actions) => {
+  const proto = Object.prototype as Record<string, unknown>;
+  const prevKey = proto.key;
+  const prevType = proto.type;
+  const prevValue = proto.value;
+  try {
+    Object.defineProperty(Object.prototype, "key", { value: "evil", configurable: true, enumerable: true, writable: true });
+    Object.defineProperty(Object.prototype, "type", { value: "string", configurable: true, enumerable: true, writable: true });
+    Object.defineProperty(Object.prototype, "value", { value: "nope", configurable: true, enumerable: true, writable: true });
+
+    writeNative(agentDir, {
+      providers: {
+        local: {
+          baseUrl: "http://localhost",
+          api: "openai-completions",
+          models: [model("one", { extraPayload: [{}] })],
+        },
+      },
+    });
+    writePayload(agentDir, emptyPayloadDocument());
+    const beforeN = fs.readFileSync(getModelsPath(agentDir));
+    const beforeP = fs.readFileSync(getPayloadConfigPath(agentDir));
+    const blocked = await actions.patchModel("local", "one", { name: "x" }, { fieldBaselines: { name: undefined } });
+    assert.equal(blocked.type, "validation-error");
+    assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(beforeN), true);
+    assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(beforeP), true);
+    assert.equal(lookupModelPayload(readPayload(agentDir), "local", "one"), undefined);
+
+    const ok = parseLegacyExtraPayload([
+      { key: "s", type: "string", value: "hi" },
+      { key: "b", type: "bool", value: "true" },
+      { key: "j", type: "json", value: "{\"n\":1}" },
+      { key: "__proto__", type: "string", value: "own" },
+    ]);
+    assert.equal(ok.ok, true);
+    if (ok.ok) {
+      assert.equal(ok.payload.s, "hi");
+      assert.equal(ok.payload.b, true);
+      assert.deepEqual(ok.payload.j, { n: 1 });
+      assert.equal(Object.hasOwn(ok.payload, "__proto__"), true);
+    }
+  } finally {
+    if (prevKey === undefined) delete proto.key;
+    else Object.defineProperty(Object.prototype, "key", { value: prevKey, configurable: true, enumerable: true, writable: true });
+    if (prevType === undefined) delete proto.type;
+    else Object.defineProperty(Object.prototype, "type", { value: prevType, configurable: true, enumerable: true, writable: true });
+    if (prevValue === undefined) delete proto.value;
+    else Object.defineProperty(Object.prototype, "value", { value: prevValue, configurable: true, enumerable: true, writable: true });
+  }
+}));
+
+test("model delete requires explicit legacy discard before mutation", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("bad", { extraPayload: { not: "rows" } })],
+      },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  const before = fs.readFileSync(getModelsPath(agentDir));
+  const blocked = await actions.previewModelIdentityAction({ kind: "delete", providerId: "local", modelId: "bad" });
+  assert.equal(blocked.type, "validation-error");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(before), true);
+  const ok = await actions.previewModelIdentityAction({
+    kind: "delete",
+    providerId: "local",
+    modelId: "bad",
+    legacyDiscardResolution: "discard-malformed-legacy",
+  });
+  assert.equal(ok.type, "preview");
+  if (ok.type !== "preview") return;
+  assert.equal((await actions.commitModelIdentityAction(ok.token)).type, "success");
+  assert.equal((readNative(agentDir).providers.local!.models ?? []).length, 0);
+}));
+
+test("ordinary non-models patchProvider rejects resolution flags", async () => withAgentDir(async (agentDir, actions) => {
+  seedBasic(agentDir);
+  const before = fs.readFileSync(getModelsPath(agentDir));
+  const bare = await actions.patchProvider("local", { name: "N" }, {
+    payloadCollisionResolution: "reuse-target",
+  });
+  assert.equal(bare.type, "stale-target");
+  const tok = await actions.patchProvider("local", { name: "N" }, {
+    resolutionToken: "forged",
+    legacyDiscardResolution: "discard-malformed-legacy",
+  });
+  assert.equal(tok.type, "stale-target");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(before), true);
+}));
+
+test("identity drift with new collision returns stale-target and cleared resolutions", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      source: { baseUrl: "http://localhost", api: "openai-completions", models: [model("m")] },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  const preview = await actions.previewProviderIdentityAction({
+    kind: "rename",
+    providerId: "source",
+    targetProviderId: "dest",
+  });
+  assert.equal(preview.type, "preview");
+  if (preview.type !== "preview") return;
+
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "dest", "m", { keep: true }));
+  const drifted = await actions.commitProviderIdentityAction(preview.token);
+  assert.equal(drifted.type, "stale-target");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers, "dest"), false);
+  if (drifted.type !== "stale-target" || !drifted.preview) return;
+  assertDiagnosticSecretFree(drifted);
+  const second = await actions.commitProviderIdentityAction(drifted.preview.token);
+  assert.ok(second.type === "payload-collision" || second.type === "validation-error" || second.type === "stale-target");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers, "dest"), false);
+}));
+
+test("completeSimpleAction discards tokens on the same actions instance", async () => withAgentDir(async (agentDir) => {
+  const actions = new ModelConfigActions({ agentDir });
+  writeNative(agentDir, { providers: {} });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "p", "m", { a: 1 }));
+  const first = await actions.createProvider("p", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m")],
+  });
+  assert.equal(first.type, "payload-collision");
+  if (first.type !== "payload-collision" || !first.resolutionToken) return;
+  assert.ok(actions.boundPreviewCount() >= 1);
+  actions.discardResolutionToken(first.resolutionToken);
+  assert.equal(actions.boundPreviewCount(), 0);
+  const other = new ModelConfigActions({ agentDir });
+  assert.equal(other.boundPreviewCount(), 0);
+}));
+
+test("validation pollution cannot make zero-baseUrl write succeed", async () => withAgentDir(async (agentDir, actions) => {
+  const proto = Object.prototype as Record<string, unknown>;
+  const previous = proto.baseUrl;
+  try {
+    Object.defineProperty(Object.prototype, "baseUrl", {
+      value: "http://evil",
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+    writeNative(agentDir, { providers: {} });
+    writePayload(agentDir, emptyPayloadDocument());
+    const before = fs.readFileSync(getModelsPath(agentDir));
+    const result = await actions.createProvider("custom", {
+      api: "openai-completions",
+      models: [model("m1")],
+    } as never);
+    assert.equal(result.type, "validation-error");
+    assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(before), true);
+    assert.equal(Object.keys(readNative(agentDir).providers).length, 0);
+  } finally {
+    if (previous === undefined) delete proto.baseUrl;
+    else Object.defineProperty(Object.prototype, "baseUrl", {
+      value: previous, configurable: true, enumerable: true, writable: true,
+    });
+  }
 }));

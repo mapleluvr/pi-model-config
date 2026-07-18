@@ -513,6 +513,7 @@ function loadModelPayload(
  */
 async function completeSimpleAction(
   ctx: ExtensionCommandContext,
+  actions: ModelConfigActions,
   first: ActionResult,
   retryWith: (resolution: {
     resolutionToken: string;
@@ -527,7 +528,8 @@ async function completeSimpleAction(
       `${scopeLabel} has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.`,
     );
     if (!ok) {
-      modelConfigActions().discardResolutionToken(first.resolutionToken);
+      // Discard on the SAME instance that created the binding.
+      actions.discardResolutionToken(first.resolutionToken);
       return first;
     }
     return retryWith({
@@ -537,7 +539,12 @@ async function completeSimpleAction(
   }
   if (first.type === "payload-collision" && first.resolutionToken) {
     // Old UI notifies only; discard the bound token so it does not linger with secret-bearing request.
-    modelConfigActions().discardResolutionToken(first.resolutionToken);
+    actions.discardResolutionToken(first.resolutionToken);
+    return first;
+  }
+  if (first.type === "stale-target" && first.resolutionToken) {
+    // Drift rebind still needs a fresh confirm; drop binding if UI is not handling it here.
+    actions.discardResolutionToken(first.resolutionToken);
     return first;
   }
   return first;
@@ -929,6 +936,7 @@ async function manageProviders(
       const first = await actions.createProvider(result.providerId, result.config);
       const completed = await completeSimpleAction(
         ctx,
+        actions,
         first,
         (resolution) => actions.createProvider(result.providerId, result.config, resolution),
         `Provider "${result.providerId}"`,
@@ -1015,6 +1023,7 @@ async function manageProviders(
       const first = await actions.patchProvider(providerId, { models });
       const completed = await completeSimpleAction(
         ctx,
+        actions,
         first,
         (resolution) => actions.patchProvider(providerId, { models }, resolution),
         `Provider "${providerId}" model list`,
@@ -1097,6 +1106,7 @@ async function manageModels(
       const first = await actions.createModel(providerId, modelToSave, payload ? { payload } : undefined);
       const completed = await completeSimpleAction(
         ctx,
+        actions,
         first,
         (resolution) => actions.createModel(providerId, modelToSave, {
           ...(payload ? { payload } : {}),
@@ -1118,7 +1128,21 @@ async function manageModels(
 
     if (action.startsWith("删除")) {
       if (!await ctx.ui.confirm("确认删除", `删除 Model "${existing.id}"？`)) continue;
-      const saved = await commitModelIdentity(ctx, { kind: "delete", providerId, modelId: existing.id });
+      let discard: LegacyDiscardResolution | undefined;
+      if (modelHasMalformedLegacy(existing)) {
+        const ok = await ctx.ui.confirm(
+          "Malformed legacy extraPayload",
+          "This model has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.",
+        );
+        if (!ok) continue;
+        discard = "discard-malformed-legacy";
+      }
+      const saved = await commitModelIdentity(ctx, {
+        kind: "delete",
+        providerId,
+        modelId: existing.id,
+        legacyDiscardResolution: discard,
+      });
       if (saved) config = saved;
       continue;
     }
@@ -1186,6 +1210,7 @@ async function manageModels(
         );
         const completed = await completeSimpleAction(
           ctx,
+          actions,
           first,
           (resolution) => actions.patchModel(
             providerId,

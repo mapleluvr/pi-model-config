@@ -12,6 +12,8 @@ import {
   validateCostTier,
   writeModelSubtree,
   writeProviderSubtree,
+  describeSubtreePresence,
+  subtreePresenceEqual,
 } from "../model-fields.ts";
 
 test("provider merge changes managed values while retaining headers, modelOverrides, and unknown values", () => {
@@ -110,4 +112,16 @@ test("provider and model subtree helpers clone exact objects", () => {
   assert.deepEqual(cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   const nextModel = writeModelSubtree(model, "cost", { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
   assert.deepEqual(nextModel.cost, { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
+});
+
+
+test("subtree presence treats absent, null, and empty object as distinct", () => {
+  assert.equal(subtreePresenceEqual(describeSubtreePresence(undefined), describeSubtreePresence(undefined)), true);
+  assert.equal(subtreePresenceEqual(describeSubtreePresence(null), describeSubtreePresence(null)), true);
+  assert.equal(subtreePresenceEqual(describeSubtreePresence({}), describeSubtreePresence({})), true);
+  assert.equal(subtreePresenceEqual(describeSubtreePresence(undefined), describeSubtreePresence(null)), false);
+  assert.equal(subtreePresenceEqual(describeSubtreePresence(undefined), describeSubtreePresence({})), false);
+  assert.equal(subtreePresenceEqual(describeSubtreePresence(null), describeSubtreePresence({})), false);
+  assert.equal(subtreePresenceEqual(describeSubtreePresence({ a: 1 }), describeSubtreePresence({ a: 1 })), true);
+  assert.equal(subtreePresenceEqual(describeSubtreePresence({ b: 1, a: 2 }), describeSubtreePresence({ a: 2, b: 1 })), true);
 });

@@ -49,6 +49,30 @@ export function deepEqualJson(left: unknown, right: unknown): boolean {
   return false;
 }
 
+/**
+ * Exact stored presence for subtree baselines.
+ * absent, explicit null, and explicit `{}` are distinct — never normalize them together.
+ */
+export type SubtreePresence =
+  | { presence: "absent" }
+  | { presence: "null" }
+  | { presence: "value"; value: unknown };
+
+export function describeSubtreePresence(value: unknown): SubtreePresence {
+  if (value === undefined) return { presence: "absent" };
+  if (value === null) return { presence: "null" };
+  return { presence: "value", value: deepCloneJson(value) };
+}
+
+export function subtreePresenceEqual(left: SubtreePresence, right: SubtreePresence): boolean {
+  if (left.presence !== right.presence) return false;
+  if (left.presence === "value" && right.presence === "value") {
+    return deepEqualJson(left.value, right.value);
+  }
+  return true;
+}
+
+/** @deprecated Prefer describeSubtreePresence for exact absent/null/value baselines. */
 export function normalizeSubtreeBaseline(value: unknown): unknown {
   return value === undefined ? null : value;
 }
