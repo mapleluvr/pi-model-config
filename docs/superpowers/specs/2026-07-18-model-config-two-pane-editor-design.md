@@ -186,8 +186,9 @@ and lifecycle problems. It also preserves Pi's built-in Chinese IME behavior.
   headers, compat data, thinking maps, costs, and other nested structures.
 - `config-validation.ts` validates the complete post-edit candidate against
   Pi's known native field shapes and cross-field rules before a native write.
-- `payload-coordinator.ts` orders multi-file identity operations, detects inert
-  orphan payload entries, and provides idempotent cleanup.
+- `payload-coordinator.ts` owns atomic writes, the cross-process mutation lock,
+  multi-file transaction journals, request-time transaction resolution, and
+  crash recovery.
 - `index.ts` retains command registration, top-level routing, Provider/Model
   selection, and delegates editing to the domain controllers.
 
@@ -262,8 +263,7 @@ and explicit save/discard actions while preserving unknown compat fields.
 - Delete Provider
 
 Provider ID editing is a rename operation. It validates uniqueness and uses the
-target-first payload ordering defined under Native and Private Payload
-Coordination.
+journaled commit protocol defined under Native and Private Payload Transactions.
 
 ## Model Field Catalog
 
@@ -325,8 +325,7 @@ Model Override editing.
 - Delete Model
 
 Model ID editing is a rename operation. It validates uniqueness and uses the
-target-first payload ordering defined under Native and Private Payload
-Coordination.
+journaled commit protocol defined under Native and Private Payload Transactions.
 
 ## Creation Flows
 
@@ -392,32 +391,63 @@ the conflict, and refreshes the panel. Unknown future fields remain preserved
 and are not rejected solely for being unknown; the validator checks every known
 field it encounters and all cross-field invariants affected by the candidate.
 
-### Native and Private Payload Coordination
+### Native and Private Payload Transactions
 
-The private payload file retains its existing fail-closed schema. Multi-file
-operations use ordering that never leaves a reachable target identity without
-its intended payload:
+The private payload config schema remains unchanged. Coordination uses two
+implementation-private files beside it:
 
-- Provider/Model rename and copy first write the payload under the target
-  identity while retaining the source entry. If that write fails, the native
-  operation does not start. After the native write succeeds, rename removes the
-  old payload entry; copy keeps both source and target entries.
-- Provider/Model delete and endpoint Replace first remove identities from native
-  configuration, then delete their now-inert private payload entries. A native
-  write failure leaves private storage untouched.
-- If a native write fails after a target payload was prepared, or an old-entry
-  cleanup fails after native success, the extra private key is an orphan and
-  cannot affect any currently reachable Model identity. The error reports the
-  exact key and never claims complete cleanup.
+- `model-config-transaction.lock`, created exclusively and containing the owner
+  process identity;
+- `model-config-transaction.json`, an atomically written recovery journal.
 
-Orphan detection re-reads native configuration, refreshes the current
-ModelRegistry, and compares private keys with configured and registered
-Provider/Model identities. `/model-config` offers `Clean orphan payloads` only
-when entries exist; it previews exact keys, requires confirmation, and is
-idempotent. Create, rename, and copy reject a target identity that already has
-an orphan payload until the user cleans it, preventing stale data from becoming
-active through later ID reuse. Injected failures at every ordering boundary
-must preserve these invariants.
+Every extension mutation of native or private model configuration acquires the
+same cross-process lock, re-reads the files after acquisition, and revalidates
+its baselines and candidate. If a live owner holds the lock, the operation does
+not wait or write; it reports the active operation and offers retry. A lock whose
+recorded process is no longer alive enters journal recovery before it can be
+removed. Payload-edit and unsupported-override cleanup confirmations also
+revalidate under this lock, so a preview cannot race an identity transaction.
+
+Each individual native, payload, and journal write uses a temporary file in the
+same directory followed by atomic replacement. A transaction that changes both
+native identities and private payload entries proceeds as follows:
+
+1. Compute complete validated native and payload candidates in memory.
+2. Write a journal containing operation identity, before/after native hashes,
+   before/after payload hashes, and only the affected payload entries in their
+   before and after states. Payload values are protected like the private config
+   and are never included in logs or error text.
+3. Atomically write the native candidate.
+4. Atomically write the private payload candidate.
+5. Atomically remove the journal and release the lock.
+
+`before_provider_request` never waits on the mutation lock. When no journal
+exists it reads the normal private payload config. While a valid journal exists,
+it hashes the current native file and resolves affected identities from the
+journal's before payload view when the native hash matches `before`, or from the
+after view when it matches `after`; unaffected identities continue to use the
+persisted payload file. This makes rename, copy, delete, and endpoint Replace
+consistent for the current session, built-in fallback Models, and dynamically
+registered Models even between the two file writes.
+
+Recovery is deterministic:
+
+- native hash equals `before`: restore the affected before payload entries,
+  remove the journal, and report that the operation rolled back;
+- native hash equals `after`: apply the affected after payload entries, remove
+  the journal, and report that the operation rolled forward;
+- native hash matches neither side: fail closed for affected payload identities,
+  block further editor mutations, and show a recovery screen. The screen never
+  overwrites native configuration; it previews the operation and lets the user
+  choose the before or after payload view after another fresh read.
+
+A malformed journal also fails closed for payload injection and blocks mutation
+until explicit recovery; no payload values are displayed. There is no generic
+"orphan" inference or registry-based cleanup. Existing unrelated private keys
+remain untouched. If create, rename, or copy finds a pre-existing payload at a
+target identity that is not the operation's source, it reports an identity
+collision and performs no write; any removal or reuse requires a separate,
+previewed confirmation under the same lock.
 
 ## Endpoint Model Discovery
 
@@ -431,9 +461,10 @@ category. The existing discovery request contract remains:
 
 Before presenting choices, discovery normalizes records as follows:
 
-- accept only object records with a non-empty string `id`, or a non-empty string
-  `name` used as the fallback ID;
-- trim the selected ID and optional display name;
+- for each object record, trim a string `id` first and use it only when the
+  trimmed result is non-empty; otherwise trim a string `name` and use that as
+  the fallback ID only when non-empty;
+- retain an optional display name only when its trimmed result is non-empty;
 - discard malformed records and report the skipped count;
 - deduplicate by normalized ID in endpoint order, keeping the first record;
 - treat an all-invalid result as fetch failure with no choice dialog or write.
@@ -453,10 +484,11 @@ for hand-edited records with the same ID.
 ## Errors and Safety
 
 - Malformed or blank native configuration is never overwritten.
-- File, parse, full-candidate validation, nested-conflict, orphan-payload, and
-  collision errors name the affected object and provide a recovery action.
-- Destructive delete, unsupported-override cleanup, orphan cleanup, and endpoint
-  replacement are explicit confirmation paths.
+- File, parse, full-candidate validation, nested-conflict, transaction-recovery,
+  and collision errors name the affected object and provide a recovery action.
+- Destructive delete, unsupported-override cleanup, payload-identity resolution,
+  transaction recovery, and endpoint replacement are explicit confirmation
+  paths.
 - Create, copy, and rename collision rejection never mutates native or private
   storage.
 - Stored API key literals do not appear in panel rows, notifications, test
@@ -501,8 +533,13 @@ Implementation follows TDD for new behavior. Focused tests cover:
 - nested draft save and discard;
 - optimistic same-subtree conflict rejection for headers, compat, thinking map,
   cost, Model Overrides, and Payload;
-- Provider/Model rename, delete, and copy ordering with injected private/native
-  write failures and idempotent orphan cleanup;
+- Provider/Model rename, delete, and copy transactions with injected failure or
+  crash after journal creation, native replacement, payload replacement, and
+  journal removal;
+- before/after request-hook resolution for current-session Models, built-in
+  fallback identities, and dynamically registered identities;
+- cross-process lock exclusion, confirm-time revalidation, stale-lock recovery,
+  and mismatched-native-hash manual recovery;
 - stale-target refresh after an external modification;
 - creation wizard minimum fields, post-create panel state, and collision
   rejection without mutation;
@@ -516,12 +553,13 @@ Implementation follows TDD for new behavior. Focused tests cover:
 - the endpoint action remains available with zero or many Models;
 - timeout, HTTP failure, unsupported shape, empty response, and all-invalid
   records do not mutate configuration;
-- malformed records are skipped and duplicate normalized IDs keep the first
-  endpoint record;
+- malformed and whitespace-only IDs/names are skipped, fallback occurs only
+  after trim, empty optional names are omitted, and duplicate normalized IDs
+  keep the first endpoint record;
 - merge preserves existing same-ID Model objects, appends each new ID once, and
   updates its seen-ID set while processing;
-- replace requires confirmation and removes payloads for deleted Models, with
-  injected cleanup failure leaving only inert, discoverable orphan entries;
+- replace requires confirmation and commits native/payload changes through the
+  same journal; injected failures preserve the before or after request view;
 - cancel performs no write.
 
 The existing test suite and syntax checks must continue to pass.
@@ -548,8 +586,9 @@ The existing test suite and syntax checks must continue to pass.
 9. `Fetch Models from endpoint` remains available and satisfies the specified
    normalization, deduplication, merge, replace, cancel, and failure behavior.
 10. Create, copy, and rename reject all target collisions without mutation.
-11. Cross-file identity operations preserve payload behavior under injected
-   failures, and any inert orphan entry has an idempotent cleanup path.
+11. Journaled cross-file operations preserve a coherent before or after payload
+   view under injected failures, crashes, built-in fallback, current-session
+   Models, dynamic registrations, and concurrent editor processes.
 12. Wide terminals use two panes and narrow terminals remain fully operable.
 13. Stored API key literals are masked outside the explicitly warned active
    replacement input and are never pre-filled.
