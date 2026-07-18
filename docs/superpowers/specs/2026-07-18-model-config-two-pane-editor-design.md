@@ -1,6 +1,6 @@
 # Pi Model Config Two-Pane Editor Design
 
-**Status:** User-approved design, revised after independent review, pending re-review
+**Status:** Approved for implementation planning after independent review
 **Date:** 2026-07-18
 **Target:** The next `pi-model-config` release after 1.1.0
 
