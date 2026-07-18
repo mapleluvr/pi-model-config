@@ -444,6 +444,111 @@ test("diagnostics reports a whitespace-only models file as unreadable", async ()
   });
 });
 
+test("legacy Provider endpoint action normalizes and merges through the endpoint transaction", async () => {
+  await withRuntimeAgentDir(async () => {
+    const existing = {
+      id: "same",
+      name: "Hand edited",
+      reasoning: true,
+      headers: { "X-Keep": "yes" },
+    };
+    writeModelsConfig({
+      providers: {
+        local: {
+          baseUrl: "http://service.test/api/",
+          apiKey: "ollama",
+          api: "openai-completions",
+          models: [existing],
+        },
+      },
+    });
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ url: string; authorization?: string }> = [];
+    globalThis.fetch = (async (input, init) => {
+      calls.push({
+        url: String(input),
+        authorization: (init?.headers as Record<string, string> | undefined)?.Authorization,
+      });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [
+          { id: " same ", name: "Remote" },
+          { id: " ", name: " new " },
+          { id: "new", name: "Duplicate" },
+          { id: "" },
+        ] }),
+      } as Response;
+    }) as typeof fetch;
+    try {
+      await runModelConfigCommand({
+        selects: [
+          "管理 Providers",
+          "编辑 [local]",
+          "自动拉取 Model 列表（从 API 发现）",
+          "合并：保留现有 Model 并添加新 ID",
+          "返回主菜单",
+          "退出",
+        ],
+        editors: [],
+        confirms: [true],
+        customs: [],
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.deepEqual(calls, [{ url: "http://service.test/api/models", authorization: undefined }]);
+    const models = readModelsConfig().providers.local!.models!;
+    assert.deepEqual(models[0], existing);
+    assert.deepEqual(models[1], { id: "new", name: "new" });
+  });
+});
+
+test("legacy endpoint Cancel and rejected Replace confirmation write nothing", async () => {
+  await withRuntimeAgentDir(async () => {
+    writeModelsConfig({
+      providers: {
+        local: {
+          baseUrl: "http://service.test",
+          apiKey: "ollama",
+          api: "openai-completions",
+          models: [{ id: "old", name: "Keep" }],
+        },
+      },
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      json: async () => [{ id: "new" }],
+    }) as Response) as typeof fetch;
+    try {
+      const beforeCancel = fs.readFileSync(getModelsPath());
+      await runModelConfigCommand({
+        selects: [
+          "管理 Providers", "编辑 [local]", "自动拉取 Model 列表（从 API 发现）",
+          "取消", "返回主菜单", "退出",
+        ],
+        editors: [], confirms: [], customs: [],
+      });
+      assert.equal(fs.readFileSync(getModelsPath()).equals(beforeCancel), true);
+
+      const beforeReplace = fs.readFileSync(getModelsPath());
+      await runModelConfigCommand({
+        selects: [
+          "管理 Providers", "编辑 [local]", "自动拉取 Model 列表（从 API 发现）",
+          "替换：仅保留端点返回的 Model ID", "返回主菜单", "退出",
+        ],
+        editors: [], confirms: [false], customs: [],
+      });
+      assert.equal(fs.readFileSync(getModelsPath()).equals(beforeReplace), true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 test("controller discards a cancelled simple-action token on its creating actions instance", async () => {
   await withRuntimeAgentDir(async () => {
     writeModelsConfig({

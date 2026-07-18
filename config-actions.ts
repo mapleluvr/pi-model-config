@@ -48,6 +48,14 @@ import {
   type ValidationIssue,
   type ValidationOptions,
 } from "./config-validation.ts";
+import {
+  mergeDiscoveredModels,
+  normalizeEndpointModels,
+  replaceDiscoveredModels,
+  summarizeEndpointIds,
+  type EndpointDiscoverySuccess,
+  type EndpointIdSummary,
+} from "./endpoint-models.ts";
 import type { ModelConfig, ModelsConfig, ProviderConfig } from "./types.ts";
 
 export type ModelIdentity = readonly [provider: string, modelId: string];
@@ -77,6 +85,7 @@ export type ActionResult =
     payloadHash?: string;
     path?: string;
     preview?: IdentityPreviewDescriptor & { token: IdentityPreviewToken };
+    endpointPreview?: EndpointPreviewDescriptor & { token: IdentityPreviewToken };
     /** Fresh simple-action resolution token when drift still requires user review. */
     resolutionToken?: IdentityPreviewToken;
     collisions?: ModelIdentity[];
@@ -100,7 +109,7 @@ export type ActionResult =
     nativeHash: string;
     payloadHash: string;
     scope: "provider" | "model";
-    kind: "rename" | "copy" | "delete" | "create" | "models-patch";
+    kind: "rename" | "copy" | "delete" | "create" | "models-patch" | "endpoint";
     /** Opaque token bound to the exact collision/legacy set under review. */
     resolutionToken?: IdentityPreviewToken;
     malformedIdentities?: ModelIdentity[];
@@ -111,6 +120,11 @@ export type ActionResult =
     affectedIdentities: ModelIdentity[];
     collisions: ModelIdentity[];
     descriptor: IdentityPreviewDescriptor;
+  }
+  | {
+    type: "endpoint-preview";
+    token: IdentityPreviewToken;
+    descriptor: EndpointPreviewDescriptor;
   }
   | { type: "lock-busy" }
   | { type: "lock-collision" }
@@ -126,6 +140,34 @@ export interface EditorSnapshot {
 }
 
 export type PayloadCollisionResolution = "replace-target" | "reuse-target";
+
+export type EndpointChangeMode = "merge" | "replace";
+
+export interface EndpointChangeRequest {
+  providerId: string;
+  mode: EndpointChangeMode;
+  discovery: EndpointDiscoverySuccess;
+}
+
+export interface EndpointPreviewDescriptor {
+  source: string;
+  mode: EndpointChangeMode;
+  validCount: number;
+  skippedCount: number;
+  duplicateCount: number;
+  idSummary: EndpointIdSummary;
+  introduced: EndpointIdSummary;
+  removed: EndpointIdSummary;
+  collisions: ModelIdentity[];
+  malformedIdentities: ModelIdentity[];
+  nativeHash: string;
+  payloadHash: string;
+}
+
+export interface EndpointCommitOptions {
+  payloadCollisionResolution?: PayloadCollisionResolution;
+  legacyDiscardResolution?: LegacyDiscardResolution;
+}
 
 /** Explicit resolution required before any write may strip malformed native legacy rows. */
 export type LegacyDiscardResolution = "discard-malformed-legacy";
@@ -266,7 +308,20 @@ interface BoundSimpleResolution {
   createdAt: number;
 }
 
-type BoundBinding = BoundIdentityPreview | BoundSimpleResolution;
+interface BoundEndpointPreview {
+  binding: "endpoint";
+  request: EndpointChangeRequest;
+  nativeHash: string;
+  payloadHash: string;
+  introducedSet: string[];
+  removedSet: string[];
+  collisionSet: string[];
+  malformedSet: string[];
+  descriptor: EndpointPreviewDescriptor;
+  createdAt: number;
+}
+
+type BoundBinding = BoundIdentityPreview | BoundSimpleResolution | BoundEndpointPreview;
 
 const DEFAULT_PREVIEW_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_PREVIEWS = 32;
@@ -292,11 +347,73 @@ type BuildOutcome =
     collisions: ModelIdentity[];
     affectedIdentities: ModelIdentity[];
     scope: "provider" | "model";
-    kind: "rename" | "copy" | "delete" | "create" | "models-patch";
+    kind: "rename" | "copy" | "delete" | "create" | "models-patch" | "endpoint";
     simpleBind?: Omit<BoundSimpleResolution, "createdAt" | "binding">;
     malformedIdentities?: ModelIdentity[];
   }
   | { type: "unchanged" };
+
+interface EndpointLiveChange {
+  candidate: ModelConfig[];
+  introducedIds: string[];
+  removedIds: string[];
+  collisions: ModelIdentity[];
+  malformedIdentities: ModelIdentity[];
+}
+
+function sortedStrings(values: readonly string[]): string[] {
+  return [...values].sort((a, b) => a.localeCompare(b));
+}
+
+function boundedEndpointSource(source: string): string {
+  const limit = 512;
+  return source.length <= limit ? source : `${source.slice(0, limit - 3)}...`;
+}
+
+function normalizedEndpointRequest(request: EndpointChangeRequest): EndpointChangeRequest | undefined {
+  if (
+    typeof request.providerId !== "string"
+    || (request.mode !== "merge" && request.mode !== "replace")
+    || !request.discovery
+    || typeof request.discovery !== "object"
+    || request.discovery.type !== "success"
+    || request.discovery.supported !== true
+    || typeof request.discovery.source !== "string"
+    || !request.discovery.source
+    || !Array.isArray(request.discovery.models)
+  ) return undefined;
+
+  const normalized = normalizeEndpointModels(request.discovery.models);
+  const counts = [
+    request.discovery.receivedCount,
+    request.discovery.validCount,
+    request.discovery.skippedCount,
+    request.discovery.duplicateCount,
+  ];
+  if (
+    !normalized.supported
+    || normalized.models.length === 0
+    || normalized.models.length !== request.discovery.models.length
+    || normalized.validCount !== request.discovery.validCount
+    || counts.some((value) => !Number.isSafeInteger(value) || value < 0)
+  ) return undefined;
+
+  return {
+    providerId: request.providerId,
+    mode: request.mode,
+    discovery: {
+      type: "success",
+      source: request.discovery.source,
+      supported: true,
+      receivedCount: request.discovery.receivedCount,
+      validCount: normalized.validCount,
+      skippedCount: request.discovery.skippedCount,
+      duplicateCount: request.discovery.duplicateCount,
+      models: normalized.models,
+      idSummary: normalized.idSummary,
+    },
+  };
+}
 
 function sortedIdentityKeys(identities: readonly ModelIdentity[]): string[] {
   return identities.map(([p, m]) => identityKey(p, m)).sort();
@@ -951,6 +1068,221 @@ export class ModelConfigActions {
     return snapshotFrom(coordinated);
   }
 
+  async previewEndpointChange(request: EndpointChangeRequest): Promise<ActionResult> {
+    try {
+      request = cloneActionOptions(request)!;
+    } catch {
+      return invalidActionInput();
+    }
+    const normalized = normalizedEndpointRequest(request);
+    if (!normalized) return invalidActionInput();
+
+    let snapshot: CoordinatedSnapshot;
+    try {
+      snapshot = ownOnlyActionSnapshot(readCoordinatedSnapshot(coordinatorOptions(this.options)));
+    } catch {
+      return { type: "recovery-required" };
+    }
+    const blocked = ensureReady(snapshot);
+    if (blocked) return blocked;
+    const live = this.inspectEndpointChange(snapshot, normalized);
+    if (!live) {
+      return {
+        type: "stale-target",
+        nativeHash: snapshot.native.hash,
+        payloadHash: snapshot.payload.hash,
+        path: `providers.${normalized.providerId}`,
+      };
+    }
+    const descriptor = this.endpointDescriptor(snapshot, normalized, live);
+    const token = this.bindEndpoint({
+      request: normalized,
+      nativeHash: snapshot.native.hash,
+      payloadHash: snapshot.payload.hash,
+      introducedSet: sortedStrings(live.introducedIds),
+      removedSet: sortedStrings(live.removedIds),
+      collisionSet: sortedIdentityKeys(live.collisions),
+      malformedSet: sortedIdentityKeys(live.malformedIdentities),
+      descriptor,
+    });
+    return { type: "endpoint-preview", token, descriptor };
+  }
+
+  async commitEndpointChange(
+    token: IdentityPreviewToken,
+    options?: EndpointCommitOptions,
+  ): Promise<ActionResult> {
+    const bound = this.takeEndpoint(token);
+    if (!bound) return { type: "stale-target", path: "endpoint-preview" };
+
+    try {
+      options = cloneActionOptions(options);
+    } catch {
+      return invalidActionInput();
+    }
+    if (
+      options?.payloadCollisionResolution !== undefined
+      && options.payloadCollisionResolution !== "reuse-target"
+      && options.payloadCollisionResolution !== "replace-target"
+    ) return invalidActionInput();
+    if (
+      options?.legacyDiscardResolution !== undefined
+      && options.legacyDiscardResolution !== "discard-malformed-legacy"
+    ) return invalidActionInput();
+
+    let refreshed: ActionResult | undefined;
+    try {
+      const result = await this.run((snapshot) => {
+        const live = this.inspectEndpointChange(snapshot, bound.request);
+        if (!live) return { type: "stale-target", path: `providers.${bound.request.providerId}` };
+        const introducedSet = sortedStrings(live.introducedIds);
+        const removedSet = sortedStrings(live.removedIds);
+        const collisionSet = sortedIdentityKeys(live.collisions);
+        const malformedSet = sortedIdentityKeys(live.malformedIdentities);
+        if (
+          snapshot.native.hash !== bound.nativeHash
+          || snapshot.payload.hash !== bound.payloadHash
+          || !setsEqual(introducedSet, bound.introducedSet)
+          || !setsEqual(removedSet, bound.removedSet)
+          || !setsEqual(collisionSet, bound.collisionSet)
+          || !setsEqual(malformedSet, bound.malformedSet)
+        ) {
+          const descriptor = this.endpointDescriptor(snapshot, bound.request, live);
+          const nextToken = this.bindEndpoint({
+            request: bound.request,
+            nativeHash: snapshot.native.hash,
+            payloadHash: snapshot.payload.hash,
+            introducedSet,
+            removedSet,
+            collisionSet,
+            malformedSet,
+            descriptor,
+          });
+          refreshed = {
+            type: "stale-target",
+            nativeHash: snapshot.native.hash,
+            payloadHash: snapshot.payload.hash,
+            path: "endpoint-preview",
+            endpointPreview: { ...descriptor, token: nextToken },
+          };
+          return { type: "stale-target", path: "endpoint-preview" };
+        }
+        return this.buildEndpointMutation(snapshot, bound.request, live, options);
+      });
+      return refreshed ?? result;
+    } finally {
+      this.forgetPreview(token);
+    }
+  }
+
+  private inspectEndpointChange(
+    snapshot: CoordinatedSnapshot,
+    request: EndpointChangeRequest,
+  ): EndpointLiveChange | undefined {
+    const provider = getProvider(snapshot.native.document!, request.providerId);
+    if (!provider) return undefined;
+    const existing = providerModels(provider);
+    const candidate = request.mode === "merge"
+      ? mergeDiscoveredModels(existing, request.discovery.models)
+      : replaceDiscoveredModels(existing, request.discovery.models);
+    const oldIds = new Set(existing.map((model) => model.id));
+    const candidateIds = new Set(candidate.map((model) => model.id));
+    const introducedIds = candidate.filter((model) => !oldIds.has(model.id)).map((model) => model.id);
+    const removedIds = request.mode === "replace"
+      ? existing.filter((model) => !candidateIds.has(model.id)).map((model) => model.id)
+      : [];
+    const collisions = targetPayloadCollisions(
+      snapshot.payload.document!,
+      introducedIds.map((id) => [request.providerId, id] as ModelIdentity),
+      new Set(),
+    );
+    const removedSet = new Set(removedIds);
+    const malformedIdentities: ModelIdentity[] = [];
+    for (const model of existing) {
+      if (!removedSet.has(model.id)) continue;
+      if (readLegacyExtraPayload(model).kind === "invalid") {
+        malformedIdentities.push([request.providerId, model.id]);
+      }
+    }
+    return { candidate, introducedIds, removedIds, collisions, malformedIdentities };
+  }
+
+  private endpointDescriptor(
+    snapshot: CoordinatedSnapshot,
+    request: EndpointChangeRequest,
+    live: EndpointLiveChange,
+  ): EndpointPreviewDescriptor {
+    return {
+      source: boundedEndpointSource(request.discovery.source),
+      mode: request.mode,
+      validCount: request.discovery.validCount,
+      skippedCount: request.discovery.skippedCount,
+      duplicateCount: request.discovery.duplicateCount,
+      idSummary: summarizeEndpointIds(request.discovery.models.map((model) => model.id)),
+      introduced: summarizeEndpointIds(live.introducedIds),
+      removed: summarizeEndpointIds(live.removedIds),
+      collisions: live.collisions.map((identity) => [identity[0], identity[1]] as ModelIdentity),
+      malformedIdentities: live.malformedIdentities.map((identity) => [identity[0], identity[1]] as ModelIdentity),
+      nativeHash: snapshot.native.hash,
+      payloadHash: snapshot.payload.hash,
+    };
+  }
+
+  private buildEndpointMutation(
+    snapshot: CoordinatedSnapshot,
+    request: EndpointChangeRequest,
+    live: EndpointLiveChange,
+    options?: EndpointCommitOptions,
+  ): BuildOutcome {
+    if (
+      live.collisions.length > 0
+      && options?.payloadCollisionResolution !== "reuse-target"
+      && options?.payloadCollisionResolution !== "replace-target"
+    ) {
+      return {
+        type: "payload-collision",
+        collisions: live.collisions,
+        affectedIdentities: live.collisions,
+        scope: "provider",
+        kind: "endpoint",
+      };
+    }
+    if (
+      live.malformedIdentities.length > 0
+      && options?.legacyDiscardResolution !== "discard-malformed-legacy"
+    ) {
+      return {
+        type: "validation-error",
+        issues: live.malformedIdentities.map(([providerId, modelId]) => ({
+          path: `$.providers.${providerId}.models[id=${modelId}].legacy`,
+          message: "malformed legacy rows require explicit discard",
+        })),
+      };
+    }
+
+    const next = cloneModels(snapshot.native.document!);
+    const nextProvider = getProvider(next, request.providerId);
+    if (!nextProvider) return { type: "stale-target", path: `providers.${request.providerId}` };
+    nextProvider.models = live.candidate.map((model) => cloneOwnOnlyJson(model));
+    const issues = validateOrIssues(next, this.options.validation);
+    if (issues.length > 0) return { type: "validation-error", issues };
+
+    let payload = clonePayloadDocument(snapshot.payload.document!);
+    for (const modelId of live.removedIds) {
+      payload = removePayloadDocumentValue(payload, request.providerId, modelId);
+    }
+    if (options?.payloadCollisionResolution === "replace-target") {
+      for (const [, modelId] of live.collisions) {
+        payload = removePayloadDocumentValue(payload, request.providerId, modelId);
+      }
+    }
+    const affected = new Map<string, ModelIdentity>();
+    for (const modelId of [...live.introducedIds, ...live.removedIds]) {
+      affected.set(identityKey(request.providerId, modelId), [request.providerId, modelId]);
+    }
+    return { type: "mutation", native: next, payload, affectedIdentities: [...affected.values()] };
+  }
+
   async patchProvider(
     providerId: string,
     patch: ConfigPatch<ProviderConfig>,
@@ -1579,6 +1911,47 @@ export class ModelConfigActions {
     this.prunePreviews();
     this.rescheduleExpiry();
     return token;
+  }
+
+  private bindEndpoint(
+    bound: Omit<BoundEndpointPreview, "createdAt" | "binding">,
+  ): IdentityPreviewToken {
+    this.prunePreviews();
+    const token = randomUUID();
+    this.previews.set(token, {
+      binding: "endpoint",
+      request: cloneBoundData(bound.request),
+      nativeHash: bound.nativeHash,
+      payloadHash: bound.payloadHash,
+      introducedSet: [...bound.introducedSet],
+      removedSet: [...bound.removedSet],
+      collisionSet: [...bound.collisionSet],
+      malformedSet: [...bound.malformedSet],
+      descriptor: cloneBoundData(bound.descriptor),
+      createdAt: this.now(),
+    });
+    this.prunePreviews();
+    this.rescheduleExpiry();
+    return token;
+  }
+
+  /** Consumes a token before checking whether it is an endpoint binding. */
+  private takeEndpoint(token: IdentityPreviewToken): BoundEndpointPreview | undefined {
+    this.prunePreviews();
+    const bound = this.previews.get(token);
+    this.previews.delete(token);
+    this.rescheduleExpiry();
+    if (!bound || bound.binding !== "endpoint") return undefined;
+    if (this.now() - bound.createdAt >= this.previewTtlMs) return undefined;
+    return {
+      ...bound,
+      request: cloneBoundData(bound.request),
+      introducedSet: [...bound.introducedSet],
+      removedSet: [...bound.removedSet],
+      collisionSet: [...bound.collisionSet],
+      malformedSet: [...bound.malformedSet],
+      descriptor: cloneBoundData(bound.descriptor),
+    };
   }
 
   private takeBound(

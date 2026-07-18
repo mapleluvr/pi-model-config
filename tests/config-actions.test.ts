@@ -2355,6 +2355,20 @@ test("every ActionResult variant has a secret-free serialized public shape", () 
     affectedIdentities: [["source", "old"], ["source", "new"]],
     collisions: [],
   };
+  const endpointDescriptor: Extract<ActionResult, { type: "endpoint-preview" }>["descriptor"] = {
+    source: "http://service.test/v1/models",
+    mode: "merge",
+    validCount: 1,
+    skippedCount: 0,
+    duplicateCount: 0,
+    idSummary: { ids: ["new"], remaining: 0 },
+    introduced: { ids: ["new"], remaining: 0 },
+    removed: { ids: [], remaining: 0 },
+    collisions: [["source", "new"]],
+    malformedIdentities: [],
+    nativeHash: "native-hash",
+    payloadHash: "payload-hash",
+  };
   const variants = [
     { type: "success" },
     { type: "stale-target", nativeHash: "native-hash", payloadHash: "payload-hash", path: "providers.source" },
@@ -2366,6 +2380,11 @@ test("every ActionResult variant has a secret-free serialized public shape", () 
       nativeHash: "native-hash", payloadHash: "payload-hash", scope: "model", kind: "rename",
     },
     { type: "preview", token: "opaque-token", affectedIdentities: [["source", "old"]], collisions: [], descriptor },
+    { type: "endpoint-preview", token: "endpoint-token", descriptor: endpointDescriptor },
+    {
+      type: "stale-target", path: "endpoint-preview", nativeHash: "native-hash", payloadHash: "payload-hash",
+      endpointPreview: { ...endpointDescriptor, token: "refreshed-token" },
+    },
     { type: "lock-busy" },
     { type: "lock-collision" },
     { type: "lock-unsupported" },
@@ -2397,6 +2416,36 @@ test("every terminal token API consumes before kind checks, throws, and successf
     },
   });
   writePayload(agentDir, emptyPayloadDocument());
+  const endpointRequest = {
+    providerId: "source",
+    mode: "merge" as const,
+    discovery: {
+      type: "success" as const,
+      source: "http://service.test/models",
+      supported: true as const,
+      receivedCount: 1,
+      validCount: 1,
+      skippedCount: 0,
+      duplicateCount: 0,
+      models: [{ id: "endpoint-model" }],
+      idSummary: { ids: ["endpoint-model"], remaining: 0 },
+    },
+  };
+  const endpointForIdentity = await actions.previewEndpointChange(endpointRequest);
+  assert.equal(endpointForIdentity.type, "endpoint-preview");
+  if (endpointForIdentity.type !== "endpoint-preview") return;
+  assert.equal((await actions.commitModelIdentityAction(endpointForIdentity.token)).type, "stale-target");
+  assert.equal((await actions.commitEndpointChange(endpointForIdentity.token)).type, "stale-target");
+
+  const endpointForSimple = await actions.previewEndpointChange(endpointRequest);
+  assert.equal(endpointForSimple.type, "endpoint-preview");
+  if (endpointForSimple.type !== "endpoint-preview") return;
+  assert.equal((await actions.createProvider("ignored", { models: [] }, {
+    resolutionToken: endpointForSimple.token,
+    payloadCollisionResolution: "reuse-target",
+  })).type, "stale-target");
+  assert.equal((await actions.commitEndpointChange(endpointForSimple.token)).type, "stale-target");
+
   const providerPreview = await actions.previewProviderIdentityAction({
     kind: "copy", providerId: "source", targetProviderId: "provider-copy",
   });

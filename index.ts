@@ -11,10 +11,16 @@ import {
   ModelConfigActions,
   parseLegacyExtraPayload,
   type ActionResult,
+  type EndpointPreviewDescriptor,
   type LegacyDiscardResolution,
   type PayloadCollisionResolution,
 } from "./config-actions.ts";
 import { getModelsPath, readModelsConfig } from "./config.ts";
+import {
+  fetchEndpointModels,
+  type EndpointDiscoveryFailure,
+  type EndpointDiscoverySuccess,
+} from "./endpoint-models.ts";
 import { lookupModelPayload, mergePayloadIntoRequest } from "./payload-config.ts";
 import { resolveRequestPayload } from "./payload-coordinator.ts";
 import {
@@ -52,104 +58,46 @@ import {
 // Helpers
 // ═══════════════════════════════════════════════════════
 
-/** 从 OpenAI 兼容的 API 端点自动拉取模型列表 */
+/** 从 OpenAI 兼容的 API 端点自动拉取并规范化模型列表。 */
 async function fetchModelsFromProvider(
   ctx: ExtensionCommandContext,
-  providerId: string,
+  _providerId: string,
   provider: ProviderConfig,
-): Promise<ModelConfig[] | null> {
-  if (!provider.baseUrl) {
-    ctx.ui.notify("请先设置 Provider 的 Base URL", "error");
+): Promise<EndpointDiscoverySuccess | null> {
+  ctx.ui.notify("正在拉取模型列表...", "info");
+  const result = await fetchEndpointModels(provider);
+  if (result.type === "failure") {
+    notifyEndpointFailure(ctx, result);
     return null;
   }
+  const ids = result.idSummary.ids.join(", ");
+  ctx.ui.notify(
+    `成功拉取 ${result.validCount} 个模型\n` +
+    `来源: ${boundedText(result.source)}\n` +
+    `跳过 ${result.skippedCount}，重复 ${result.duplicateCount}\n` +
+    ids + (result.idSummary.remaining > 0 ? ` ... 另有 ${result.idSummary.remaining} 个` : ""),
+    "success",
+  );
+  return result;
+}
 
-  const baseUrl = provider.baseUrl.replace(/\/+$/, "");
-  if (!provider.apiKey) {
-    ctx.ui.notify("请先设置 API Key（即使是 Ollama 也需要填任意值如 'ollama'）", "warning");
-    return null;
-  }
+function boundedText(value: string, limit = 512): string {
+  return value.length <= limit ? value : `${value.slice(0, limit - 3)}...`;
+}
 
-  // 确定 model list endpoint
-  // OpenAI-compatible: {baseUrl}/models
-  // 有些: {baseUrl}/v1/models
-  const candidates = [
-    `${baseUrl}/models`,
-    `${baseUrl}/v1/models`,
-  ];
-
-  // 尝试解析 API key（支持 $VAR 和 !cmd 格式）
-  let actualKey = provider.apiKey;
-  if (provider.apiKey.startsWith("$")) {
-    const envVar = provider.apiKey.slice(1);
-    actualKey = process.env[envVar] || "";
-  }
-  // !cmd 格式暂不在 fetch 时展开（安全问题），使用原始 key
-
-  ctx.ui.notify(`正在拉取模型列表...\n${baseUrl}`, "info");
-
-  let lastError: string | null = null;
-
-  for (const endpoint of candidates) {
-    try {
-      const headers: Record<string, string> = {};
-      if (actualKey && actualKey !== "ollama") {
-        headers["Authorization"] = `Bearer ${actualKey}`;
-      }
-
-      const response = await fetch(endpoint, {
-        method: "GET",
-        headers,
-        signal: AbortSignal.timeout(15000),
-      });
-
-      if (!response.ok) {
-        lastError = `HTTP ${response.status} @ ${endpoint}`;
-        continue;
-      }
-
-      const data = await response.json() as any;
-
-      // 解析不同格式的 model list
-      let models: Array<{ id: string; name?: string }> = [];
-      if (data.data && Array.isArray(data.data)) {
-        // OpenAI 格式: { data: [{ id, ... }, ...] }
-        models = data.data;
-      } else if (Array.isArray(data)) {
-        // 纯数组格式
-        models = data;
-      } else if (data.models && Array.isArray(data.models)) {
-        // 其他格式: { models: [...] }
-        models = data.models;
-      }
-
-      if (models.length === 0) {
-        lastError = `服务器返回了空模型列表 @ ${endpoint}`;
-        continue;
-      }
-
-      // 映射为 ModelConfig
-      const result: ModelConfig[] = models.map((m: any) => ({
-        id: m.id || m.name || "unknown",
-        name: m.name || m.id || undefined,
-      }));
-
-      ctx.ui.notify(
-        `成功拉取 ${result.length} 个模型\n` +
-        `来源: ${endpoint}\n` +
-        result.slice(0, 10).map((m) => m.id).join(", ") +
-        (result.length > 10 ? `... 等 ${result.length - 10} 个` : ""),
-        "success",
-      );
-
-      return result;
-    } catch (err: any) {
-      lastError = `${endpoint}: ${err.message || err}`;
-      continue;
-    }
-  }
-
-  ctx.ui.notify(`拉取失败: ${lastError}`, "error");
-  return null;
+function notifyEndpointFailure(ctx: ExtensionCommandContext, failure: EndpointDiscoveryFailure): void {
+  const messages: Record<EndpointDiscoveryFailure["reason"], string> = {
+    "missing-base-url": "请先设置 Provider 的 Base URL",
+    "missing-api-key": "请先设置 API Key（Ollama 可填写 'ollama'）",
+    "request-failed": "端点请求失败",
+    timeout: "端点请求超时",
+    "http-error": "端点返回 HTTP 错误",
+    "parse-error": "端点返回内容无法解析",
+    "unsupported-shape": "端点返回了不支持的模型列表格式",
+    empty: "端点返回了空模型列表",
+    "all-invalid": "端点没有返回有效的 Model 记录",
+  };
+  ctx.ui.notify(`拉取失败: ${messages[failure.reason]}（已尝试 ${failure.diagnostics.length} 个地址）`, "error");
 }
 
 function providerSummary(p: ProviderConfig): string {
@@ -296,6 +244,82 @@ function applyActionResult(
   }
   notifyActionFailure(ctx, result);
   return undefined;
+}
+
+function endpointIdSummaryText(summary: { ids: string[]; remaining: number }): string {
+  const ids = summary.ids.length > 0 ? summary.ids.join(", ") : "(无)";
+  return ids + (summary.remaining > 0 ? ` ... 另有 ${summary.remaining} 个` : "");
+}
+
+function endpointPreviewMessage(descriptor: EndpointPreviewDescriptor): string {
+  return [
+    `来源: ${descriptor.source}`,
+    `有效 ${descriptor.validCount}，跳过 ${descriptor.skippedCount}，重复 ${descriptor.duplicateCount}`,
+    `端点 ID: ${endpointIdSummaryText(descriptor.idSummary)}`,
+    `新增: ${endpointIdSummaryText(descriptor.introduced)}`,
+    `移除: ${endpointIdSummaryText(descriptor.removed)}`,
+    `私有 Payload 冲突: ${descriptor.collisions.length}`,
+  ].join("\n");
+}
+
+async function completeEndpointChange(
+  ctx: ExtensionCommandContext,
+  actions: ModelConfigActions,
+  first: ActionResult,
+): Promise<ModelsConfig | undefined> {
+  if (first.type !== "endpoint-preview") return applyActionResult(ctx, actions, first);
+  let token = first.token;
+  let descriptor = first.descriptor;
+
+  while (true) {
+    const confirmed = await ctx.ui.confirm(
+      descriptor.mode === "replace" ? "确认替换 Model 列表" : "确认合并 Model 列表",
+      endpointPreviewMessage(descriptor),
+    );
+    if (!confirmed) {
+      actions.discardIdentityPreview(token);
+      return undefined;
+    }
+
+    let legacyDiscardResolution: LegacyDiscardResolution | undefined;
+    if (descriptor.malformedIdentities.length > 0) {
+      const discard = await ctx.ui.confirm(
+        "Malformed legacy extraPayload",
+        `将移除 ${descriptor.malformedIdentities.length} 个含有 malformed native legacy rows 的 Model。确认丢弃这些 rows？`,
+      );
+      if (!discard) {
+        actions.discardIdentityPreview(token);
+        return undefined;
+      }
+      legacyDiscardResolution = "discard-malformed-legacy";
+    }
+
+    let payloadCollisionResolution: PayloadCollisionResolution | undefined;
+    if (descriptor.collisions.length > 0) {
+      const collisionChoice = await ctx.ui.select("发现私有 Payload 冲突", [
+        "复用现有 Payload",
+        "移除冲突 Payload",
+        "取消",
+      ]);
+      if (!collisionChoice || collisionChoice === "取消") {
+        actions.discardIdentityPreview(token);
+        return undefined;
+      }
+      payloadCollisionResolution = collisionChoice.startsWith("复用") ? "reuse-target" : "replace-target";
+    }
+
+    const result = await actions.commitEndpointChange(token, {
+      ...(payloadCollisionResolution ? { payloadCollisionResolution } : {}),
+      ...(legacyDiscardResolution ? { legacyDiscardResolution } : {}),
+    });
+    if (result.type === "stale-target" && result.endpointPreview) {
+      ctx.ui.notify("配置已变化，请重新确认刷新后的端点预览", "warning");
+      token = result.endpointPreview.token;
+      descriptor = result.endpointPreview;
+      continue;
+    }
+    return applyActionResult(ctx, actions, result);
+  }
 }
 
 async function commitProviderIdentity(
@@ -460,7 +484,7 @@ async function editProvider(
     );
     if (doFetch) {
       const fetched = await fetchModelsFromProvider(ctx, providerId, config);
-      if (fetched && fetched.length > 0) config.models = fetched;
+      if (fetched) config.models = fetched.models;
     }
   }
 
@@ -1021,27 +1045,16 @@ async function manageProviders(
     }
     if (action.startsWith("自动拉取")) {
       const fetched = await fetchModelsFromProvider(ctx, providerId, existing);
-      if (!fetched || fetched.length === 0) continue;
-      const replace = await ctx.ui.confirm(
-        `发现 ${fetched.length} 个模型`,
-        `拉取到的模型:\n${fetched.map((model) => `  - ${model.id}`).join("\n")}\n\n` +
-        `当前已有 ${(existing.models || []).length} 个模型。\n` +
-        "是 = 替换现有模型\n否 = 合并到现有列表（去重）",
-      );
-      const currentModels = existing.models ?? [];
-      const existingIds = new Set(currentModels.map((model) => model.id));
-      const models = replace
-        ? fetched
-        : [...currentModels, ...fetched.filter((model) => !existingIds.has(model.id))];
-      const first = await actions.patchProvider(providerId, { models });
-      const completed = await completeSimpleAction(
-        ctx,
-        actions,
-        first,
-        (resolution) => actions.patchProvider(providerId, { models }, resolution),
-        `Provider "${providerId}" model list`,
-      );
-      const saved = applyActionResult(ctx, actions, completed);
+      if (!fetched) continue;
+      const choice = await ctx.ui.select(`发现 ${fetched.validCount} 个模型`, [
+        "合并：保留现有 Model 并添加新 ID",
+        "替换：仅保留端点返回的 Model ID",
+        "取消",
+      ]);
+      if (!choice || choice === "取消") continue;
+      const mode = choice.startsWith("替换") ? "replace" : "merge";
+      const preview = await actions.previewEndpointChange({ providerId, mode, discovery: fetched });
+      const saved = await completeEndpointChange(ctx, actions, preview);
       if (saved) config = saved;
       continue;
     }
