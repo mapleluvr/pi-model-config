@@ -151,47 +151,47 @@ Task 5: normalize and transact endpoint Model discovery through `ModelConfigActi
 
 ### Finding → Fix Mapping
 
-1. **Provider identity union (native + payload-only tuples)**  
-   - `collectProviderSourceIdentities` unions native model IDs with `providerPayloadIdentities` exact JSON tuples.  
+1. **Provider identity union (native + payload-only tuples)**
+   - `collectProviderSourceIdentities` unions native model IDs with `providerPayloadIdentities` exact JSON tuples.
    - Rename/copy/delete disclose, move/copy/remove that union; slash IDs covered in tests.
 
-2. **`reuse-target` absolute preservation**  
-   - `applyPayloadDisposition` / `migrateProviderLegacyPayloads` never overwrite target when `reuse-target` even if explicit payload/null is present.  
+2. **`reuse-target` absolute preservation**
+   - `applyPayloadDisposition` / `migrateProviderLegacyPayloads` never overwrite target when `reuse-target` even if explicit payload/null is present.
    - Rename removes source only; copy retains source+target. `replace-target` overwrites with source/new semantics. Tests cover both.
 
-3. **Opaque bound preview tokens**  
-   - Public `IdentityPreviewToken` is a `string` UUID.  
-   - Private `Map` holds deep-cloned request, hashes, identity set, collisions, resolution.  
-   - Commit uses only bound state; unknown/forged tokens → `stale-target`.  
+3. **Opaque bound preview tokens**
+   - Public `IdentityPreviewToken` is a `string` UUID.
+   - Private `Map` holds deep-cloned request, hashes, identity set, collisions, resolution.
+   - Commit uses only bound state; unknown/forged tokens → `stale-target`.
    - Public preview/descriptor is secret-free; resolved previews carry exact collisions (not hard-coded empty).
 
-4. **No stale full-object overwrite**  
-   - Provider/Model identity uses `providerPatch`/`modelPatch` + optional `fieldBaselines`.  
-   - Under lock, merge into fresh source; concurrent models/headers/unknowns preserved.  
-   - Same-ID Provider patch never sends `models` (stripped unless explicit endpoint models patch).  
+4. **No stale full-object overwrite**
+   - Provider/Model identity uses `providerPatch`/`modelPatch` + optional `fieldBaselines`.
+   - Under lock, merge into fresh source; concurrent models/headers/unknowns preserved.
+   - Same-ID Provider patch never sends `models` (stripped unless explicit endpoint models patch).
    - Field baseline drift → `subtree-conflict`. Index uses managed patches + baselines.
 
-5. **Unique Model IDs in validation**  
-   - `config-validation.ts` rejects duplicate IDs within a Provider.  
+5. **Unique Model IDs in validation**
+   - `config-validation.ts` rejects duplicate IDs within a Provider.
    - `createProvider` with duplicates → `validation-error`, zero write.
 
-6. **Secret-free ActionResult diagnostics**  
-   - `stale-target` / `subtree-conflict` carry hashes/path/refreshed sanitized preview only — never `EditorSnapshot`/native/private docs.  
+6. **Secret-free ActionResult diagnostics**
+   - `stale-target` / `subtree-conflict` carry hashes/path/refreshed sanitized preview only — never `EditorSnapshot`/native/private docs.
    - Tests recursively assert non-success diagnostics lack secret markers.
 
-7. **Legacy `extraPayload` lifecycle**  
-   - Provider rename/copy strip target native `extraPayload` and migrate legacy → private with private-existing precedence.  
-   - Model copy migrates legacy to target private (not only strip).  
+7. **Legacy `extraPayload` lifecycle**
+   - Provider rename/copy strip target native `extraPayload` and migrate legacy → private with private-existing precedence.
+   - Model copy migrates legacy to target private (not only strip).
    - Collision/stale/lock failure → zero migration/removal.
 
-8. **Commit drift → refreshed preview**  
-   - Identity commit revalidates under lock; on hash/identity drift rebuilds bound preview and returns `stale-target` with sanitized `preview` + new token; no write.  
+8. **Commit drift → refreshed preview**
+   - Identity commit revalidates under lock; on hash/identity drift rebuilds bound preview and returns `stale-target` with sanitized `preview` + new token; no write.
    - Removed unused `preferRefreshedStale`.
 
-9. **Order-insensitive deep equality**  
+9. **Order-insensitive deep equality**
    - `deepEqualJson` compares plain objects by key set (order-insensitive); arrays remain order-sensitive.
 
-10. **All four journal boundaries via ModelConfigActions**  
+10. **All four journal boundaries via ModelConfigActions**
     - Injected faults at `journal`, `native`, `payload`, `journal-removed`; request resolution is exactly before or after.
 
 ### RED / GREEN Evidence (follow-up)
@@ -213,7 +213,7 @@ git diff --check
 
 ### Residual Risks After Follow-up
 
-- Endpoint discovery still patches `models` explicitly (Task 5 collision previews).  
+- Endpoint discovery still patches `models` explicitly (Task 5 collision previews).
 - Old UI still only notifies on payload-collision (no replace/reuse dialogs); action contracts are complete for later panels.
 
 ## Second re-review follow-up
