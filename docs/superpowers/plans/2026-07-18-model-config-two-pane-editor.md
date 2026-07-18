@@ -19,7 +19,7 @@
 - Editing Provider API/Base URL never implicitly propagates values into child Models; only the selected field or subtree changes.
 - Simple confirmed fields save immediately; Headers, Model Overrides, Thinking Level Map, Cost, Compat, and Payload use explicit save/discard drafts.
 - Wide mode starts at exactly 88 columns; narrower terminals remain fully operable in single-pane mode.
-- Unknown fields are preserved unless unsupported Model Override paths are explicitly previewed and confirmed for removal.
+- Unknown fields are preserved unless unsupported Model Override paths are explicitly previewed and confirmed for removal. Every nested editor patches a deep clone of the exact stored subtree so unknown keys in Cost, individual tiers, Thinking Map, Headers, Compat, Payload, and allowed Override objects survive known-field edits.
 - Every native write validates the full post-patch candidate against the Pi 0.80.6 shapes and cross-field rules before replacement.
 - Do not call `pi.registerProvider()` to replay `models.json`; Pi's native ModelRegistry remains authoritative.
 - Do not change the native `models.json` schema or private `model-config-payloads.json` schema.
@@ -54,6 +54,9 @@
 | `tests/helpers/temp-agent-dir.ts` | Isolate `PI_CODING_AGENT_DIR` and restore environment reliably. |
 | `tests/helpers/scripted-ui.ts` | Record prompts/notifications and return typed scripted panel, input, select, editor, and confirmation outcomes. |
 | `tests/fixtures/lock-worker.ts` | Exercise real cross-process lock ownership from the Node test suite. |
+| `tests/fixtures/manual-endpoint-server.ts` | Serve deterministic non-secret discovery records for controlled TUI verification. |
+| `tests/fixtures/manual-agent-state.ts` | Seed isolated editor and recovery scenarios for controlled TUI verification. |
+| `tests/fixtures/assert-package.ts` | Parse `npm pack --dry-run --json` and fail on missing runtime or included private/test artifacts. |
 | `tests/atomic-file.test.ts` | Verify atomic replacement, mode handling, hashes, and injected pre-rename failures. |
 | `tests/config-validation.test.ts` | Verify known shapes, cross-field constraints, override allowlist, and unknown-field preservation. |
 | `tests/process-lock.test.ts` | Verify exclusion, owner death, claim races/crashes, liveness uncertainty, fencing, and release. |
@@ -67,7 +70,8 @@
 | `tests/index-runtime.test.ts` | Verify activation, hook integration, TUI gating, top-level routing, diagnostics/recovery entry, and legacy workflow removal. |
 | `tests/no-emoji.test.ts` | Scan every new source/test/UI file for prohibited emoji ranges. |
 | `tests/release-docs.test.ts` | Verify 1.2.0 metadata and English/Chinese documentation of the panel, endpoint, and transaction artifacts. |
-| `package.json`, `package-lock.json` | Publish 1.2.0 metadata and run syntax checks for every runtime module. |
+| `package.json`, `package-lock.json` | Publish 1.2.0 metadata, explicit package contents, and syntax checks for every runtime module. |
+| `.gitignore` | Exclude subagent review artifacts and generated package archives from worktree/package status. |
 | `README.md`, `README-CN.md` | Document the new field-oriented workflow, responsive controls, data safety, discovery behavior, and recovery artifacts. |
 
 ---
@@ -150,22 +154,26 @@ git commit -m "feat: validate and atomically write model config"
 - Modify: `package.json`
 
 **Interfaces and dependencies:**
-- Produces `ProcessIdentity`, `LockOwnerRecord`, `RecoveryClaimRecord`, `MutationLockHandle`, and `AcquireLockResult`.
-- Produces `tryAcquireMutationLock(paths, deps): AcquireLockResult`; acquired handles expose `assertOwned(): void` and `release(): void` bound to one opaque token.
-- `LockDependencies` injects token generation, wall clock, `os.uptime`, PID probing, and atomic file operations for deterministic fault/race tests.
-- Runtime artifacts are `<agent-dir>/model-config-transaction.lock`, `<agent-dir>/model-config-transaction.claim-intent.<token>.json`, and `<agent-dir>/model-config-transaction.claim.<token>.json`.
+- Produces `ProcessIdentity`, `LockOwnerRecord`, `RecoveryClaimRecord`, `ClaimEvidenceMismatch`, `MutationLockHandle`, and `AcquireLockResult`.
+- Produces `tryAcquireMutationLock(paths, deps): AcquireLockResult`; acquired handles expose `assertOwned(): void` and `release(): void` bound to one opaque token. `inspectClaimEvidenceMismatch()` returns a non-secret byte/hash snapshot token, and `restoreCapturedOwner(snapshotToken)` revalidates that token before any explicit operator recovery.
+- `LockDependencies` injects token generation, `BootSessionAdapter`, `ProcessStartAdapter`, PID-existence probing, journal hashing, and atomic file operations for deterministic fault/race tests. Wall clock and elapsed time are not liveness evidence.
+- Runtime artifacts are `<agent-dir>/model-config-transaction.lock`, complete `...lock-intent.<token>.json` files, complete `...claim-intent.<generation>.<token>.json` files, one active `...claim-anchor.<generation>.<token>.bin`, and an optional `...claim-successor-evidence.<generation>.<token>.bin`.
 
 **Constraints and invariants:**
-- Acquisition never waits: it returns acquired, busy-live, or recovery-required/unknown-liveness.
-- No mtime lease or elapsed-time takeover exists.
-- Default PID probing treats successful signal-0 as alive, `ESRCH` as dead, and permission/ambiguous results as unknown. A boot epoch derived from `Date.now() - os.uptime()` proves a changed boot only when epochs differ by more than 60 seconds; closer or ambiguous values never prove death.
-- A complete owner/intent record exists before its public path becomes visible. Every config/journal write in later tasks calls `assertOwned()` immediately before replacement.
-- Normal acquisition scans active claims both before and after owner installation; seeing a claim causes the new owner to owner-bound release and abort.
-- Recovery never deletes a path based only on its filename or age.
+- Acquisition never waits: it returns acquired, busy-live, recovery-required/unknown-liveness, or blocking claim-evidence-mismatch.
+- No mtime lease, elapsed-time takeover, or `Date.now() - os.uptime()` boot inference exists.
+- Runtime boot-session adapters read a kernel/OS-owned stable identifier: Linux `/proc/sys/kernel/random/boot_id`; Windows PowerShell/CIM `Win32_OperatingSystem.LastBootUpTime.ToFileTimeUtc()`; macOS raw `sysctl -n kern.boottime`. Adapter failure returns unknown; wall-clock movement never changes or substitutes for this ID.
+- Runtime process-start adapters use Linux `/proc/<pid>/stat` field 22 and Windows CIM `Win32_Process.CreationDate.ToFileTimeUtc()`. macOS has no default start-ID adapter in this release; an existing PID is treated as alive and an absent PID as dead. A different boot ID or different trusted start ID positively proves the recorded owner cannot resume; a matching live PID is alive; an unambiguous absent PID is dead; permission, parse, PID-reuse-without-start-ID, or adapter failure is unknown and blocks.
+- A complete owner/claim intent exists before its public owner/anchor path becomes visible. Initial owner publication uses a same-directory complete intent plus exclusive hard-link; unsupported hard-link semantics fail closed instead of exposing a partially written owner.
+- A claim rename is never assumed token-conditional. The winner must compare the moved anchor bytes and referenced intent bytes with its pre-rename snapshot before successor installation.
+- Any post-move byte/token/hash mismatch preserves the new intent, moved anchor, prior intent chain, and any successor evidence; it performs no successor installation, cleanup, journal write, native write, or payload write and returns a blocking `claim-evidence-mismatch` state.
+- Normal acquisition scans active claim anchors both before and after owner installation; seeing one causes a just-installed owner to owner-bound release and abort. Zero anchors is normal, exactly one identifies the active generation, and multiple anchors are a blocking evidence-mismatch state with no automatic cleanup.
+- No configuration write is permitted until one verified successor owner exists, all matching claim artifacts are removed, and that successor token passes `assertOwned()`.
+- Recovery never deletes a path based only on filename, age, or an earlier read.
 
 **Acceptance evidence:**
 - RED: `node --experimental-strip-types --test tests/process-lock.test.ts` -> fails because owner/claim acquisition does not exist.
-- GREEN: the same command -> passes real-process exclusion and deterministic fault tests for live pause, dead owner, simultaneous contenders, owner-token loss, claimant crashes, PID reuse/unknown state, changed boot, and owner-bound release.
+- GREEN: the same command -> passes real-process exclusion and deterministic fault tests for live pause, forward/backward wall-clock jumps, dead owner, simultaneous contenders, pre-rename token replacement, owner-token loss, claimant crashes, PID reuse/unknown state, true boot-session change, claim-evidence mismatch, exact captured-owner restoration, and owner-bound release.
 - Regression: `npm test && npm run check` -> zero failures.
 
 **Risk and rollback:**
@@ -174,22 +182,28 @@ git commit -m "feat: validate and atomically write model config"
 
 **Implementation intent:**
 - [ ] Write cross-process worker tests proving a second process receives busy while the first owns the lock and acquires only after clean release.
-- [ ] Write injected-state tests for an alive paused owner, positively dead owner, unknown liveness/PID reuse, and changed-system-boot proof.
-- [ ] Implement exclusive owner installation from a complete same-directory intent using an atomic link/rename primitive; re-read and compare the installed opaque token before returning a handle.
-- [ ] Implement dead-owner claiming with this ordering:
+- [ ] Implement platform boot-session/process-start adapters and tests for paused live owners across forward/backward wall-clock jumps, true boot-session changes, missing adapters, permission failure, and PID reuse with matching, mismatching, and unavailable start evidence.
+- [ ] Implement exclusive owner installation by writing/fsyncing a complete same-directory intent and hard-linking it to the absent lock path; verify bytes/token after publication and fail closed when the primitive is unavailable.
+- [ ] Implement the generational claim state machine with this exact boundary:
 
 ```text
-read exact owner token and prove its process cannot resume
-write complete claim intent containing claimant identity, original owner, and observed journal hash
-atomically move the exact observed owner record to claimant-specific active-claim path
-scan for competing active claims and install successor owner with claimant token
-verify successor token, remove only matching claim/intent, then permit writes
+read source bytes S (lock for generation 1, prior active anchor for generation N)
+prove the source owner/claimant process cannot resume
+write+fsync complete intent I(N+1) with claimant identity, S hash/token,
+  referenced prior-intent hashes, original owner, and observed journal hash
+rename the one expected source path to unique anchor A(N+1) to select one contender
+read A(N+1) and every referenced intent again
+if any byte/hash/token differs from the pre-rename snapshot:
+  retain I(N+1), A(N+1), prior intents, and successor evidence unchanged
+  return claim-evidence-mismatch; install no successor and clean up nothing
+otherwise continue the verified claim transition
 ```
 
-- [ ] Treat a recovery claim as another owner: if its claimant is alive/unknown, block; if positively dead, atomically move that exact claim token to the new claimant and carry the original owner/journal evidence unchanged.
-- [ ] When an active claim coexists with the dead claimant's already-installed successor owner, require both recorded tokens to match, claim that exact successor ownership, install the new claimant as successor, and only then remove matching claim artifacts.
-- [ ] Cover crashes before successor installation and after successor installation but before claim cleanup; only one later contender may win and no config/journal bytes may change during claim recovery.
-- [ ] Expose non-secret owner metadata for the future recovery UI; do not expose a force-delete API.
+- [ ] For a verified initial dead-owner claim with no successor, publish the claimant's successor owner. For a verified recursive claim, carry the original owner/journal evidence forward; if the dead claimant already installed a successor, move that exact lock to claimant-specific successor evidence and perform the same post-move byte/token comparison before publishing the next successor.
+- [ ] Verify successor lock bytes/token and all intent/anchor/evidence hashes again before removing only matching claim artifacts; only after cleanup may the returned handle authorize config/journal writes.
+- [ ] Add a deterministic race that replaces the lock token immediately before the claim rename; assert the moved different owner remains preserved as anchor evidence, no successor/config write occurs, and no path is unlinked.
+- [ ] Cover claimant crashes before successor installation, after successor installation, and after successor-evidence movement; one later generation wins while all journal/native/payload bytes remain unchanged.
+- [ ] Expose non-secret owner, generation, evidence-path, and mismatch metadata plus a two-phase captured-owner restoration API for Task 10. Restoration requires an absent lock path, one complete parseable captured owner, and exact unchanged intent/anchor/successor-evidence bytes; it writes/fsyncs a complete restore intent from those exact captured bytes, hard-links that intent to the absent lock path, verifies equality, then removes only the matching claim chain. Every failed precondition remains blocked without cleanup; there is no force-delete API.
 - [ ] Verify a former/external token cannot release or pass `assertOwned()` at either simulated native or payload write point.
 
 **Commit:**
@@ -333,6 +347,7 @@ git commit -m "refactor: centralize model config mutations"
 - Modify: `config-actions.ts`
 - Modify: `index.ts`
 - Create: `tests/endpoint-models.test.ts`
+- Create: `tests/fixtures/manual-endpoint-server.ts`
 - Modify: `tests/config-actions.test.ts`
 - Modify: `tests/index-runtime.test.ts`
 - Modify: `package.json`
@@ -370,7 +385,7 @@ git commit -m "refactor: centralize model config mutations"
 
 **Commit:**
 ```bash
-git add endpoint-models.ts config-actions.ts index.ts tests/endpoint-models.test.ts tests/config-actions.test.ts tests/index-runtime.test.ts package.json
+git add endpoint-models.ts config-actions.ts index.ts tests/endpoint-models.test.ts tests/fixtures/manual-endpoint-server.ts tests/config-actions.test.ts tests/index-runtime.test.ts package.json
 git commit -m "feat: harden endpoint model discovery"
 ```
 
@@ -387,20 +402,20 @@ git commit -m "feat: harden endpoint model discovery"
 
 **Interfaces and dependencies:**
 - Produces `SettingsCategoryDescriptor`, `SettingsFieldDescriptor`, `SettingsPanelState`, and `SettingsPanelResult`.
-- Field descriptors contain stable IDs, label, display value, search text, and semantic action kind: `edit-field`, `open-section`, or `run-action`.
+- Field descriptors contain stable IDs, label, display value, optional warning text, search text, and semantic action kind: `edit-field`, `open-section`, or `run-action`.
 - `TwoPaneSettingsPanel` accepts title/subtitle, ordered descriptors, initial state, Pi theme, injected `KeybindingsManager`, render request callback, and completion callback.
 - `openSettingsPanel(ctx, model, state)` is the only `ctx.ui.custom()` wrapper; the component itself has no Pi context or file access.
 
 **Constraints and invariants:**
 - Exactly 88 columns selects wide mode; 87 selects narrow mode.
-- Use injected `tui.select.up`, `tui.select.down`, `tui.select.confirm`, and `tui.select.cancel` bindings; use `Tab`, Left, Right, and `/` for the specified pane/search semantics.
+- Use injected `tui.select.up`, `tui.select.down`, `tui.select.confirm`, and `tui.select.cancel` bindings; use `Tab`, Left, Right, and `/` for the specified pane/search semantics. Footer labels for configured actions come from `KeybindingsManager.getKeys()` and never hard-code their default keys.
 - Every state mutation requests render. Every emitted line passes ANSI-aware `truncateToWidth` and has `visibleWidth(line) <= width`.
 - Focus and selection have textual markers in addition to theme colors.
 - Narrow-field cancel returns to categories; narrow-category cancel and any wide cancel close the panel.
 
 **Acceptance evidence:**
 - RED: `node --experimental-strip-types --test tests/settings-panel.test.ts` -> fails because component/types do not exist.
-- GREEN: the same command -> passes width 120/88/87/40 render snapshots, line bounds, focus, category preview, field activation, search/back outcomes, scroll windows, and restored-state tests.
+- GREEN: the same command -> passes width 120/88/87/40 render snapshots, line bounds, focus, category preview, field activation, warning text, search/back outcomes, scroll windows, restored-state tests, and non-default configured key handling/footer labels.
 - Regression: `npm test && npm run check` -> zero failures.
 
 **Risk and rollback:**
@@ -410,7 +425,7 @@ git commit -m "feat: harden endpoint model discovery"
 **Implementation intent:**
 - [ ] Define stable descriptor/result/state types; state stores category ID, field ID, focused pane, category/field scroll offsets, and narrow screen.
 - [ ] Write pure visible-window and state-normalization helpers so removed/reordered fields fall back deterministically.
-- [ ] Implement wide rendering with a bounded category column, separator, flexible field column, title/subtitle, and footer.
+- [ ] Implement wide rendering with a bounded category column, separator, flexible field column, title/subtitle, and a state-specific footer. Format `getKeys()` results for up/down/confirm/cancel, show only actions available in the current wide/narrow screen, and show literal custom controls only for Tab/Left/Right/`/`.
 - [ ] Implement narrow category and field screens from the same descriptors, with breadcrumb and identical action IDs.
 - [ ] Implement key handling and semantic completion without opening nested custom UI or mutating descriptors.
 - [ ] Add a wrapper that calls `ctx.ui.custom()` non-overlay and returns typed results.
@@ -440,7 +455,7 @@ git commit -m "feat: add responsive settings panel"
 **Interfaces and dependencies:**
 - Produces `formatSettingValue`, `formatNestedCount`, `maskApiKey`, and `formatApiKeyReference`.
 - Produces `collectOptionalString`, `collectRequiredString`, `collectPositiveInteger`, `collectNonNegativeRate`, and `collectApiKeyAction` using Pi `input`/`select` without persistence.
-- Produces `editStringMapDraft`, `editCompatDraft`, `editThinkingMapDraft`, `editCostDraft`, and `editPayloadDraft`, each returning `{status: "save", value}` or `{status: "discard"}`.
+- Produces `editStringMapDraft`, `editCompatDraft`, `editThinkingMapDraft`, `editCostDraft`, and `editPayloadDraft`, each returning `{status: "save", value}` or `{status: "discard"}`. `editThinkingMapDraft` accepts the current reasoning state and renders the same inactive-map warning contract used by Model descriptors.
 - Controllers retain subtree baselines and pass saved drafts to `ModelConfigActions`; field editors never read or write files.
 
 **Constraints and invariants:**
@@ -449,11 +464,11 @@ git commit -m "feat: add responsive settings panel"
 - API Key selection is Keep/Replace/Clear; Replace warns, calls `ctx.ui.input` with no stored default, and never passes the literal key as title, placeholder, initial value, or notification.
 - Escape and `Discard changes` return discard. Only `Save and return` returns a candidate draft.
 - Thinking Map includes `off` through `max`; Cost includes four base rates and complete ordered tiers.
-- Compat and payload preserve unknown entries while editing known/selected keys.
+- Every draft starts from a deep clone of the complete stored subtree and patches only selected known paths. Unknown keys in Thinking Map, Cost root, each retained tier, Headers, Compat, Payload, and allowed Override nested objects survive known-field edits.
 
 **Acceptance evidence:**
 - RED: `node --experimental-strip-types --test tests/field-editors.test.ts` -> fails because shared formatter/editor APIs are absent.
-- GREEN: the same command -> passes display-state, API-key leakage scan, save/discard, clear, invalid numeric/JSON, `max`, complete cost, and unknown-preservation scripts.
+- GREEN: the same command -> passes display-state, API-key leakage scan, save/discard, clear, invalid numeric/JSON, `max`, complete cost, and unknown-preservation scripts with sentinel future keys at every nested depth including individual retained tiers.
 - Regression: `npm test && npm run check` -> existing compat/model helper tests pass.
 
 **Risk and rollback:**
@@ -464,7 +479,7 @@ git commit -m "feat: add responsive settings panel"
 - [ ] Build a scripted UI helper that records every title, placeholder, initial value, notification, and returned result; add a recursive secret-leak assertion.
 - [ ] Implement scalar collectors with explicit cancel/clear/value result types instead of magic strings.
 - [ ] Implement API-key Keep/Replace/Clear and verify the original literal appears only in the test's stored fixture, never in recorded UI calls.
-- [ ] Refactor existing Compat, tier, and Payload loops into local-draft functions with explicit terminal actions and no success notifications before persistence.
+- [ ] Implement new Compat, tier, and Payload local-draft functions with explicit terminal actions and no success notifications before persistence. Leave legacy `index.ts` loops untouched in this task; Tasks 8-9 switch callers and remove them.
 - [ ] Add Headers/string-map editing with duplicate-key rejection and complete-object save.
 - [ ] Add Thinking and Cost drafts with exact field/rate constraints and ordered tiers.
 
@@ -502,10 +517,11 @@ git commit -m "feat: add nested model field editors"
 - Unsupported top-level override keys block save until the user explicitly confirms `Remove unsupported fields and save`; cancel/view preserves them byte-for-value in parsed data. Unknown nested keys inside an allowed object such as `cost` or `compat` remain preserved and are not classified as unsupported solely for being unknown.
 - Model ID rename, copy, delete, and create use collision previews and coordinator actions.
 - New Model defaults remain reasoning false, text input, context 128000, max tokens 16384, and four zero cost rates.
+- When a stored Thinking Map is non-empty and `reasoning` is false, its panel descriptor and child editor display the non-destructive warning `Reasoning 已关闭；Thinking Map 会保留但当前不生效`; the warning is absent when reasoning is true, and toggling reasoning never deletes the map.
 
 **Acceptance evidence:**
 - RED: `node --experimental-strip-types --test tests/model-editor.test.ts` -> fails because catalogs/controllers do not exist.
-- GREEN: the same command -> passes exact field catalogs, search/state restoration, scalar cancel/save, all nested routes, creation/copy/rename/delete, payload lifecycle, override allowlist, unsupported cleanup, and collision tests.
+- GREEN: the same command -> passes exact field catalogs, inactive/active Thinking Map warning states, search/state restoration, scalar cancel/save, all nested routes, creation/copy/rename/delete, payload lifecycle, override allowlist, unsupported cleanup, and collision tests.
 - Regression: `npm test && npm run check` -> top-level runtime scripts use the new Model panel with zero failures.
 
 **Risk and rollback:**
@@ -591,8 +607,11 @@ git commit -m "feat: add field-oriented provider editor"
 - Modify: `index.ts`
 - Modify: `package.json`
 - Modify: `package-lock.json`
+- Modify: `.gitignore`
 - Modify: `README.md`
 - Modify: `README-CN.md`
+- Create: `tests/fixtures/manual-agent-state.ts`
+- Create: `tests/fixtures/assert-package.ts`
 - Modify: `tests/index-runtime.test.ts`
 - Modify: `tests/no-emoji.test.ts`
 - Modify: `tests/release-docs.test.ts`
@@ -601,10 +620,10 @@ git commit -m "feat: add field-oriented provider editor"
 **Interfaces and dependencies:**
 - `/model-config` checks `ctx.mode === "tui"` before reading or mutating configuration.
 - Top-level diagnostics calls coordinator recovery inspection, displays only non-secret state/owner metadata, and routes automatic, two-phase manual, busy-live, and unknown-liveness outcomes.
-- Package and lock root versions become exactly `1.2.0`; syntax-check script includes every runtime module.
+- Package and lock root versions become exactly `1.2.0`; syntax-check script includes every runtime module; `package.json.files` explicitly includes root runtime `*.ts`, both READMEs, and `LICENSE` while excluding tests, `.pi-subagents`, and runtime artifacts.
 
 **Constraints and invariants:**
-- Recovery UI offers no force-delete. Unknown liveness offers Cancel, Retry, or retry after the listed process is closed; journal/native/payload bytes remain untouched until positive death/boot proof.
+- Recovery UI offers no force-delete. Unknown liveness offers Cancel, Retry, or retry after the listed process is closed; journal/native/payload bytes remain untouched until positive death/boot-session proof. A claim-evidence mismatch shows preserved non-secret paths/hashes and remains blocking; a separately previewed `Restore captured owner record` is offered only when the lock path is absent, the captured bytes parse as one complete owner, and every intent/anchor hash is unchanged, then writes a complete restore intent from those bytes, hard-links it to the absent lock path, verifies equality, and removes only matching claim artifacts.
 - No human prompt runs while a lock handle is owned; tests record lock ownership at every scripted prompt.
 - README files document two-pane/narrow controls, simple versus draft saves, full field scope, endpoint Merge/Replace/Cancel, transaction artifacts/recovery, payload secrecy, and unchanged Subagent behavior.
 - No stale linear `editProvider`/`editModel` implementation or direct config/payload write remains in `index.ts`.
@@ -614,8 +633,9 @@ git commit -m "feat: add field-oriented provider editor"
 - GREEN: the same command -> passes activation, TUI gating, recovery routing, documentation, metadata, and complete source scan.
 - Full regression: `npm test` -> all tests pass with zero failures.
 - Syntax: `npm run check` -> every runtime `.ts` file parses successfully.
-- Package: `npm pack --dry-run` -> archive includes all runtime modules and both READMEs, with no `.pi-subagents`, transaction, lock, claim, temp-agent, or test-runtime artifacts.
-- Controlled TUI: run `PI_CODING_AGENT_DIR="$(mktemp -d)" pi --no-extensions -e ./index.ts`, open `/model-config`, and verify wide (>=88) and narrow (<88) navigation, one Provider/Model scalar edit, one nested save/discard, global search, masked API key replacement warning, and endpoint Cancel; inspect the temporary directory to confirm only expected config artifacts.
+- Package: `npm pack --dry-run --json | node --experimental-strip-types tests/fixtures/assert-package.ts` -> asserts every runtime module/README/LICENSE is present and rejects `.pi-subagents`, tests, transaction, lock, claim, temp-agent, or generated archive paths.
+- Controlled TUI uses deterministic fixtures: in terminal A run `node --experimental-strip-types tests/fixtures/manual-endpoint-server.ts --port 43123`; in terminal B create `EDITOR_DIR="$(mktemp -d)"` and `EDITOR_MANIFEST="$(mktemp)"`, run `node --experimental-strip-types tests/fixtures/manual-agent-state.ts --agent-dir "$EDITOR_DIR" --scenario editor --base-url http://127.0.0.1:43123`, then run `PI_CODING_AGENT_DIR="$EDITOR_DIR" pi --no-extensions -e ./index.ts`. Verify wide (>=88) and narrow (<88) navigation, one Provider/Model scalar edit, one nested save/discard, global search, and the masked API key replacement warning. Immediately before endpoint discovery, run the fixture in terminal C with `--capture-manifest "$EDITOR_MANIFEST"`; after a successful discovery preview choose Cancel and run it again with `--assert-manifest "$EDITOR_MANIFEST"`.
+- Controlled recovery routing uses `RECOVERY_DIR="$(mktemp -d)"` and `RECOVERY_MANIFEST="$(mktemp)"`; seed it with `manual-agent-state.ts --scenario malformed-journal-valid-files`, capture its manifest, run Pi against it, open diagnostics, verify the non-secret recovery preview, Cancel, and assert the manifest is unchanged. Automated coordinator tests remain the authority for applying recovery transitions.
 
 **Risk and rollback:**
 - Risk: final dead-code cleanup can accidentally remove Subagent behavior. Use symbol search and existing Subagent tests before deletion, and keep the cleanup in this isolated commit.
@@ -623,16 +643,17 @@ git commit -m "feat: add field-oriented provider editor"
 
 **Implementation intent:**
 - [ ] Add non-TUI tests that snapshot native/private bytes before invocation and assert no file is created or changed.
-- [ ] Add recovery-menu tests for automatic completion, two-phase refresh on concurrent change, busy-live, unknown liveness, and changed-boot retry without secret output.
+- [ ] Add recovery-menu tests for automatic completion, two-phase refresh on concurrent change, busy-live, unknown liveness, true boot-session retry, claim-evidence mismatch, exact captured-owner restoration, and no secret output.
 - [ ] Remove old linear Provider/Model editors, obsolete persistence wrappers, and now-unused payload imports; use `rg` to prove production writes occur only through coordinator/action modules.
 - [ ] Expand no-emoji scanning to all runtime `.ts`, all `tests/**/*.ts`, and both READMEs rather than maintaining a partial static list.
-- [ ] Set `package.json` and both package-lock root version fields to `1.2.0`; update check script for every runtime module.
+- [ ] Add `.pi-subagents/` and `*.tgz` to `.gitignore`; set `package.json.files` to the explicit runtime/documentation allowlist; set package and both package-lock root version fields to `1.2.0`; update check script for every runtime module.
+- [ ] Implement deterministic manual endpoint/state fixtures and the stdin JSON package assertion; fixture payloads and recovery data contain no secrets. `manual-agent-state.ts` supports `--capture-manifest <path>` and `--assert-manifest <path>` over exact native/payload/journal bytes so Cancel evidence is machine-checked.
 - [ ] Update English and Chinese docs plus project tree; preserve Pi 0.80.6 JSONC, payload, native registry, and Subagent guidance.
 - [ ] Run focused, full, syntax, package, and controlled TUI verification; record any platform-specific manual limitation before claiming completion.
 
 **Commit:**
 ```bash
-git add index.ts package.json package-lock.json README.md README-CN.md tests/index-runtime.test.ts tests/no-emoji.test.ts tests/release-docs.test.ts
+git add index.ts package.json package-lock.json .gitignore README.md README-CN.md tests/fixtures/manual-agent-state.ts tests/fixtures/assert-package.ts tests/index-runtime.test.ts tests/no-emoji.test.ts tests/release-docs.test.ts
 git commit -m "release: prepare model config 1.2.0"
 ```
 
@@ -645,7 +666,7 @@ After all ten task commits and task-level reviews:
 ```bash
 npm test
 npm run check
-npm pack --dry-run
+npm pack --dry-run --json | node --experimental-strip-types tests/fixtures/assert-package.ts
 git status --short
 git log --oneline --decorate -12
 ```
@@ -657,4 +678,4 @@ Expected evidence:
 - the package archive contains the new modules/docs and no runtime artifacts;
 - the worktree is clean;
 - commit history contains one reviewable commit per task plus the approved design/plan commits;
-- controlled TUI evidence covers both responsive modes, direct scalar editing, nested save/discard, field search, API-key secrecy warning, endpoint Cancel, and recovery diagnostics.
+- controlled TUI evidence uses deterministic local fixtures and covers both responsive modes, direct scalar editing, nested save/discard, field search, API-key secrecy warning, a successful endpoint preview followed by hash-stable Cancel, and a seeded non-secret recovery preview; automated tests own recovery-transition correctness.
