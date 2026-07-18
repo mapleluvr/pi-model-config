@@ -396,20 +396,32 @@ field it encounters and all cross-field invariants affected by the candidate.
 The private payload config schema remains unchanged. Coordination uses two
 implementation-private artifacts beside it:
 
-- a cross-process lock managed by a proven pure-JavaScript lockfile library with
-  atomic stale takeover, an opaque owner token, compromise detection, and an
-  owner-bound release handle;
+- a cross-process lock record containing an opaque owner token, local process
+  identity, and process-start evidence when the platform exposes it;
 - `model-config-transaction.json`, an atomically written recovery journal.
 
-No code path manually unlinks a lock observed as stale. Every extension
-mutation of native or private model configuration acquires the same lock through
-the lock manager, re-reads both files after acquisition, and revalidates its
-baselines and candidate. A live owner causes a no-write "operation in progress"
-result with a retry action. Stale ownership is transferred only by the lock
-manager's atomic takeover; release succeeds only for the acquired owner token,
-preventing an ABA contender from deleting a replacement owner's lock. A stale
-lock with no journal means no recoverable transaction remains: the takeover
-winner validates both current files and then continues from a fresh read.
+The lock has no time-based stale takeover. An owner that is alive but paused can
+never lose ownership. Automatic recovery is allowed only when a platform
+adapter positively proves that the recorded local process cannot resume. An
+unknown liveness result or possible PID reuse remains locked and requires
+explicit operator recovery rather than guessing that the owner is dead.
+
+Dead-owner recovery uses an atomic token-checked claim: contenders compete to
+move the exact observed owner record into one unique recovery claim, acquisition
+checks for a claim both before and after creating a successor record, and only
+the claim winner may install the next owner token. A token mismatch aborts the
+claim. No contender unlinks a path by filename after merely observing staleness.
+A dead-owner lock with no journal has no recoverable transaction; the claim
+winner validates both current files and then releases its successor lock.
+
+Every extension mutation re-reads both files after ownership, revalidates its
+baselines and candidate, and verifies the same owner token immediately before
+each journal, native, and payload replacement. Token loss stops before that
+write and leaves any existing journal for recovery. Release is bound to the
+same token. These checks fence externally replaced ownership, while the
+proof-of-death rule ensures a former automatic owner cannot resume after a
+successful takeover. A live owner causes a no-write "operation in progress"
+result with a retry action.
 
 Human confirmation is never awaited while holding the lock. A preview records
 native and payload hashes; after confirmation, the operation acquires the lock,
@@ -448,30 +460,38 @@ neither journal side fails closed for all extension payload injection. This
 point-in-time protocol remains coherent for current-session Models, built-in
 fallback Models, dynamically registered Models, and journal boundaries.
 
-Recovery runs under the owner-bound lock:
+Recovery paths that require no choice run to completion under the owner-bound
+lock: when a valid journal's native hash equals `before`, restore the complete
+before payload snapshot and report rollback; when it equals `after`, restore
+the complete after snapshot and report roll-forward. Either path quarantines a
+malformed current payload when necessary, removes the journal, and checks the
+owner token before each write.
 
-- native hash equals `before`: atomically restore the complete before payload
-  snapshot, quarantine a malformed current payload when necessary, remove the
-  journal, and report rollback;
-- native hash equals `after`: atomically restore the complete after payload
-  snapshot, quarantine a malformed current payload when necessary, remove the
-  journal, and report roll-forward;
-- native hash matches neither side: keep injection and mutations blocked and
-  show a recovery screen. After another fresh read, the user may apply the full
-  before or after payload snapshot; native configuration is never overwritten.
+Every recovery requiring human choice uses the same two-phase protocol:
+
+1. Acquire the lock, read exact journal/native/payload bytes and parse states,
+   derive the available choices, record a recovery snapshot token containing
+   their hashes and journal operation ID when present, then release the lock.
+2. Show the recovery screen without a lock.
+3. After confirmation, reacquire the lock and re-read all three artifacts. Apply
+   the choice only if the exact snapshot token and parse states still match;
+   otherwise release without writing and return to a refreshed recovery preview.
+
+This protocol governs a valid journal whose native hash matches neither side,
+a malformed journal, and a malformed payload with no journal. A mismatched valid
+journal keeps payload injection and mutations blocked; the user may select the
+full before or after payload snapshot, but recovery never overwrites native
+configuration.
 
 A malformed journal cannot identify affected fields, so all extension payload
-injection and editor mutations remain blocked. Recovery first validates current
-native and payload files without overwriting them. If both are valid, the user
-may explicitly accept them as authoritative; the malformed journal is atomically
-renamed to a timestamped quarantine file and normal operation resumes. If native
-configuration is invalid, recovery remains blocked until it is repaired
-externally. If payload storage is malformed, the user may either remain blocked
-or explicitly quarantine it and initialize an empty payload document; this
-special recovery path is the only operation allowed to replace an unreadable
-payload without a valid journal snapshot. A malformed payload with no journal
-uses the same explicit quarantine-and-reset path. Quarantine files retain the
-private file's protections, and payload contents are never displayed.
+injection and editor mutations remain blocked. If current native and payload
+files are valid, the user may explicitly accept them as authoritative and
+quarantine the malformed journal. If native configuration is invalid, recovery
+remains blocked until it is repaired externally. If payload storage is malformed,
+the user may remain blocked or explicitly quarantine it and initialize an empty
+payload document; this is the only path allowed to replace unreadable payload
+storage without a valid journal snapshot. Quarantine uses an atomic timestamped
+rename, retains private file protections, and never displays payload contents.
 
 There is no generic "orphan" inference or registry-based cleanup. Existing
 unrelated private keys remain untouched. If create, rename, or copy finds a
@@ -578,12 +598,16 @@ Implementation follows TDD for new behavior. Focused tests cover:
   transactions, including retry exhaustion and fail-closed behavior;
 - before/after request-hook resolution for current-session Models, built-in
   fallback identities, and dynamically registered identities;
-- cross-process lock exclusion, simultaneous stale-lock contenders, owner-token
-  release protection, stale-lock-without-journal handling, confirm-time
-  revalidation, and mismatched-native-hash manual recovery;
+- cross-process lock exclusion, simultaneous dead-owner claim contenders,
+  paused-live-owner takeover refusal and safe resume, dead-owner-lock-without-
+  journal handling, and owner-bound release;
+- a simulated former owner whose token was externally replaced attempts native
+  step 3 and payload step 4 writes and is fenced before both replacements;
 - valid-journal recovery with a malformed current payload, malformed-journal
   quarantine with valid files, malformed-payload quarantine/reset, and invalid
   native recovery blocking;
+- concurrent changes between manual recovery preview and confirmation for both
+  valid mismatched and malformed journals, requiring refresh without write;
 - stale-target refresh after an external modification;
 - creation wizard minimum fields, post-create panel state, and collision
   rejection without mutation;
