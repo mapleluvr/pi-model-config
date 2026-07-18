@@ -7,7 +7,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { ModelConfigActions, type ActionResult } from "./config-actions.ts";
+import { ModelConfigActions, parseLegacyExtraPayload, type ActionResult } from "./config-actions.ts";
 import { getModelsPath, readModelsConfig } from "./config.ts";
 import { lookupModelPayload, mergePayloadIntoRequest } from "./payload-config.ts";
 import { resolveRequestPayload } from "./payload-coordinator.ts";
@@ -464,23 +464,8 @@ interface ModelEditResult {
 }
 
 function parseLegacyPayload(value: unknown): Record<string, unknown> | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const payload: Record<string, unknown> = {};
-  for (const row of value) {
-    if (!isPlainObject(row) || typeof row.key !== "string" || !row.key.trim() || typeof row.type !== "string" || typeof row.value !== "string") {
-      return undefined;
-    }
-    if (row.type === "string") payload[row.key] = row.value;
-    else if (row.type === "bool" && (row.value === "true" || row.value === "false")) payload[row.key] = row.value === "true";
-    else if (row.type === "json") {
-      try {
-        payload[row.key] = JSON.parse(row.value);
-      } catch {
-        return undefined;
-      }
-    } else return undefined;
-  }
-  return payload;
+  const parsed = parseLegacyExtraPayload(value);
+  return parsed.ok ? parsed.payload : undefined;
 }
 
 function loadModelPayload(

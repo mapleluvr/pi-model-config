@@ -1,14 +1,16 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { cloneOwnMap, deleteOwnKey, emptyOwnMap, getOwnValue, hasOwnKey, ownKeys, setOwnValue } from "./own-keys.ts";
 
 export interface PayloadConfig {
   version: 1;
   extraPayloads: Record<string, Record<string, unknown>>;
 }
 
-const EMPTY_CONFIG: PayloadConfig = { version: 1, extraPayloads: {} };
-type ModelPayloadIdentity = readonly [provider: string, modelId: string];
+export type ModelPayloadIdentity = readonly [provider: string, modelId: string];
+
+const EMPTY_CONFIG: PayloadConfig = { version: 1, extraPayloads: emptyOwnMap() };
 
 export function isPlainPayloadObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
@@ -19,7 +21,13 @@ function cloneJson<T>(value: T): T {
 }
 
 export function clonePayloadDocument(config: PayloadConfig): PayloadConfig {
-  return cloneJson(config);
+  const extraPayloads = emptyOwnMap<Record<string, unknown>>();
+  for (const key of ownKeys(config.extraPayloads)) {
+    const value = getOwnValue(config.extraPayloads, key);
+    if (value === undefined) continue;
+    setOwnValue(extraPayloads, key, cloneJson(value));
+  }
+  return { version: 1, extraPayloads };
 }
 
 export function getPayloadConfigPath(agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent")): string {
@@ -30,7 +38,7 @@ export function modelPayloadKey(provider: string, modelId: string): string {
   return JSON.stringify([provider, modelId] satisfies ModelPayloadIdentity);
 }
 
-function parseModelPayloadKey(key: string): ModelPayloadIdentity | undefined {
+export function parseModelPayloadKey(key: string): ModelPayloadIdentity | undefined {
   try {
     const parsed: unknown = JSON.parse(key);
     if (!Array.isArray(parsed) || parsed.length !== 2 || parsed.some((part) => typeof part !== "string")) return undefined;
@@ -40,12 +48,12 @@ function parseModelPayloadKey(key: string): ModelPayloadIdentity | undefined {
   }
 }
 
-function legacyModelPayloadKey(provider: string, modelId: string): string | undefined {
+export function legacyModelPayloadKey(provider: string, modelId: string): string | undefined {
   if (provider.includes("/") || modelId.includes("/")) return undefined;
   return `${provider}/${modelId}`;
 }
 
-function isUnambiguousLegacyModelPayloadKey(key: string): boolean {
+export function isUnambiguousLegacyModelPayloadKey(key: string): boolean {
   const separator = key.indexOf("/");
   return separator >= 0 && separator === key.lastIndexOf("/");
 }
@@ -70,11 +78,12 @@ export function parsePayloadDocument(raw: string | Uint8Array, filePath = getPay
   if (!isPlainPayloadObject(parsed) || parsed.version !== 1 || !isPlainPayloadObject(parsed.extraPayloads)) {
     throw new PayloadConfigError(filePath, "expected versioned payload document");
   }
-  const extraPayloads: Record<string, Record<string, unknown>> = {};
-  for (const [key, value] of Object.entries(parsed.extraPayloads)) {
+  const extraPayloads = emptyOwnMap<Record<string, unknown>>();
+  for (const key of ownKeys(parsed.extraPayloads)) {
+    const value = getOwnValue(parsed.extraPayloads, key);
     if (!isPlainPayloadObject(value)) throw new PayloadConfigError(filePath, "payload entry must be an object");
     try {
-      extraPayloads[key] = cloneJson(value);
+      setOwnValue(extraPayloads, key, cloneJson(value));
     } catch {
       throw new PayloadConfigError(filePath, "payload entry must be JSON data");
     }
@@ -109,10 +118,10 @@ export function lookupModelPayload(
   provider: string,
   modelId: string,
 ): Record<string, unknown> | undefined {
-  const exact = config.extraPayloads[modelPayloadKey(provider, modelId)];
+  const exact = getOwnValue(config.extraPayloads, modelPayloadKey(provider, modelId));
   if (exact) return cloneJson(exact);
   const legacyKey = legacyModelPayloadKey(provider, modelId);
-  const legacy = legacyKey === undefined ? undefined : config.extraPayloads[legacyKey];
+  const legacy = legacyKey === undefined ? undefined : getOwnValue(config.extraPayloads, legacyKey);
   return legacy ? cloneJson(legacy) : undefined;
 }
 
@@ -124,17 +133,17 @@ export function setPayloadDocumentValue(
 ): PayloadConfig {
   if (!isPlainPayloadObject(payload)) throw new Error("Model payload must be a JSON object");
   const next = clonePayloadDocument(config);
-  next.extraPayloads[modelPayloadKey(provider, modelId)] = cloneJson(payload);
+  setOwnValue(next.extraPayloads, modelPayloadKey(provider, modelId), cloneJson(payload));
   const legacyKey = legacyModelPayloadKey(provider, modelId);
-  if (legacyKey !== undefined) delete next.extraPayloads[legacyKey];
+  if (legacyKey !== undefined) deleteOwnKey(next.extraPayloads, legacyKey);
   return next;
 }
 
 export function removePayloadDocumentValue(config: PayloadConfig, provider: string, modelId: string): PayloadConfig {
   const next = clonePayloadDocument(config);
-  delete next.extraPayloads[modelPayloadKey(provider, modelId)];
+  deleteOwnKey(next.extraPayloads, modelPayloadKey(provider, modelId));
   const legacyKey = legacyModelPayloadKey(provider, modelId);
-  if (legacyKey !== undefined) delete next.extraPayloads[legacyKey];
+  if (legacyKey !== undefined) deleteOwnKey(next.extraPayloads, legacyKey);
   return next;
 }
 
@@ -163,14 +172,48 @@ export function movePayloadDocumentValue(
   return removePayloadDocumentValue(setPayloadDocumentValue(config, toProvider, toModelId, value), fromProvider, fromModelId);
 }
 
+/**
+ * Authoritative enumerator of private payload identities owned by a provider:
+ * exact JSON tuple keys plus unambiguous legacy `provider/model` delimiter keys.
+ * Ambiguous multi-slash legacy keys remain inert and are not listed.
+ */
+export function listProviderPayloadIdentities(config: PayloadConfig, providerId: string): ModelPayloadIdentity[] {
+  const map = new Map<string, ModelPayloadIdentity>();
+  const legacyPrefix = providerId.includes("/") ? undefined : `${providerId}/`;
+  for (const key of ownKeys(config.extraPayloads)) {
+    if (!hasOwnKey(config.extraPayloads, key)) continue;
+    const identity = parseModelPayloadKey(key);
+    if (identity && identity[0] === providerId) {
+      map.set(JSON.stringify(identity), identity);
+      continue;
+    }
+    if (
+      !identity
+      && legacyPrefix !== undefined
+      && isUnambiguousLegacyModelPayloadKey(key)
+      && key.startsWith(legacyPrefix)
+    ) {
+      const modelId = key.slice(legacyPrefix.length);
+      if (modelId.length === 0) continue;
+      const entry: ModelPayloadIdentity = [providerId, modelId];
+      map.set(JSON.stringify(entry), entry);
+    }
+  }
+  return [...map.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+}
+
 export function removeProviderPayloadDocumentValues(config: PayloadConfig, provider: string): PayloadConfig {
   const next = clonePayloadDocument(config);
+  for (const [providerId, modelId] of listProviderPayloadIdentities(next, provider)) {
+    next.extraPayloads = removePayloadDocumentValue(next, providerId, modelId).extraPayloads;
+  }
+  // Defensive: drop any remaining exact-tuple or unambiguous-legacy keys for the provider.
   const legacyPrefix = provider.includes("/") ? undefined : `${provider}/`;
-  for (const key of Object.keys(next.extraPayloads)) {
+  for (const key of ownKeys(next.extraPayloads)) {
     const identity = parseModelPayloadKey(key);
     if (identity?.[0] === provider || (
       !identity && legacyPrefix !== undefined && isUnambiguousLegacyModelPayloadKey(key) && key.startsWith(legacyPrefix)
-    )) delete next.extraPayloads[key];
+    )) deleteOwnKey(next.extraPayloads, key);
   }
   return next;
 }
@@ -203,3 +246,5 @@ export function mergePayloadIntoRequest(payload: unknown, extraPayload: unknown)
   if (!isPlainPayloadObject(payload) || !isPlainPayloadObject(extraPayload)) return undefined;
   return { ...payload, ...cloneJson(extraPayload) };
 }
+
+export { cloneOwnMap, emptyOwnMap, getOwnValue, hasOwnKey, setOwnValue, deleteOwnKey };

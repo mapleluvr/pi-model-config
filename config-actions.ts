@@ -11,6 +11,7 @@ import {
   clonePayloadDocument,
   copyPayloadDocumentValue,
   emptyPayloadDocument,
+  listProviderPayloadIdentities,
   lookupModelPayload,
   movePayloadDocumentValue,
   removePayloadDocumentValue,
@@ -18,6 +19,7 @@ import {
   setPayloadDocumentValue,
   type PayloadConfig,
 } from "./payload-config.ts";
+import { deleteOwnKey, getOwnValue, hasOwnKey, setOwnValue } from "./own-keys.ts";
 import {
   deepCloneJson,
   deepEqualJson,
@@ -151,6 +153,12 @@ export interface FieldPatchOptions {
 export interface ModelConfigActionsOptions extends PayloadCoordinatorOptions {
   validation?: ValidationOptions;
   commitMutation?: (request: MutationRequest, options?: PayloadCoordinatorOptions) => Promise<CommitResult>;
+  /** Injectable clock for deterministic preview TTL tests (epoch ms). */
+  now?: () => number;
+  /** Bound preview time-to-live. Default 5 minutes. */
+  previewTtlMs?: number;
+  /** Max retained bound previews. Default 32. */
+  maxPreviews?: number;
 }
 
 interface BoundIdentityPreview {
@@ -162,7 +170,11 @@ interface BoundIdentityPreview {
   collisions: ModelIdentity[];
   affectedIdentities: ModelIdentity[];
   descriptor: IdentityPreviewDescriptor;
+  createdAt: number;
 }
+
+const DEFAULT_PREVIEW_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_MAX_PREVIEWS = 32;
 
 type BuildOutcome =
   | { type: "mutation"; native: ModelsConfig; payload: PayloadConfig; affectedIdentities: ModelIdentity[] }
@@ -187,8 +199,24 @@ function identityKey(provider: string, modelId: string): string {
   return JSON.stringify([provider, modelId]);
 }
 
+function getProvider(config: ModelsConfig, providerId: string): ProviderConfig | undefined {
+  return getOwnValue(config.providers as Record<string, ProviderConfig>, providerId);
+}
+
+function hasProvider(config: ModelsConfig, providerId: string): boolean {
+  return hasOwnKey(config.providers, providerId);
+}
+
+function setProvider(config: ModelsConfig, providerId: string, provider: ProviderConfig): void {
+  setOwnValue(config.providers as Record<string, ProviderConfig>, providerId, provider);
+}
+
+function deleteProvider(config: ModelsConfig, providerId: string): void {
+  deleteOwnKey(config.providers, providerId);
+}
+
 function providerIdentitySet(config: ModelsConfig): string[] {
-  return Object.keys(config.providers).sort();
+  return Object.keys(config.providers).filter((key) => hasOwnKey(config.providers, key)).sort();
 }
 
 function modelIdentitySet(config: ModelsConfig): string[] {
@@ -205,19 +233,60 @@ function findModelIndex(provider: ProviderConfig, modelId: string): number {
 
 function stripLegacyExtraPayload(model: ModelConfig): ModelConfig {
   const next = deepCloneJson(model);
-  delete (next as Record<string, unknown>)["extraPayload"];
+  deleteOwnKey(next as object, "extraPayload");
   return next;
 }
 
-function readLegacyExtraPayload(model: ModelConfig): Record<string, unknown> | undefined {
-  if (!Object.hasOwn(model as object, "extraPayload")) return undefined;
-  const legacy = (model as Record<string, unknown>)["extraPayload"];
-  if (!legacy || typeof legacy !== "object" || Array.isArray(legacy)) return undefined;
-  try {
-    return deepCloneJson(legacy as Record<string, unknown>);
-  } catch {
-    return undefined;
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+/**
+ * Legacy native extraPayload is an array of { key, type, value } rows
+ * (type: string | bool | json; value always a string). Object shapes are invalid.
+ */
+export function parseLegacyExtraPayload(value: unknown): { ok: true; payload: Record<string, unknown> } | { ok: false; reason: string } {
+  // Reasons must stay non-secret and free of private field names (no "extraPayload" / values).
+  if (!Array.isArray(value)) return { ok: false, reason: "legacy rows must be an array" };
+  const payload: Record<string, unknown> = {};
+  for (const row of value) {
+    if (
+      !isPlainObject(row)
+      || typeof row.key !== "string"
+      || !row.key.trim()
+      || typeof row.type !== "string"
+      || typeof row.value !== "string"
+    ) {
+      return { ok: false, reason: "legacy row is malformed" };
+    }
+    if (row.type === "string") {
+      setOwnValue(payload, row.key, row.value);
+    } else if (row.type === "bool" && (row.value === "true" || row.value === "false")) {
+      setOwnValue(payload, row.key, row.value === "true");
+    } else if (row.type === "json") {
+      try {
+        setOwnValue(payload, row.key, JSON.parse(row.value));
+      } catch {
+        return { ok: false, reason: "legacy json row is invalid" };
+      }
+    } else {
+      return { ok: false, reason: "legacy row type is unsupported" };
+    }
   }
+  return { ok: true, payload };
+}
+
+type LegacyRead =
+  | { kind: "none" }
+  | { kind: "valid"; payload: Record<string, unknown> }
+  | { kind: "invalid"; reason: string };
+
+function readLegacyExtraPayload(model: ModelConfig): LegacyRead {
+  if (!hasOwnKey(model as object, "extraPayload")) return { kind: "none" };
+  const legacy = getOwnValue(model as Record<string, unknown>, "extraPayload");
+  const parsed = parseLegacyExtraPayload(legacy);
+  if (!parsed.ok) return { kind: "invalid", reason: parsed.reason };
+  return { kind: "valid", payload: parsed.payload };
 }
 
 function mapLockResult(result: CommitResult): ActionResult | undefined {
@@ -258,27 +327,16 @@ function ensureReady(snapshot: CoordinatedSnapshot): ActionResult | undefined {
   return undefined;
 }
 
-/** Exact JSON-tuple private payload identities for a provider (not legacy slash keys). */
+/** Re-export authoritative private identity enumerator (tuples + unambiguous legacy delimiter keys). */
 export function providerPayloadIdentities(payload: PayloadConfig, providerId: string): ModelIdentity[] {
-  const identities: ModelIdentity[] = [];
-  for (const key of Object.keys(payload.extraPayloads)) {
-    try {
-      const parsed: unknown = JSON.parse(key);
-      if (Array.isArray(parsed) && parsed.length === 2 && parsed[0] === providerId && typeof parsed[1] === "string") {
-        identities.push([providerId, parsed[1]]);
-      }
-    } catch {
-      // ignore non-tuple keys
-    }
-  }
-  return identities;
+  return listProviderPayloadIdentities(payload, providerId);
 }
 
 function collectProviderModelIds(provider: ProviderConfig): string[] {
   return (provider.models ?? []).map((entry) => entry.id);
 }
 
-/** Union of native model IDs and exact payload-only tuple identities for a provider. */
+/** Union of native model IDs and all private payload identities the commit can move/copy/delete. */
 function collectProviderSourceIdentities(
   providerId: string,
   provider: ProviderConfig,
@@ -288,7 +346,7 @@ function collectProviderSourceIdentities(
   for (const modelId of collectProviderModelIds(provider)) {
     map.set(identityKey(providerId, modelId), [providerId, modelId]);
   }
-  for (const identity of providerPayloadIdentities(payload, providerId)) {
+  for (const identity of listProviderPayloadIdentities(payload, providerId)) {
     map.set(identityKey(identity[0], identity[1]), identity);
   }
   return [...map.values()].sort((a, b) => identityKey(a[0], a[1]).localeCompare(identityKey(b[0], b[1])));
@@ -356,52 +414,43 @@ function applyPayloadDisposition(args: {
     return payload;
   }
 
-  if (args.resolution === "replace-target" || !targetExists) {
-    if (args.explicitPayload !== undefined) {
-      if (args.kind === "rename") {
-        payload = removePayloadDocumentValue(payload, args.fromProvider, args.fromModelId);
-      }
-      if (args.explicitPayload === null) {
-        payload = removePayloadDocumentValue(payload, args.toProvider, args.toModelId);
-      } else {
-        payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, args.explicitPayload);
-      }
-      return payload;
-    }
-
-    if (args.migrateLegacy && !args.sourceHadPrivate) {
-      if (args.kind === "rename") {
-        payload = removePayloadDocumentValue(payload, args.fromProvider, args.fromModelId);
-      }
-      // Private existing target already handled by reuse; replace/absent: migrate legacy.
-      if (!targetExists || args.resolution === "replace-target") {
-        payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, args.migrateLegacy);
-      }
-      return payload;
-    }
-
-    if (args.sourceHadPrivate) {
-      payload = args.kind === "rename"
-        ? movePayloadDocumentValue(payload, args.fromProvider, args.fromModelId, args.toProvider, args.toModelId)
-        : copyPayloadDocumentValue(payload, args.fromProvider, args.fromModelId, args.toProvider, args.toModelId);
-      return payload;
-    }
-
-    if (args.migrateLegacy) {
-      if (args.kind === "rename") {
-        payload = removePayloadDocumentValue(payload, args.fromProvider, args.fromModelId);
-      }
-      if (!targetExists || args.resolution === "replace-target") {
-        payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, args.migrateLegacy);
-      }
-      return payload;
-    }
-
+  // replace-target or no target collision path.
+  if (args.explicitPayload !== undefined) {
     if (args.kind === "rename") {
       payload = removePayloadDocumentValue(payload, args.fromProvider, args.fromModelId);
     }
+    if (args.explicitPayload === null) {
+      payload = removePayloadDocumentValue(payload, args.toProvider, args.toModelId);
+    } else {
+      payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, args.explicitPayload);
+    }
+    return payload;
   }
 
+  if (args.sourceHadPrivate) {
+    payload = args.kind === "rename"
+      ? movePayloadDocumentValue(payload, args.fromProvider, args.fromModelId, args.toProvider, args.toModelId)
+      : copyPayloadDocumentValue(payload, args.fromProvider, args.fromModelId, args.toProvider, args.toModelId);
+    return payload;
+  }
+
+  if (args.migrateLegacy) {
+    if (args.kind === "rename") {
+      payload = removePayloadDocumentValue(payload, args.fromProvider, args.fromModelId);
+    }
+    if (!targetExists || args.resolution === "replace-target") {
+      payload = setPayloadDocumentValue(payload, args.toProvider, args.toModelId, args.migrateLegacy);
+    }
+    return payload;
+  }
+
+  // No source/new payload: rename removes source; replace-target clears collided target.
+  if (args.kind === "rename") {
+    payload = removePayloadDocumentValue(payload, args.fromProvider, args.fromModelId);
+  }
+  if (args.resolution === "replace-target" && targetExists) {
+    payload = removePayloadDocumentValue(payload, args.toProvider, args.toModelId);
+  }
   return payload;
 }
 
@@ -411,6 +460,20 @@ function stripExtraPayloadFromProviderModels(provider: ProviderConfig): Provider
     next.models = next.models.map((model) => stripLegacyExtraPayload(model));
   }
   return next;
+}
+
+function validateProviderLegacyPayloads(provider: ProviderConfig): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  for (const model of provider.models ?? []) {
+    const legacy = readLegacyExtraPayload(model);
+    if (legacy.kind === "invalid") {
+      issues.push({
+        path: `$.models[id=${model.id}].legacy`,
+        message: legacy.reason,
+      });
+    }
+  }
+  return issues;
 }
 
 function migrateProviderLegacyPayloads(
@@ -423,9 +486,12 @@ function migrateProviderLegacyPayloads(
   modelIds: readonly string[],
 ): PayloadConfig {
   let next = payload;
+  const handled = new Set<string>();
   for (const modelId of modelIds) {
+    handled.add(modelId);
     const sourceModel = (provider.models ?? []).find((entry) => entry.id === modelId);
-    const legacy = sourceModel ? readLegacyExtraPayload(sourceModel) : undefined;
+    const legacyRead = sourceModel ? readLegacyExtraPayload(sourceModel) : { kind: "none" as const };
+    const legacy = legacyRead.kind === "valid" ? legacyRead.payload : undefined;
     const sourcePrivate = lookupModelPayload(next, fromProviderId, modelId);
     const targetExists = lookupModelPayload(next, toProviderId, modelId) !== undefined;
 
@@ -434,35 +500,37 @@ function migrateProviderLegacyPayloads(
       continue;
     }
 
-    if (sourcePrivate) {
-      next = kind === "rename"
-        ? movePayloadDocumentValue(next, fromProviderId, modelId, toProviderId, modelId)
-        : copyPayloadDocumentValue(next, fromProviderId, modelId, toProviderId, modelId);
-      continue;
-    }
-
-    if (legacy && (!targetExists || resolution === "replace-target")) {
-      if (kind === "rename") next = removePayloadDocumentValue(next, fromProviderId, modelId);
-      next = setPayloadDocumentValue(next, toProviderId, modelId, legacy);
-      continue;
-    }
-
-    if (kind === "rename") {
-      next = removePayloadDocumentValue(next, fromProviderId, modelId);
-    }
+    next = applyPayloadDisposition({
+      payload: next,
+      kind,
+      fromProvider: fromProviderId,
+      fromModelId: modelId,
+      toProvider: toProviderId,
+      toModelId: modelId,
+      resolution,
+      migrateLegacy: legacy,
+      sourceHadPrivate: sourcePrivate !== undefined,
+    });
   }
-  // Payload-only identities (no native model) still move/copy.
-  const remaining = providerPayloadIdentities(next, fromProviderId);
-  for (const [, modelId] of remaining) {
-    if (modelIds.includes(modelId)) continue;
+  // Payload-only identities (no native model) still move/copy/remove per resolution.
+  for (const [, modelId] of listProviderPayloadIdentities(next, fromProviderId)) {
+    if (handled.has(modelId)) continue;
     const targetExists = lookupModelPayload(next, toProviderId, modelId) !== undefined;
     if (resolution === "reuse-target" && targetExists) {
       if (kind === "rename") next = removePayloadDocumentValue(next, fromProviderId, modelId);
       continue;
     }
-    next = kind === "rename"
-      ? movePayloadDocumentValue(next, fromProviderId, modelId, toProviderId, modelId)
-      : copyPayloadDocumentValue(next, fromProviderId, modelId, toProviderId, modelId);
+    const sourcePrivate = lookupModelPayload(next, fromProviderId, modelId);
+    next = applyPayloadDisposition({
+      payload: next,
+      kind,
+      fromProvider: fromProviderId,
+      fromModelId: modelId,
+      toProvider: toProviderId,
+      toModelId: modelId,
+      resolution,
+      sourceHadPrivate: sourcePrivate !== undefined,
+    });
   }
   if (kind === "rename") {
     next = removeProviderPayloadDocumentValues(next, fromProviderId);
@@ -474,10 +542,27 @@ export class ModelConfigActions {
   private readonly options: ModelConfigActionsOptions;
   private readonly commit: (request: MutationRequest, options?: PayloadCoordinatorOptions) => Promise<CommitResult>;
   private readonly previews = new Map<string, BoundIdentityPreview>();
+  private readonly now: () => number;
+  private readonly previewTtlMs: number;
+  private readonly maxPreviews: number;
 
   constructor(options: ModelConfigActionsOptions = {}) {
     this.options = options;
     this.commit = options.commitMutation ?? commitCoordinatedMutation;
+    this.now = options.now ?? (() => Date.now());
+    this.previewTtlMs = options.previewTtlMs ?? DEFAULT_PREVIEW_TTL_MS;
+    this.maxPreviews = options.maxPreviews ?? DEFAULT_MAX_PREVIEWS;
+  }
+
+  /** Explicitly discard a bound identity preview (cancel / final completion). */
+  discardIdentityPreview(token: IdentityPreviewToken): void {
+    this.previews.delete(token);
+  }
+
+  /** Test/introspection: number of currently retained bound previews. */
+  boundPreviewCount(): number {
+    this.prunePreviews();
+    return this.previews.size;
   }
 
   readEditorSnapshot(): EditorSnapshot | { type: "recovery-required" } {
@@ -499,11 +584,11 @@ export class ModelConfigActions {
     options?: FieldPatchOptions,
   ): Promise<ActionResult> {
     return this.run((snapshot) => {
-      const existing = snapshot.native.document!.providers[providerId];
+      const existing = getProvider(snapshot.native.document!, providerId);
       if (!existing) return { type: "stale-target", path: `providers.${providerId}` };
       const safePatch = stripModelsFromProviderPatch(patch);
       // Allow explicit models only when the caller intentionally patches models (endpoint flows).
-      const effectivePatch = Object.hasOwn(patch, "models") ? patch : safePatch;
+      const effectivePatch = hasOwnKey(patch, "models") ? patch : safePatch;
       const baselineConflict = assertFieldBaselines(
         existing as Record<string, unknown>,
         options?.fieldBaselines,
@@ -511,7 +596,7 @@ export class ModelConfigActions {
       );
       if (baselineConflict) return baselineConflict;
       const next = cloneModels(snapshot.native.document!);
-      next.providers[providerId] = mergeProviderConfig(existing, effectivePatch);
+      setProvider(next, providerId, mergeProviderConfig(existing, effectivePatch));
       const issues = validateOrIssues(next, this.options.validation);
       if (issues.length > 0) return { type: "validation-error", issues };
       return {
@@ -530,7 +615,7 @@ export class ModelConfigActions {
     options?: FieldPatchOptions & { payload?: Record<string, unknown> | null },
   ): Promise<ActionResult> {
     return this.run((snapshot) => {
-      const provider = snapshot.native.document!.providers[providerId];
+      const provider = getProvider(snapshot.native.document!, providerId);
       if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
       const index = findModelIndex(provider, modelId);
       if (index < 0) return { type: "stale-target", path: `providers.${providerId}.models:${modelId}` };
@@ -547,8 +632,9 @@ export class ModelConfigActions {
         `providers.${providerId}.models.${modelId}`,
       );
       if (baselineConflict) return baselineConflict;
+      // Field save may strip invalid legacy rows (UI already warned); never migrate invalid rows.
       const next = cloneModels(snapshot.native.document!);
-      const nextProvider = next.providers[providerId]!;
+      const nextProvider = getProvider(next, providerId)!;
       const merged = mergeModelConfig(existing, patch);
       nextProvider.models = [...(nextProvider.models ?? [])];
       nextProvider.models[index] = stripLegacyExtraPayload(merged);
@@ -556,7 +642,7 @@ export class ModelConfigActions {
       if (issues.length > 0) return { type: "validation-error", issues };
       let payload = clonePayloadDocument(snapshot.payload.document!);
       const affected: ModelIdentity[] = [];
-      if (options && Object.hasOwn(options, "payload")) {
+      if (options && hasOwnKey(options, "payload")) {
         if (options.payload === null || options.payload === undefined) {
           payload = removePayloadDocumentValue(payload, providerId, modelId);
         } else {
@@ -568,20 +654,52 @@ export class ModelConfigActions {
     });
   }
 
-  async createProvider(providerId: string, config: ProviderConfig): Promise<ActionResult> {
+  async createProvider(
+    providerId: string,
+    config: ProviderConfig,
+    options?: { payloadCollisionResolution?: PayloadCollisionResolution },
+  ): Promise<ActionResult> {
     return this.run((snapshot) => {
-      if (Object.hasOwn(snapshot.native.document!.providers, providerId)) {
+      if (hasProvider(snapshot.native.document!, providerId)) {
         return { type: "native-collision", target: providerId };
       }
+      const legacyIssues = validateProviderLegacyPayloads(config);
+      if (legacyIssues.length > 0) return { type: "validation-error", issues: legacyIssues };
+      const introduced = (config.models ?? []).map((entry) => [providerId, entry.id] as ModelIdentity);
+      const collisions = targetPayloadCollisions(snapshot.payload.document!, introduced, new Set());
+      if (
+        collisions.length > 0
+        && options?.payloadCollisionResolution !== "replace-target"
+        && options?.payloadCollisionResolution !== "reuse-target"
+      ) {
+        return {
+          type: "payload-collision",
+          collisions,
+          affectedIdentities: introduced,
+          scope: "provider",
+          kind: "create",
+        };
+      }
       const next = cloneModels(snapshot.native.document!);
-      next.providers[providerId] = stripExtraPayloadFromProviderModels(deepCloneJson(config));
+      setProvider(next, providerId, stripExtraPayloadFromProviderModels(deepCloneJson(config)));
       const issues = validateOrIssues(next, this.options.validation);
       if (issues.length > 0) return { type: "validation-error", issues };
+      let payload = clonePayloadDocument(snapshot.payload.document!);
+      const affected: ModelIdentity[] = [];
+      if (options?.payloadCollisionResolution === "replace-target") {
+        for (const [, modelId] of collisions) {
+          payload = removePayloadDocumentValue(payload, providerId, modelId);
+          affected.push([providerId, modelId]);
+        }
+      } else if (options?.payloadCollisionResolution === "reuse-target") {
+        for (const identity of collisions) affected.push(identity);
+      }
+      // Never implicitly attach private payloads for createProvider.
       return {
         type: "mutation",
         native: next,
-        payload: clonePayloadDocument(snapshot.payload.document!),
-        affectedIdentities: [],
+        payload,
+        affectedIdentities: affected,
       };
     });
   }
@@ -592,9 +710,16 @@ export class ModelConfigActions {
     options?: { payload?: Record<string, unknown>; payloadCollisionResolution?: PayloadCollisionResolution },
   ): Promise<ActionResult> {
     return this.run((snapshot) => {
-      const provider = snapshot.native.document!.providers[providerId];
+      const provider = getProvider(snapshot.native.document!, providerId);
       if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
       if (findModelIndex(provider, model.id) >= 0) return { type: "native-collision", target: model.id };
+      const legacyRead = readLegacyExtraPayload(model);
+      if (legacyRead.kind === "invalid") {
+        return {
+          type: "validation-error",
+          issues: [{ path: `$.providers.${providerId}.models[id=${model.id}].legacy`, message: legacyRead.reason }],
+        };
+      }
       const collisions = targetPayloadCollisions(
         snapshot.payload.document!,
         [[providerId, model.id]],
@@ -614,7 +739,7 @@ export class ModelConfigActions {
         };
       }
       const next = cloneModels(snapshot.native.document!);
-      const nextProvider = next.providers[providerId]!;
+      const nextProvider = getProvider(next, providerId)!;
       nextProvider.models = [...(nextProvider.models ?? []), stripLegacyExtraPayload(deepCloneJson(model))];
       const issues = validateOrIssues(next, this.options.validation);
       if (issues.length > 0) return { type: "validation-error", issues };
@@ -623,8 +748,15 @@ export class ModelConfigActions {
       const targetExists = collisions.length > 0;
       if (options?.payloadCollisionResolution === "reuse-target" && targetExists) {
         affected.push([providerId, model.id]);
-      } else if (options?.payload) {
+      } else if (options?.payload !== undefined) {
         payload = setPayloadDocumentValue(payload, providerId, model.id, options.payload);
+        affected.push([providerId, model.id]);
+      } else if (options?.payloadCollisionResolution === "replace-target" && targetExists) {
+        // Absent replacement clears collided private payload.
+        payload = removePayloadDocumentValue(payload, providerId, model.id);
+        affected.push([providerId, model.id]);
+      } else if (legacyRead.kind === "valid" && !targetExists) {
+        payload = setPayloadDocumentValue(payload, providerId, model.id, legacyRead.payload);
         affected.push([providerId, model.id]);
       }
       return { type: "mutation", native: next, payload, affectedIdentities: affected };
@@ -638,7 +770,7 @@ export class ModelConfigActions {
     nextValue: unknown,
   ): Promise<ActionResult> {
     return this.run((snapshot) => {
-      const provider = snapshot.native.document!.providers[providerId];
+      const provider = getProvider(snapshot.native.document!, providerId);
       if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
       const current = readProviderSubtree(provider, key);
       const normalizedCurrent = current === undefined || current === null ? {} : current;
@@ -647,7 +779,7 @@ export class ModelConfigActions {
         return { type: "subtree-conflict", path: `providers.${providerId}.${key}` };
       }
       const next = cloneModels(snapshot.native.document!);
-      next.providers[providerId] = writeProviderSubtree(provider, key, nextValue);
+      setProvider(next, providerId, writeProviderSubtree(provider, key, nextValue));
       const issues = validateOrIssues(next, this.options.validation);
       if (issues.length > 0) return { type: "validation-error", issues };
       return {
@@ -667,7 +799,7 @@ export class ModelConfigActions {
     nextValue: unknown,
   ): Promise<ActionResult> {
     return this.run((snapshot) => {
-      const provider = snapshot.native.document!.providers[providerId];
+      const provider = getProvider(snapshot.native.document!, providerId);
       if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
       const index = findModelIndex(provider, modelId);
       if (index < 0) return { type: "stale-target", path: `providers.${providerId}.models:${modelId}` };
@@ -685,7 +817,7 @@ export class ModelConfigActions {
         }
       }
       const next = cloneModels(snapshot.native.document!);
-      const nextProvider = next.providers[providerId]!;
+      const nextProvider = getProvider(next, providerId)!;
       nextProvider.models = [...(nextProvider.models ?? [])];
       nextProvider.models[index] = writeModelSubtree(model, key, nextValue);
       const issues = validateOrIssues(next, this.options.validation);
@@ -706,7 +838,7 @@ export class ModelConfigActions {
     nextValue: Record<string, unknown> | undefined,
   ): Promise<ActionResult> {
     return this.run((snapshot) => {
-      const provider = snapshot.native.document!.providers[providerId];
+      const provider = getProvider(snapshot.native.document!, providerId);
       if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
       if (findModelIndex(provider, modelId) < 0) {
         return { type: "stale-target", path: `providers.${providerId}.models:${modelId}` };
@@ -746,7 +878,27 @@ export class ModelConfigActions {
     return this.commitIdentity(token);
   }
 
-  private bindPreview(bound: BoundIdentityPreview): IdentityPreviewToken {
+  private prunePreviews(): void {
+    const now = this.now();
+    for (const [token, bound] of this.previews) {
+      if (now - bound.createdAt > this.previewTtlMs) this.previews.delete(token);
+    }
+    while (this.previews.size > this.maxPreviews) {
+      let oldestToken: string | undefined;
+      let oldestAt = Number.POSITIVE_INFINITY;
+      for (const [token, bound] of this.previews) {
+        if (bound.createdAt < oldestAt) {
+          oldestAt = bound.createdAt;
+          oldestToken = token;
+        }
+      }
+      if (oldestToken === undefined) break;
+      this.previews.delete(oldestToken);
+    }
+  }
+
+  private bindPreview(bound: Omit<BoundIdentityPreview, "createdAt">): IdentityPreviewToken {
+    this.prunePreviews();
     const token = randomUUID();
     this.previews.set(token, {
       ...bound,
@@ -755,14 +907,20 @@ export class ModelConfigActions {
       affectedIdentities: bound.affectedIdentities.map((entry) => [entry[0], entry[1]] as ModelIdentity),
       identitySet: [...bound.identitySet],
       descriptor: deepCloneJson(bound.descriptor),
+      createdAt: this.now(),
     });
+    this.prunePreviews();
     return token;
   }
 
   private takeBound(token: IdentityPreviewToken): BoundIdentityPreview | undefined {
+    this.prunePreviews();
     const bound = this.previews.get(token);
     if (!bound) return undefined;
-    // Keep token for retry of same commit until success; overwrite only on re-bind.
+    if (this.now() - bound.createdAt > this.previewTtlMs) {
+      this.previews.delete(token);
+      return undefined;
+    }
     return {
       ...bound,
       request: deepCloneJson(bound.request),
@@ -841,7 +999,7 @@ export class ModelConfigActions {
   ): ModelIdentity[] {
     if (scope === "provider") {
       const req = request as ProviderIdentityRequest;
-      const source = coordinated.native.document!.providers[req.providerId];
+      const source = getProvider(coordinated.native.document!, req.providerId);
       if (!source) return [];
       const sourceIds = collectProviderSourceIdentities(req.providerId, source, coordinated.payload.document!);
       if (req.kind === "delete") return sourceIds;
@@ -861,7 +1019,7 @@ export class ModelConfigActions {
     if (scope === "provider") {
       const req = request as ProviderIdentityRequest;
       if (req.kind === "delete") return [];
-      const source = coordinated.native.document!.providers[req.providerId];
+      const source = getProvider(coordinated.native.document!, req.providerId);
       if (!source) return [];
       const sourceIds = collectProviderSourceIdentities(req.providerId, source, coordinated.payload.document!);
       const sourceKeys = new Set(sourceIds.map(([p, m]) => identityKey(p, m)));
@@ -991,17 +1149,15 @@ export class ModelConfigActions {
         : this.buildModelIdentity(snapshot, bound.request as ModelIdentityRequest);
     });
 
-    if (refreshedOnDrift) {
-      this.forgetPreview(token);
-      return refreshedOnDrift;
-    }
-    if (result.type === "success") this.forgetPreview(token);
+    // Consume token on every terminal commit attempt (success, lock, validation, stale, etc.).
+    this.forgetPreview(token);
+    if (refreshedOnDrift) return refreshedOnDrift;
     return result;
   }
 
   private buildProviderIdentity(snapshot: CoordinatedSnapshot, request: ProviderIdentityRequest): BuildOutcome {
     const native = snapshot.native.document!;
-    const source = native.providers[request.providerId];
+    const source = getProvider(native, request.providerId);
     if (!source) return { type: "stale-target", path: `providers.${request.providerId}` };
 
     if (request.kind === "rename" && request.fieldBaselines) {
@@ -1013,6 +1169,18 @@ export class ModelConfigActions {
       if (conflict) return conflict;
     }
 
+    // Provider identity: reject only when a model has invalid legacy AND no private payload to move/copy.
+    if (request.kind !== "delete") {
+      const issues: ValidationIssue[] = [];
+      for (const model of source.models ?? []) {
+        const legacy = readLegacyExtraPayload(model);
+        if (legacy.kind !== "invalid") continue;
+        if (lookupModelPayload(snapshot.payload.document!, request.providerId, model.id) !== undefined) continue;
+        issues.push({ path: `$.models[id=${model.id}].legacy`, message: legacy.reason });
+      }
+      if (issues.length > 0) return { type: "validation-error", issues };
+    }
+
     let next = cloneModels(native);
     let payload = clonePayloadDocument(snapshot.payload.document!);
     const sourceIdentities = collectProviderSourceIdentities(request.providerId, source, snapshot.payload.document!);
@@ -1020,14 +1188,14 @@ export class ModelConfigActions {
     let affected: ModelIdentity[] = [...sourceIdentities];
 
     if (request.kind === "delete") {
-      delete next.providers[request.providerId];
+      deleteProvider(next, request.providerId);
       payload = removeProviderPayloadDocumentValues(payload, request.providerId);
       const issues = validateOrIssues(next, this.options.validation);
       if (issues.length > 0) return { type: "validation-error", issues };
       return { type: "mutation", native: next, payload, affectedIdentities: affected };
     }
 
-    if (Object.hasOwn(native.providers, request.targetProviderId)) {
+    if (hasProvider(native, request.targetProviderId)) {
       return { type: "native-collision", target: request.targetProviderId };
     }
 
@@ -1054,8 +1222,8 @@ export class ModelConfigActions {
       providerBody = mergeProviderConfig(providerBody, stripModelsFromProviderPatch(request.providerPatch));
     }
     providerBody = stripExtraPayloadFromProviderModels(providerBody);
-    next.providers[request.targetProviderId] = providerBody;
-    if (request.kind === "rename") delete next.providers[request.providerId];
+    setProvider(next, request.targetProviderId, providerBody);
+    if (request.kind === "rename") deleteProvider(next, request.providerId);
 
     payload = migrateProviderLegacyPayloads(
       source,
@@ -1075,7 +1243,7 @@ export class ModelConfigActions {
 
   private buildModelIdentity(snapshot: CoordinatedSnapshot, request: ModelIdentityRequest): BuildOutcome {
     const native = snapshot.native.document!;
-    const provider = native.providers[request.providerId];
+    const provider = getProvider(native, request.providerId);
     if (!provider) return { type: "stale-target", path: `providers.${request.providerId}` };
     const index = findModelIndex(provider, request.modelId);
     if (index < 0) return { type: "stale-target", path: `providers.${request.providerId}.models:${request.modelId}` };
@@ -1139,9 +1307,21 @@ export class ModelConfigActions {
     body.id = request.targetModelId;
 
     const sourcePrivate = lookupModelPayload(snapshot.payload.document!, request.providerId, request.modelId);
-    const migrateLegacy = request.kind === "rename"
-      ? request.migrateLegacyExtraPayload ?? readLegacyExtraPayload(existing)
-      : readLegacyExtraPayload(existing);
+    const legacyRead = readLegacyExtraPayload(existing);
+    const hasExplicitPayload = request.kind === "rename" && hasOwnKey(request, "payload");
+    if (legacyRead.kind === "invalid" && sourcePrivate === undefined && !hasExplicitPayload) {
+      // Malformed legacy is the only migration source: refuse silent data loss / fake migration.
+      return {
+        type: "validation-error",
+        issues: [{
+          path: `$.providers.${request.providerId}.models[id=${request.modelId}].legacy`,
+          message: legacyRead.reason,
+        }],
+      };
+    }
+    const migrateLegacy = request.kind === "rename" && request.migrateLegacyExtraPayload !== undefined
+      ? request.migrateLegacyExtraPayload
+      : legacyRead.kind === "valid" ? legacyRead.payload : undefined;
 
     if (request.kind === "rename") {
       nextProvider.models[index] = body;
@@ -1157,7 +1337,7 @@ export class ModelConfigActions {
       toProvider: request.providerId,
       toModelId: request.targetModelId,
       resolution: request.payloadCollisionResolution,
-      explicitPayload: request.kind === "rename" && Object.hasOwn(request, "payload") ? request.payload : undefined,
+      explicitPayload: request.kind === "rename" && hasOwnKey(request, "payload") ? request.payload : undefined,
       migrateLegacy,
       sourceHadPrivate: sourcePrivate !== undefined,
     });
