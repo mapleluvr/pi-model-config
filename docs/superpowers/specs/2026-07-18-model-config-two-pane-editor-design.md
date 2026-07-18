@@ -1,6 +1,6 @@
 # Pi Model Config Two-Pane Editor Design
 
-**Status:** User-approved design, pending independent review
+**Status:** User-approved design, revised after independent review, pending re-review
 **Date:** 2026-07-18
 **Target:** The next `pi-model-config` release after 1.1.0
 
@@ -124,8 +124,12 @@ The panel never relies on JavaScript truthiness to format values:
 - `(not set)` means an optional field is absent without inheritance semantics.
 - `false` and `0` are displayed literally.
 - Nested fields show summaries such as `3 entries` or `4 overrides`.
-- Literal API keys are masked, retaining only a short non-sensitive suffix.
-  Environment references and command references may be shown unchanged.
+- Stored literal API keys are masked, retaining only a short non-sensitive
+  suffix. Environment references and command references may be shown unchanged.
+- Selecting API Key first offers keep, replace, and clear actions. Replace opens
+  an empty Pi input and never pre-fills the stored value. Pi's native input has
+  no password mode, so characters typed during that explicit replacement are
+  the one visible-entry exception; the UI warns about this before entry.
 
 ## Component Architecture
 
@@ -171,6 +175,8 @@ and lifecycle problems. It also preserves Pi's built-in Chinese IME behavior.
 
 ### Domain Modules
 
+- `types.ts` replaces `Record<string, Partial<ModelConfig>>` with a dedicated
+  `ModelOverrideConfig` matching Pi's documented override subset.
 - `provider-editor.ts` defines Provider categories, field descriptors, edit
   actions, creation, rename, copy, delete, and Model discovery routing.
 - `model-editor.ts` defines full Model descriptors plus a separate restricted
@@ -178,6 +184,10 @@ and lifecycle problems. It also preserves Pi's built-in Chinese IME behavior.
   copy, and delete.
 - `field-editors.ts` contains shared object editors and value collection for
   headers, compat data, thinking maps, costs, and other nested structures.
+- `config-validation.ts` validates the complete post-edit candidate against
+  Pi's known native field shapes and cross-field rules before a native write.
+- `payload-coordinator.ts` orders multi-file identity operations, detects inert
+  orphan payload entries, and provides idempotent cleanup.
 - `index.ts` retains command registration, top-level routing, Provider/Model
   selection, and delegates editing to the domain controllers.
 
@@ -232,6 +242,13 @@ persisted. Override entries can be added, renamed, or deleted with collision
 and destructive confirmations. The editor must never introduce `api`,
 `baseUrl`, `id`, or private Payload fields into an override.
 
+A pre-existing override key outside this allowlist is preserved while merely
+viewing or cancelling. Normal save is blocked and lists each unsupported path.
+The user may explicitly choose `Remove unsupported fields and save`; only that
+confirmation prunes the listed keys. This is the sole exception to unknown-field
+preservation, because the cleanup is deliberate and previewed rather than a
+side effect of editing another field.
+
 ### Compatibility
 
 - Compat
@@ -244,9 +261,9 @@ and explicit save/discard actions while preserving unknown compat fields.
 - Copy Provider
 - Delete Provider
 
-Provider ID editing is a rename operation. It validates uniqueness and migrates
-the Provider's private Model payload identities only after native configuration
-persistence succeeds.
+Provider ID editing is a rename operation. It validates uniqueness and uses the
+target-first payload ordering defined under Native and Private Payload
+Coordination.
 
 ## Model Field Catalog
 
@@ -307,8 +324,9 @@ Model Override editing.
 - Copy Model
 - Delete Model
 
-Model ID editing is a rename operation. It migrates the exact private payload
-identity only after native configuration persistence succeeds.
+Model ID editing is a rename operation. It validates uniqueness and uses the
+target-first payload ordering defined under Native and Private Payload
+Coordination.
 
 ## Creation Flows
 
@@ -319,9 +337,15 @@ contract before an identity exists:
 - Model: ID, then create with the extension's Pi-compatible defaults.
 
 The object is not written until the wizard's required values are valid and
-confirmed. After creation, the corresponding two-pane panel opens at General.
-An empty Provider may suggest endpoint Model discovery, but discovery is never
-forced as part of creation.
+confirmed. Immediately before writing, creation re-reads native configuration
+and rejects an existing Provider key or same-Provider Model ID without mutation.
+After creation, the corresponding two-pane panel opens at General. An empty
+Provider may suggest endpoint Model discovery, but discovery is never forced as
+part of creation.
+
+Provider and Model copy ask for a target ID, pre-filled with a `-copy` suffix.
+They re-read configuration and reject an occupied target rather than overwrite
+or append a duplicate. The user may choose another target and retry.
 
 ## Edit and Persistence Semantics
 
@@ -343,18 +367,57 @@ creation, rename, deletion, and child-field edits remain staged in the one
 Model Overrides draft until that editor is saved. A failed save retains the
 draft so the user can correct it or discard it.
 
-### Fresh Reads and Preservation
+Each nested editor records a deep baseline of its exact stored subtree when it
+opens. Before save it re-reads that subtree and compares it with the baseline.
+If another process changed the same object, save is blocked; the user may reload
+the external value and discard the draft, or return to the draft without
+writing. Changes elsewhere in the configuration do not conflict. The conflict
+scope is the entire edited object: one headers map, compat object, thinking map,
+cost object, Provider's Model Overrides map, or exact Model payload object.
 
-Before every save, the controller re-reads and validates `models.json`, locates
-the target by its stable identity, and applies only the confirmed field patch.
+### Full-Candidate Validation and Preservation
+
+Before every native save, the controller re-reads `models.json`, locates the
+target by stable identity, applies only the confirmed patch, and validates the
+complete resulting candidate. Validation mirrors Pi's known Provider, Model,
+Model Override, cost, thinking, headers, and compat shapes plus Pi's cross-field
+rules. In particular, a non-built-in Provider with Models requires `baseUrl`
+and an API at Provider level or on every Model. A Provider with no Models must
+retain at least one of `baseUrl`, `headers`, `compat`, or a non-empty
+`modelOverrides` map. An invalid clear or patch is rejected before writing and
+leaves storage unchanged.
+
 If another process removed or renamed the target, the operation stops, reports
-the conflict, and refreshes the panel. The patch layer preserves unknown root,
-Provider, Model, cost, compat, and nested fields.
+the conflict, and refreshes the panel. Unknown future fields remain preserved
+and are not rejected solely for being unknown; the validator checks every known
+field it encounters and all cross-field invariants affected by the candidate.
 
-The private payload file follows its existing fail-closed behavior. Native
-configuration is persisted before payload identity migrations. A private
-payload failure is reported explicitly and must not be presented as a complete
-rename success.
+### Native and Private Payload Coordination
+
+The private payload file retains its existing fail-closed schema. Multi-file
+operations use ordering that never leaves a reachable target identity without
+its intended payload:
+
+- Provider/Model rename and copy first write the payload under the target
+  identity while retaining the source entry. If that write fails, the native
+  operation does not start. After the native write succeeds, rename removes the
+  old payload entry; copy keeps both source and target entries.
+- Provider/Model delete and endpoint Replace first remove identities from native
+  configuration, then delete their now-inert private payload entries. A native
+  write failure leaves private storage untouched.
+- If a native write fails after a target payload was prepared, or an old-entry
+  cleanup fails after native success, the extra private key is an orphan and
+  cannot affect any currently reachable Model identity. The error reports the
+  exact key and never claims complete cleanup.
+
+Orphan detection re-reads native configuration, refreshes the current
+ModelRegistry, and compares private keys with configured and registered
+Provider/Model identities. `/model-config` offers `Clean orphan payloads` only
+when entries exist; it previews exact keys, requires confirmation, and is
+idempotent. Create, rename, and copy reject a target identity that already has
+an orphan payload until the user cleans it, preventing stale data from becoming
+active through later ID reuse. Injected failures at every ordering boundary
+must preserve these invariants.
 
 ## Endpoint Model Discovery
 
@@ -366,8 +429,17 @@ category. The existing discovery request contract remains:
 - accept the response formats already supported by the extension;
 - time out and report failure without changing configuration.
 
-After a successful fetch, the UI shows the source endpoint, count, and an ID
-summary, then offers:
+Before presenting choices, discovery normalizes records as follows:
+
+- accept only object records with a non-empty string `id`, or a non-empty string
+  `name` used as the fallback ID;
+- trim the selected ID and optional display name;
+- discard malformed records and report the skipped count;
+- deduplicate by normalized ID in endpoint order, keeping the first record;
+- treat an all-invalid result as fetch failure with no choice dialog or write.
+
+After successful normalization, the UI shows the source endpoint, valid count,
+skipped/duplicate counts, and an ID summary, then offers:
 
 - `Merge`: keep every existing Model object unchanged and append only IDs that
   are not already present;
@@ -381,12 +453,15 @@ for hand-edited records with the same ID.
 ## Errors and Safety
 
 - Malformed or blank native configuration is never overwritten.
-- File, parse, validation, stale-target, and collision errors name the affected
-  object and provide a recovery action.
-- Destructive delete, rename collision resolution, and endpoint replacement are
-  explicit confirmation paths.
-- API key literals do not appear in panel rows, notifications, test snapshots,
-  or error messages.
+- File, parse, full-candidate validation, nested-conflict, orphan-payload, and
+  collision errors name the affected object and provide a recovery action.
+- Destructive delete, unsupported-override cleanup, orphan cleanup, and endpoint
+  replacement are explicit confirmation paths.
+- Create, copy, and rename collision rejection never mutates native or private
+  storage.
+- Stored API key literals do not appear in panel rows, notifications, test
+  snapshots, error messages, or replacement-input initial values. User-typed
+  characters are visible only during the warned native-input replacement step.
 - The component uses Pi's injected theme and keybindings, requests a render
   after state changes, and never emits lines wider than the provided width.
 - Non-TUI invocation reports that the interactive editor requires TUI mode and
@@ -413,27 +488,40 @@ Implementation follows TDD for new behavior. Focused tests cover:
 - absent, inherited, false, zero, nested-count, and masked-secret formatting;
 - immediate patches edit only the chosen field;
 - explicit clear behavior and required-field rejection;
+- complete-candidate validation and rejection of cross-field-invalid clears;
 - unknown field preservation after every supported patch;
 - complete pricing, thinking-map `max`, headers, and endpoint overrides;
-- the exact Model Override allowlist and absence of `api`, `baseUrl`, `id`, and
-  private Payload descriptors.
+- the exact Model Override allowlist, persisted-output pruning only after
+  explicit confirmation, and absence of `api`, `baseUrl`, `id`, and private
+  Payload descriptors from normal output.
 
 ### Controller and Nested-Editor Tests
 
 - simple edit confirmation and cancellation;
 - nested draft save and discard;
-- Provider/Model rename collisions and private payload migration;
+- optimistic same-subtree conflict rejection for headers, compat, thinking map,
+  cost, Model Overrides, and Payload;
+- Provider/Model rename, delete, and copy ordering with injected private/native
+  write failures and idempotent orphan cleanup;
 - stale-target refresh after an external modification;
-- creation wizard minimum fields and post-create panel state;
+- creation wizard minimum fields, post-create panel state, and collision
+  rejection without mutation;
+- copy target collision rejection without mutation;
+- stored API Key values are never pre-filled and the active-entry warning is
+  shown;
 - destructive confirmations.
 
 ### Endpoint Discovery Tests
 
 - the endpoint action remains available with zero or many Models;
-- timeout, HTTP failure, unsupported shape, and empty response do not mutate
-  configuration;
-- merge preserves existing same-ID Model objects and appends new IDs;
-- replace requires confirmation and removes payloads for deleted Models;
+- timeout, HTTP failure, unsupported shape, empty response, and all-invalid
+  records do not mutate configuration;
+- malformed records are skipped and duplicate normalized IDs keep the first
+  endpoint record;
+- merge preserves existing same-ID Model objects, appends each new ID once, and
+  updates its seen-ID set while processing;
+- replace requires confirmation and removes payloads for deleted Models, with
+  injected cleanup failure leaving only inert, discoverable orphan entries;
 - cancel performs no write.
 
 The existing test suite and syntax checks must continue to pass.
@@ -451,11 +539,18 @@ The existing test suite and syntax checks must continue to pass.
    the settings panel.
 6. Common Provider and Model fields listed in this design are directly
    editable, while unknown fields remain intact; Model Overrides emit only
-   Pi's documented override field subset.
-7. `Fetch Models from endpoint` remains available and satisfies the specified
-   merge, replace, cancel, and failure behavior.
-8. Provider/Model identity changes preserve private payload lifecycle and reject
-   collisions.
-9. Wide terminals use two panes and narrow terminals remain fully operable.
-10. API key literals are masked throughout the interface.
-11. New focused tests, the full existing test suite, and syntax checks pass.
+   Pi's documented subset and remove unsupported stored keys only after an
+   explicit previewed confirmation.
+7. Every native write validates the complete post-edit candidate and rejects
+   Pi-invalid cross-field states without mutation.
+8. Nested saves reject same-subtree concurrent changes rather than overwriting
+   them.
+9. `Fetch Models from endpoint` remains available and satisfies the specified
+   normalization, deduplication, merge, replace, cancel, and failure behavior.
+10. Create, copy, and rename reject all target collisions without mutation.
+11. Cross-file identity operations preserve payload behavior under injected
+   failures, and any inert orphan entry has an idempotent cleanup path.
+12. Wide terminals use two panes and narrow terminals remain fully operable.
+13. Stored API key literals are masked outside the explicitly warned active
+   replacement input and are never pre-filled.
+14. New focused tests, the full existing test suite, and syntax checks pass.
