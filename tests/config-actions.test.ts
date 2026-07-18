@@ -1324,3 +1324,184 @@ test("legacy key provider/ enumerates as empty model id and participates in iden
   assert.equal((await actions.commitProviderIdentityAction(delPreview.token)).type, "success");
   assert.equal(Object.keys(readPayload(agentDir).extraPayloads).length, 0);
 }));
+
+
+test("patchProvider models migrates valid legacy, preserves removed payloads, and requires discard", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [
+          model("keep", { extraPayload: legacyRows({ k: { type: "string", value: "v" } }) }),
+          model("drop", { extraPayload: legacyRows({ d: { type: "bool", value: "true" } }) }),
+          model("bad", { extraPayload: { not: "rows" } }),
+        ],
+      },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "drop", { privateDrop: true }));
+  const beforeNative = fs.readFileSync(getModelsPath(agentDir));
+  const beforePayload = fs.readFileSync(getPayloadConfigPath(agentDir));
+
+  const blocked = await actions.patchProvider("local", {
+    models: [model("keep"), model("newonly")],
+  });
+  assert.equal(blocked.type, "validation-error");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(beforeNative), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(beforePayload), true);
+
+  // Valid migration + payload-only collision + removed payload preservation.
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [
+          model("keep", { extraPayload: legacyRows({ k: { type: "string", value: "v" } }) }),
+          model("drop", { extraPayload: legacyRows({ d: { type: "bool", value: "true" } }) }),
+        ],
+      },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(
+    setPayloadDocumentValue(emptyPayloadDocument(), "local", "fresh", { only: true }),
+    "local",
+    "drop",
+    { privateDrop: true },
+  ));
+
+  const collision = await actions.patchProvider("local", {
+    models: [model("keep"), model("fresh")],
+  });
+  assert.equal(collision.type, "payload-collision");
+
+  const replaced = await actions.patchProvider("local", {
+    models: [
+      model("keep", { extraPayload: legacyRows({ k: { type: "string", value: "v" } }) }),
+      model("fresh"),
+    ],
+  }, { payloadCollisionResolution: "reuse-target" });
+  assert.equal(replaced.type, "success");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models!.find((m) => m.id === "keep")!, "extraPayload"), false);
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "keep"), { k: "v" });
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "fresh"), { only: true });
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "drop"), { privateDrop: true });
+}));
+
+test("patchModel auto-migrates valid legacy with private/explicit precedence", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("one", { name: "Old", extraPayload: legacyRows({ t: { type: "string", value: "hot" } }) })],
+      },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+
+  const named = await actions.patchModel("local", "one", { name: "New" }, {
+    fieldBaselines: { name: "Old" },
+  });
+  assert.equal(named.type, "success");
+  assert.equal(readNative(agentDir).providers.local!.models![0]!.name, "New");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), false);
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "one"), { t: "hot" });
+
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("one", { extraPayload: legacyRows({ t: { type: "string", value: "hot" } }) })],
+      },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "one", { private: true }));
+  const priv = await actions.patchModel("local", "one", { name: "N" }, { fieldBaselines: { name: undefined } });
+  assert.equal(priv.type, "success");
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "one"), { private: true });
+
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("one", { extraPayload: legacyRows({ t: { type: "string", value: "hot" } }) })],
+      },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "one", { private: true }));
+  const explicit = await actions.patchModel("local", "one", { name: "E" }, {
+    fieldBaselines: { name: undefined },
+    payload: { explicit: 1 },
+  });
+  assert.equal(explicit.type, "success");
+  assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "one"), { explicit: 1 });
+
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("one", { extraPayload: legacyRows({ t: { type: "string", value: "hot" } }) })],
+      },
+    },
+  });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "one", { private: true }));
+  const cleared = await actions.patchModel("local", "one", { name: "C" }, {
+    fieldBaselines: { name: undefined },
+    payload: null,
+  });
+  assert.equal(cleared.type, "success");
+  assert.equal(lookupModelPayload(readPayload(agentDir), "local", "one"), undefined);
+
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("one", { extraPayload: legacyRows({ t: { type: "string", value: "hot" } }) })],
+      },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  const lockActions = new ModelConfigActions({
+    agentDir,
+    commitMutation: async () => ({ type: "busy" }),
+  });
+  const beforeNative = fs.readFileSync(getModelsPath(agentDir));
+  const beforePayload = fs.readFileSync(getPayloadConfigPath(agentDir));
+  const busy = await lockActions.patchModel("local", "one", { name: "X" }, { fieldBaselines: { name: undefined } });
+  assert.equal(busy.type, "lock-busy");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(beforeNative), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(beforePayload), true);
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), true);
+}));
+
+test("provider delete requires explicit discard for malformed legacy", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("one", { extraPayload: { not: "rows" } })],
+      },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  const before = fs.readFileSync(getModelsPath(agentDir));
+  const blocked = await actions.previewProviderIdentityAction({ kind: "delete", providerId: "local" });
+  assert.equal(blocked.type, "validation-error");
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(before), true);
+  const ok = await actions.previewProviderIdentityAction({
+    kind: "delete",
+    providerId: "local",
+    legacyDiscardResolution: "discard-malformed-legacy",
+  });
+  assert.equal(ok.type, "preview");
+  if (ok.type !== "preview") return;
+  assert.equal((await actions.commitProviderIdentityAction(ok.token)).type, "success");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers, "local"), false);
+}));

@@ -154,11 +154,16 @@ test("parseModelsDocument keeps literal __proto__ and sentinel-named provider ke
 
 test("parseModelsDocument materializes unicode-escaped __proto__ provider key as own key", () => withAgentDir((agentDir) => {
   const filePath = path.join(agentDir, "models.json");
-  // \u005f is underscore; four escapes form the key __proto__
-  const document = `{
+  // Raw JSON unicode escapes must reach the parser undecoded by JS string evaluation.
+  const document = String.raw`{
   "providers": {
     "\u005f\u005fproto\u005f\u005f": {
       "baseUrl": "http://escaped",
+      "api": "openai-completions",
+      "models": []
+    },
+    "__mc_own_proto__": {
+      "baseUrl": "http://sentinel",
       "api": "openai-completions",
       "models": []
     }
@@ -167,5 +172,52 @@ test("parseModelsDocument materializes unicode-escaped __proto__ provider key as
   fs.writeFileSync(filePath, document, "utf8");
   const parsed = parseModelsDocument(filePath, fs.readFileSync(filePath));
   assert.equal(Object.hasOwn(parsed.providers, "__proto__"), true);
+  assert.equal(Object.hasOwn(parsed.providers, "__mc_own_proto__"), true);
   assert.equal(parsed.providers["__proto__"]!.baseUrl, "http://escaped");
+  assert.equal(parsed.providers["__mc_own_proto__"]!.baseUrl, "http://sentinel");
+  writeModelsConfig(parsed);
+  const roundtrip = readModelsConfig();
+  assert.equal(Object.hasOwn(roundtrip.providers, "__proto__"), true);
+  assert.equal(Object.hasOwn(roundtrip.providers, "__mc_own_proto__"), true);
+  assert.equal(roundtrip.providers["__proto__"]!.baseUrl, "http://escaped");
+}));
+
+test("parseModelsDocument ignores Object.prototype pollution for providers root", () => withAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "models.json");
+  const proto = Object.prototype as Record<string, unknown>;
+  const previous = proto.providers;
+  try {
+    Object.defineProperty(Object.prototype, "providers", {
+      value: {
+        phantom: { baseUrl: "http://evil", api: "openai-completions", models: [] },
+      },
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+    // Document without own providers must not materialize the prototype map.
+    fs.writeFileSync(filePath, `{ "feature": true }`, "utf8");
+    const emptyish = parseModelsDocument(filePath, fs.readFileSync(filePath));
+    assert.equal(Object.hasOwn(emptyish, "providers"), true);
+    assert.equal(Object.keys(emptyish.providers).length, 0);
+    assert.equal(Object.hasOwn(emptyish.providers, "phantom"), false);
+
+    fs.writeFileSync(filePath, `{
+  "providers": {
+    "real": { "baseUrl": "http://real", "api": "openai-completions", "models": [] }
+  }
+}`, "utf8");
+    const real = parseModelsDocument(filePath, fs.readFileSync(filePath));
+    assert.equal(Object.hasOwn(real.providers, "real"), true);
+    assert.equal(Object.hasOwn(real.providers, "phantom"), false);
+    assert.equal(real.providers.real!.baseUrl, "http://real");
+  } finally {
+    if (previous === undefined) delete proto.providers;
+    else Object.defineProperty(Object.prototype, "providers", {
+      value: previous,
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+  }
 }));

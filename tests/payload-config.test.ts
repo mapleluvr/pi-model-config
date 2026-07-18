@@ -186,3 +186,37 @@ test("enumerates unambiguous empty-model legacy key provider/ and cleans it on p
   assert.equal(Object.hasOwn(config.extraPayloads, "local/"), false);
   assert.equal(Object.hasOwn(config.extraPayloads, "local/a/b"), true);
 });
+
+test("parsePayloadDocument requires own version/extraPayloads and ignores prototype pollution", () => {
+  const proto = Object.prototype as Record<string, unknown>;
+  const previousVersion = proto.version;
+  const previousExtra = proto.extraPayloads;
+  try {
+    Object.defineProperty(Object.prototype, "version", {
+      value: 1,
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+    Object.defineProperty(Object.prototype, "extraPayloads", {
+      value: { '["evil","m"]': { steal: true } },
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+    assert.throws(() => parsePayloadDocument("{}"), /expected versioned payload document/);
+    assert.throws(() => parsePayloadDocument('{"version":1}'), /expected versioned payload document/);
+    const ok = parsePayloadDocument('{"version":1,"extraPayloads":{}}');
+    assert.deepEqual(ok, { version: 1, extraPayloads: {} });
+    assert.equal(Object.hasOwn(ok.extraPayloads, '["evil","m"]'), false);
+  } finally {
+    if (previousVersion === undefined) delete proto.version;
+    else Object.defineProperty(Object.prototype, "version", {
+      value: previousVersion, configurable: true, enumerable: true, writable: true,
+    });
+    if (previousExtra === undefined) delete proto.extraPayloads;
+    else Object.defineProperty(Object.prototype, "extraPayloads", {
+      value: previousExtra, configurable: true, enumerable: true, writable: true,
+    });
+  }
+});

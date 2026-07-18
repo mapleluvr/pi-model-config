@@ -75,12 +75,21 @@ export function parsePayloadDocument(raw: string | Uint8Array, filePath = getPay
   } catch {
     throw new PayloadConfigError(filePath, "invalid JSON document");
   }
-  if (!isPlainPayloadObject(parsed) || parsed.version !== 1 || !isPlainPayloadObject(parsed.extraPayloads)) {
+  if (!isPlainPayloadObject(parsed)) {
+    throw new PayloadConfigError(filePath, "expected versioned payload document");
+  }
+  // Own-key only: inherited Object.prototype.version/extraPayloads must never satisfy the schema.
+  if (!hasOwnKey(parsed, "version") || getOwnValue(parsed, "version") !== 1) {
+    throw new PayloadConfigError(filePath, "expected versioned payload document");
+  }
+  const rawExtra = hasOwnKey(parsed, "extraPayloads") ? getOwnValue(parsed, "extraPayloads") : undefined;
+  if (!isPlainPayloadObject(rawExtra)) {
     throw new PayloadConfigError(filePath, "expected versioned payload document");
   }
   const extraPayloads = emptyOwnMap<Record<string, unknown>>();
-  for (const key of ownKeys(parsed.extraPayloads)) {
-    const value = getOwnValue(parsed.extraPayloads, key);
+  for (const key of ownKeys(rawExtra)) {
+    if (!hasOwnKey(rawExtra, key)) continue;
+    const value = getOwnValue(rawExtra, key);
     if (!isPlainPayloadObject(value)) throw new PayloadConfigError(filePath, "payload entry must be an object");
     try {
       setOwnValue(extraPayloads, key, cloneJson(value));

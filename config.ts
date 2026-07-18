@@ -67,16 +67,26 @@ export function parseModelsDocument(filePath: string, raw: string | Uint8Array):
     throw new ModelsConfigError(filePath, "root must be a JSON object");
   }
   const root = materializeJsoncNode(tree) as Record<string, unknown>;
-  if (root.providers !== undefined && (!root.providers || typeof root.providers !== "object" || Array.isArray(root.providers))) {
+  // Own-key only: never read inherited `providers` from Object.prototype pollution.
+  const providersRaw = hasOwnKey(root, "providers") ? getOwnValue(root, "providers") : undefined;
+  if (providersRaw !== undefined && (!providersRaw || typeof providersRaw !== "object" || Array.isArray(providersRaw))) {
     throw new ModelsConfigError(filePath, "providers must be a JSON object when present");
   }
-  const providersSource = (root.providers as Record<string, ProviderConfig> | undefined) ?? {};
+  const providersSource = (providersRaw as Record<string, ProviderConfig> | undefined) ?? {};
   const ownProviders: Record<string, ProviderConfig> = {};
   for (const key of Object.keys(providersSource)) {
     if (!hasOwnKey(providersSource, key)) continue;
-    setOwnValue(ownProviders, key, providersSource[key]!);
+    setOwnValue(ownProviders, key, getOwnValue(providersSource, key)!);
   }
-  const config = { ...root, providers: ownProviders } as ModelsConfig;
+  // Rebuild root with only own keys so inherited prototypes never materialize into config.
+  const ownRoot: Record<string, unknown> = {};
+  for (const key of Object.keys(root)) {
+    if (!hasOwnKey(root, key)) continue;
+    if (key === "providers") continue;
+    setOwnValue(ownRoot, key, getOwnValue(root, key));
+  }
+  setOwnValue(ownRoot, "providers", ownProviders);
+  const config = ownRoot as unknown as ModelsConfig;
   try {
     assertValidModelsCandidate(config);
   } catch {

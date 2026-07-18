@@ -508,14 +508,28 @@ function loadModelPayload(
 async function confirmLegacyDiscard(
   ctx: ExtensionCommandContext,
   hasMalformedLegacy: boolean | undefined,
+  scopeLabel = "This model",
 ): Promise<LegacyDiscardResolution | undefined | "cancel"> {
   if (!hasMalformedLegacy) return undefined;
   const ok = await ctx.ui.confirm(
     "Malformed legacy extraPayload",
-    "This model has malformed native legacy rows. Discard them on save? Cancel keeps the field unchanged.",
+    `${scopeLabel} has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.`,
   );
   if (!ok) return "cancel";
   return "discard-malformed-legacy";
+}
+
+function modelHasMalformedLegacy(model: ModelConfig | undefined): boolean {
+  if (!model || !Object.hasOwn(model, "extraPayload")) return false;
+  return !parseLegacyPayload((model as Record<string, unknown>)["extraPayload"]);
+}
+
+function providerHasMalformedLegacy(provider: ProviderConfig | undefined): boolean {
+  return (provider?.models ?? []).some((model) => modelHasMalformedLegacy(model));
+}
+
+function modelsListHasMalformedLegacy(models: readonly ModelConfig[] | undefined): boolean {
+  return (models ?? []).some((model) => modelHasMalformedLegacy(model));
 }
 
 function finiteNumberOr(value: string, fallback: number): number {
@@ -909,7 +923,17 @@ async function manageProviders(
 
     if (action.startsWith("删除")) {
       if (!await ctx.ui.confirm("确认删除", `删除 Provider "${providerId}" 及其所有 Models？`)) continue;
-      const saved = await commitProviderIdentity(ctx, { kind: "delete", providerId });
+      const discard = await confirmLegacyDiscard(
+        ctx,
+        providerHasMalformedLegacy(existing),
+        `Provider "${providerId}"`,
+      );
+      if (discard === "cancel") continue;
+      const saved = await commitProviderIdentity(ctx, {
+        kind: "delete",
+        providerId,
+        legacyDiscardResolution: discard,
+      });
       if (saved) config = saved;
       continue;
     }
@@ -921,10 +945,17 @@ async function manageProviders(
         ctx.ui.notify(`Provider "${copyId}" 已存在`, "error");
         continue;
       }
+      const discard = await confirmLegacyDiscard(
+        ctx,
+        providerHasMalformedLegacy(existing),
+        `Provider "${providerId}"`,
+      );
+      if (discard === "cancel") continue;
       const saved = await commitProviderIdentity(ctx, {
         kind: "copy",
         providerId,
         targetProviderId: copyId,
+        legacyDiscardResolution: discard,
       });
       if (saved) config = saved;
       continue;
@@ -947,7 +978,20 @@ async function manageProviders(
       const models = replace
         ? fetched
         : [...currentModels, ...fetched.filter((model) => !existingIds.has(model.id))];
-      const saved = applyActionResult(ctx, await actions.patchProvider(providerId, { models }));
+      const affectedLegacy = replace
+        ? modelsListHasMalformedLegacy([...currentModels, ...fetched])
+        : modelsListHasMalformedLegacy(models);
+      const discard = await confirmLegacyDiscard(
+        ctx,
+        affectedLegacy,
+        `Provider "${providerId}" model list`,
+      );
+      if (discard === "cancel") continue;
+      const saved = applyActionResult(ctx, await actions.patchProvider(
+        providerId,
+        { models },
+        { legacyDiscardResolution: discard },
+      ));
       if (saved) config = saved;
       continue;
     }
@@ -959,12 +1003,19 @@ async function manageProviders(
         continue;
       }
       if (result.providerId !== providerId) {
+        const discard = await confirmLegacyDiscard(
+          ctx,
+          providerHasMalformedLegacy(existing),
+          `Provider "${providerId}"`,
+        );
+        if (discard === "cancel") continue;
         const saved = await commitProviderIdentity(ctx, {
           kind: "rename",
           providerId,
           targetProviderId: result.providerId,
           providerPatch: managedProviderPatch(result.config),
           fieldBaselines: managedProviderBaselines(existing),
+          legacyDiscardResolution: discard,
         });
         if (saved) config = saved;
       } else {

@@ -458,12 +458,15 @@ export function validateModelsCandidate(
     addIssue(issues, "$", "must be an object");
     return issues;
   }
-  if (!isObject(candidate.providers)) {
+  // Own-key only: never treat inherited Object.prototype.providers as the document map.
+  if (!Object.prototype.hasOwnProperty.call(candidate, "providers") || !isObject((candidate as { providers?: unknown }).providers)) {
     addIssue(issues, "$.providers", "must be an object");
     return issues;
   }
-  for (const [providerId, provider] of Object.entries(candidate.providers)) {
-    validateProvider(providerId, provider, childPath("$.providers", providerId), options, issues);
+  const providers = (candidate as { providers: Record<string, unknown> }).providers;
+  for (const providerId of Object.keys(providers)) {
+    if (!Object.prototype.hasOwnProperty.call(providers, providerId)) continue;
+    validateProvider(providerId, providers[providerId], childPath("$.providers", providerId), options, issues);
   }
   return issues;
 }
