@@ -23,6 +23,8 @@ import { deepCloneJson } from "./model-fields.ts";
 import { getOwnValue, hasOwnKey, setOwnValue, deleteOwnKey } from "./own-keys.ts";
 import { fetchEndpointModels, type EndpointDiscoveryFailure, type EndpointDiscoverySuccess } from "./endpoint-models.ts";
 import {
+  PROVIDER_API_PRECONDITION_MESSAGE,
+  customProviderNeedsProviderApi,
   editModelOverrideEntryDraft,
   formatUnsupportedOverridePreview,
   runModelList,
@@ -566,6 +568,10 @@ export async function runProviderEditor(
       continue;
     }
     if (result.categoryId === "models" && fieldId === "fetchModels") {
+      if (customProviderNeedsProviderApi(providerId, provider)) {
+        ctx.ui.notify(PROVIDER_API_PRECONDITION_MESSAGE, "error");
+        continue;
+      }
       await fetchAndCommit(ctx, actions, providerId, provider, fetchModels);
       continue;
     }

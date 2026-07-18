@@ -51,6 +51,8 @@ cp -r pi-model-config .pi/extensions/model-config
 
 创建流程仍是最小向导。Provider 只询问 Provider ID、Base URL、API type；Model 只询问 Model ID 并使用 Pi-compatible 默认值。创建完成后会在 General 分类打开面板。
 
+对于自定义非内置 Provider，添加 Model 或启动端点发现之前，必须先在 Provider 面板设置 Provider 级 `api`。内置 Provider 不受此限制。
+
 ### 保存语义
 
 简单字段在确认有效值后立即保存。取消不会修改存储；必填字段拒绝空值；可选字段提供明确的清除或 inherited/default 操作。
@@ -88,7 +90,7 @@ cp -r pi-model-config .pi/extensions/model-config
 
 ## 端点发现
 
-每个 Provider 始终可以使用 `Fetch Models from endpoint`，创建时不会自动执行。发现流程尝试受支持的 `{baseUrl}/models` 和 `{baseUrl}/v1/models`，规范化有效 ID，按端点顺序去重，并在选择模式前显示经过清理的来源和数量摘要。
+每个 Provider 都会始终显示 `Fetch Models from endpoint`，创建时不会自动执行。发现流程尝试受支持的 `{baseUrl}/models` 和 `{baseUrl}/v1/models`，规范化有效 ID，按端点顺序去重，并在选择模式前显示经过清理的来源和数量摘要。
 
 预览提供：
 

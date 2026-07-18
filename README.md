@@ -51,6 +51,8 @@ Controls:
 
 New objects retain small creation wizards. A Provider asks for Provider ID, Base URL, and API type. A Model asks for Model ID and applies Pi-compatible defaults. The new object then opens in the panel at General.
 
+For a custom non-built-in Provider, set Provider-level `api` in the Provider panel before adding a Model or starting endpoint discovery. Built-in Providers are not subject to this precondition.
+
 ### Save behavior
 
 Simple fields save immediately after a valid confirmed value. Cancel leaves storage unchanged, required blanks are rejected, and optional fields have explicit clear or inherited/default actions.
@@ -88,7 +90,7 @@ False and zero are displayed literally. Absent values are shown as inherited or 
 
 ## Endpoint discovery
 
-`Fetch Models from endpoint` is always available for every Provider and is never run automatically during creation. Discovery tries the supported `{baseUrl}/models` and `{baseUrl}/v1/models` routes, normalizes valid IDs, removes duplicates in endpoint order, and shows the sanitized source and count summary before any mode is selected.
+`Fetch Models from endpoint` remains visible for every Provider and is never run automatically during creation. Discovery tries the supported `{baseUrl}/models` and `{baseUrl}/v1/models` routes, normalizes valid IDs, removes duplicates in endpoint order, and shows the sanitized source and count summary before any mode is selected.
 
 The preview offers:
 

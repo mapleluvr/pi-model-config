@@ -364,6 +364,41 @@ test("Provider creation asks only for ID, required Base URL, and API type, then 
   });
 });
 
+test("Add Model requires custom Provider-level API before ID prompt and leaves all artifacts unchanged", async () => {
+  await withRuntimeAgentDir(async (agentDir) => {
+    writeModelsConfig({ providers: { local: {
+      baseUrl: "http://localhost:11434",
+      models: [{ id: "existing", api: "openai-completions" }],
+    } } });
+    seedModelPayload("local", "existing", { keep: true });
+    const artifactPaths = [getModelsPath(agentDir), getPayloadConfigPath(agentDir), getTransactionJournalPath(agentDir)];
+    const before = artifactPaths.map((filePath) => fs.existsSync(filePath) ? fs.readFileSync(filePath) : undefined);
+    const notifications: Array<{ message: string; level: string }> = [];
+    const script: Script = {
+      selects: ["管理 Providers", "退出"],
+      inputs: [],
+      editors: [],
+      confirms: [],
+      customs: [
+        "provider:local",
+        panelResult("run-action", "models", "manageModels"),
+        "__pi_model_config_action:add_model",
+        "__pi_model_config_action:back",
+        panelResult("back"),
+        "__pi_model_config_action:back",
+      ],
+    };
+    await runModelConfigCommand(script, notifications);
+    artifactPaths.forEach((filePath, index) => {
+      const expected = before[index];
+      if (expected === undefined) assert.equal(fs.existsSync(filePath), false);
+      else assert.equal(fs.readFileSync(filePath).equals(expected), true);
+    });
+    assert.deepEqual(notifications, [{ message: "请先在 Provider 面板设置 Provider 级 API 类型", level: "error" }]);
+    assert.doesNotMatch(JSON.stringify(notifications), /localhost|existing|openai-completions/);
+  });
+});
+
 test("Model creation uses Pi-compatible defaults and opens General without discovery prompts", async () => {
   await withRuntimeAgentDir(async () => {
     writeModelsConfig({ providers: { local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [] } } });

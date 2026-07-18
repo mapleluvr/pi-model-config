@@ -15,6 +15,7 @@ import {
   setPayloadDocumentValue,
   serializePayloadDocument,
 } from "../payload-config.ts";
+import { getTransactionJournalPath } from "../payload-coordinator.ts";
 import { buildProviderCategories, runProviderEditor } from "../provider-editor.ts";
 import type { SettingsPanelResult } from "../settings-panel.ts";
 
@@ -338,6 +339,84 @@ test("Provider copy after native parse failure writes no target payload", async 
   assert.equal(lookupModelPayload(readPayloadConfig(), "target", "m"), undefined);
   assert.ok(notifications.some((message) => message.includes("恢复")));
   assert.equal(actions.boundPreviewCount(), 0);
+}));
+
+test("Custom Provider endpoint discovery requires Provider-level API before fetch or preview", async () => withAgentDir(async (agentDir, actions) => {
+  writeModelsConfig({
+    providers: {
+      local: {
+        baseUrl: "http://service.test",
+        apiKey: "configured-reference",
+        models: [{ id: "old", api: "openai-completions" }],
+      },
+    },
+  });
+  writePayload(setPayloadDocumentValue({ version: 1, extraPayloads: {} }, "local", "old", { keep: true }));
+  const nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+  const payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+  const journalPath = getTransactionJournalPath(agentDir);
+  const panels = [panelResult("run-action", "models", "fetchModels"), panelResult("back")];
+  const notifications: Array<{ message: string; level: string }> = [];
+  let fetchCalls = 0;
+  let previewCalls = 0;
+  const previewEndpointChange = actions.previewEndpointChange.bind(actions);
+  (actions as any).previewEndpointChange = async (...args: unknown[]) => {
+    previewCalls += 1;
+    return await (previewEndpointChange as any)(...args);
+  };
+  const ctx = {
+    ui: {
+      select: async () => { throw new Error("endpoint mode must not be prompted"); },
+      notify: (message: string, level: string) => notifications.push({ message, level }),
+    },
+  } as any;
+  await runProviderEditor(ctx, "local", {
+    actions,
+    openPanel: async () => panels.shift()!,
+    fetchModels: async (provider) => {
+      fetchCalls += 1;
+      return await fakeEndpointDiscovery(provider, [{ id: "new" }]);
+    },
+  });
+  assert.equal(fetchCalls, 0);
+  assert.equal(previewCalls, 0);
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
+  assert.equal(fs.existsSync(journalPath), false);
+  assert.deepEqual(notifications, [{ message: "请先在 Provider 面板设置 Provider 级 API 类型", level: "error" }]);
+  assert.doesNotMatch(JSON.stringify(notifications), /configured-reference|service\.test|old/);
+}));
+
+test("Built-in Provider endpoint discovery is allowed without Provider-level API", async () => withAgentDir(async (agentDir, actions) => {
+  writeModelsConfig({
+    providers: {
+      openai: { baseUrl: "http://service.test", apiKey: "configured-reference", models: [] },
+    },
+  });
+  writePayload({ version: 1, extraPayloads: {} });
+  const nativeBefore = fs.readFileSync(getModelsPath(agentDir));
+  const payloadBefore = fs.readFileSync(getPayloadConfigPath(agentDir));
+  const panels = [panelResult("run-action", "models", "fetchModels"), panelResult("back")];
+  const notifications: string[] = [];
+  let fetchCalls = 0;
+  const ctx = {
+    ui: {
+      select: async () => "取消",
+      notify: (message: string) => notifications.push(message),
+    },
+  } as any;
+  await runProviderEditor(ctx, "openai", {
+    actions,
+    openPanel: async () => panels.shift()!,
+    fetchModels: async (provider) => {
+      fetchCalls += 1;
+      return await fakeEndpointDiscovery(provider, [{ id: "new" }]);
+    },
+  });
+  assert.equal(fetchCalls, 1);
+  assert.ok(notifications.some((message) => message.includes("有效 1") && message.includes("new")));
+  assert.equal(fs.readFileSync(getModelsPath(agentDir)).equals(nativeBefore), true);
+  assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(payloadBefore), true);
 }));
 
 test("Endpoint confirmation Cancel discards the bound preview on the creating actions instance", async () => withAgentDir(async (agentDir, actions) => {

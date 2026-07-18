@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildModelCategories,
   buildModelOverrideCategories,
+  createModelAndOpen,
   editModelOverrideEntryDraft,
   runModelEditor,
 } from "../model-editor.ts";
@@ -125,6 +126,43 @@ function modelSnapshot(model: Record<string, unknown>): any {
     payloadHash: "payload",
   };
 }
+
+test("Built-in Provider Add Model is allowed without Provider-level API", async () => {
+  const provider: Record<string, unknown> = { models: [] };
+  let createCalls = 0;
+  let panelCalls = 0;
+  const actions = {
+    readEditorSnapshot: () => ({
+      type: "snapshot",
+      native: { providers: { openai: provider } },
+      payload: { version: 1, extraPayloads: {} },
+      nativeHash: "native",
+      payloadHash: "payload",
+    }),
+    createModel: async (_providerId: string, model: Record<string, unknown>) => {
+      createCalls += 1;
+      provider.models = [model];
+      return { type: "success" };
+    },
+  } as any;
+  const ctx = {
+    ui: {
+      input: async () => "created",
+      notify() {},
+    },
+  } as any;
+  const created = await createModelAndOpen(ctx, "openai", {
+    actions,
+    openPanel: async () => {
+      panelCalls += 1;
+      return panelResult("back");
+    },
+  });
+  assert.equal(created, "created");
+  assert.equal(createCalls, 1);
+  assert.equal(panelCalls, 1);
+  assert.equal((provider.models as Array<Record<string, unknown>>)[0]!.id, "created");
+});
 
 test("Model search restores the selected field and panel state", async () => {
   const model = { id: "one", future: { keep: true } };

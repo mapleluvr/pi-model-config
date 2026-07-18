@@ -34,6 +34,9 @@ for (const file of ["README.md", "README-CN.md"]) {
     assert.match(content, /model-config-transaction\.json/);
     assert.match(content, /journal|事务日志/i);
     assert.match(content, /API key|API 密钥/i);
+    assert.match(content, /custom non-built-in Provider|自定义非内置 Provider/i);
+    assert.match(content, /before adding a Model or starting endpoint discovery|添加 Model 或启动端点发现之前/i);
+    assert.match(content, /Built-in Providers are not subject|内置 Provider 不受此限制/i);
     assert.match(content, /Subagent/);
     assert.doesNotMatch(content, /Register configured providers at Pi startup|启动时从 `models\.json` 注册/);
   });

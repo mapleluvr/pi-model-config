@@ -9,6 +9,7 @@ import {
   type ModelIdentityRequest,
   type PayloadCollisionResolution,
 } from "./config-actions.ts";
+import { BUILT_IN_PROVIDERS_PI_0_80_6 } from "./config-validation.ts";
 import {
   collectNonNegativeRate,
   collectOptionalString,
@@ -38,6 +39,7 @@ import type { ModelConfig, ModelOverrideConfig, ModelsConfig } from "./types.ts"
 
 const ACTION_ADD_MODEL = "__pi_model_config_action:add_model";
 const ACTION_BACK = "__pi_model_config_action:back";
+export const PROVIDER_API_PRECONDITION_MESSAGE = "请先在 Provider 面板设置 Provider 级 API 类型";
 const THINKING_WARNING = "Reasoning 已关闭；Thinking Map 会保留但当前不生效";
 const INPUT_OPTIONS = [
   { value: "text", label: "文本" },
@@ -756,12 +758,27 @@ export async function runModelEditor(
   }
 }
 
+export function customProviderNeedsProviderApi(providerId: string, provider: Record<string, unknown>): boolean {
+  return !BUILT_IN_PROVIDERS_PI_0_80_6.has(providerId) && getOwnValue(provider, "api") === undefined;
+}
+
 export async function createModelAndOpen(
   ctx: ExtensionCommandContext,
   providerId: string,
   dependencies: ModelEditorDependencies = {},
 ): Promise<string | undefined> {
   const actions = dependencies.actions ?? new ModelConfigActions();
+  const snapshot = actions.readEditorSnapshot();
+  if (snapshot.type !== "snapshot") {
+    notifyActionFailure(ctx, snapshot);
+    return undefined;
+  }
+  const provider = getOwnValue(snapshot.native.providers, providerId);
+  if (!provider) return undefined;
+  if (customProviderNeedsProviderApi(providerId, provider)) {
+    ctx.ui.notify(PROVIDER_API_PRECONDITION_MESSAGE, "error");
+    return undefined;
+  }
   const id = await collectRequiredString(ctx, `新建 Model - ${providerId}`, "Model ID");
   if (id.status === "cancel") return undefined;
   const model = defaultModel(id.value);
