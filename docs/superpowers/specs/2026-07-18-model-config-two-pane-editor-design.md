@@ -410,7 +410,15 @@ case-sensitive directories are not conflated. Platform adapters are:
   the hash, with a versioned full-hash identity handshake.
 
 The Windows named pipe and Linux abstract socket have full-hash names and no
-persistent filesystem entry. On macOS, the port is `49152 + (firstUnsigned16BitWord(hash) % 16384)`.
+persistent filesystem entry. On Windows, Node reports an occupied pipe as
+`EADDRINUSE`. Bun 1.3.14 may instead report `ERR_INVALID_ARG_TYPE` with
+`Failed to listen at <exact-pipe>`; only for that exact derived pipe/error pair,
+the adapter performs one bounded connection probe. A successful connection is
+`busy` even if the owner event loop does not answer a handshake; connection
+failure is a fail-closed collision/unsupported result and never permits bind
+retry or takeover.
+
+On macOS, the port is `49152 + (firstUnsigned16BitWord(hash) % 16384)`.
 `EADDRINUSE` followed by a valid matching identity handshake means the same
 agent directory is busy. A valid different identity, unrecognized listener,
 handshake timeout, unsupported adapter, or endpoint error fails closed as a lock
@@ -421,9 +429,9 @@ PID; it contains no path, key, payload, or model data.
 `listen` success is the sole mutation-ownership transition. A paused owner keeps
 the endpoint because the OS still owns its server handle. Process exit or crash
 releases it automatically, so there is no mtime lease, boot/PID inference,
-stale-owner deletion, recovery claim, or force-unlock path. Acquisition never
-waits for the owner or retries takeover; `EADDRINUSE` returns a no-write
-"operation in progress" result with a retry action.
+stale-owner deletion, recovery claim, or force-unlock path. Acquisition never waits for owner release or retries takeover. Windows
+`EADDRINUSE`, a successful Windows occupied-pipe probe, or a matching macOS
+identity returns a no-write "operation in progress" result with a retry action.
 
 An acquired `MutationLockHandle` is bound to one server instance and opaque
 token. Every extension mutation re-reads both files after acquisition,
@@ -556,7 +564,10 @@ for hand-edited records with the same ID.
 
 - Malformed or blank native configuration is never overwritten.
 - File, parse, full-candidate validation, nested-conflict, transaction-recovery,
-  and collision errors name the affected object and provide a recovery action.
+  and identity-collision errors name the affected object and provide a recovery
+  action. Mutation results preserve IPC `busy`, `collision`, and `unsupported`
+  as distinct non-secret outcomes; none is conflated with a Provider/Model ID
+  collision or journal recovery state.
 - Destructive delete, unsupported-override cleanup, payload-identity resolution,
   transaction recovery, and endpoint replacement are explicit confirmation
   paths.
@@ -611,9 +622,9 @@ Implementation follows TDD for new behavior. Focused tests cover:
   transactions, including retry exhaustion and fail-closed behavior;
 - before/after request-hook resolution for current-session Models, built-in
   fallback identities, and dynamically registered identities;
-- real cross-process IPC exclusion under Node and Bun, including a paused owner,
-  simultaneous contenders, clean release, and immediate reacquisition after the
-  owner process is killed;
+- the full Windows owner/contender matrix (Node/Node, Node/Bun, Bun/Node,
+  Bun/Bun) returns `busy` under a paused owner, plus real cross-process IPC
+  exclusion, clean release, and immediate reacquisition after owner kill;
 - Windows named-pipe and Linux abstract-socket full-hash endpoint derivation,
   plus macOS deterministic-port handshake for matching, different, unrecognized,
   and timed-out identities;
@@ -626,6 +637,8 @@ Implementation follows TDD for new behavior. Focused tests cover:
 - concurrent changes between manual recovery preview and confirmation for both
   valid mismatched and malformed journals, requiring refresh without write;
 - stale-target refresh after an external modification;
+- Provider, Model, payload, and endpoint controllers preserve lock `busy`,
+  `collision`, and `unsupported` as distinct non-secret zero-write results;
 - creation wizard minimum fields, post-create panel state, and collision
   rejection without mutation;
 - copy target collision rejection without mutation;
