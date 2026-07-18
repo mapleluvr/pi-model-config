@@ -23,7 +23,7 @@
 - Every native write validates the full post-patch candidate against the Pi 0.80.6 shapes and cross-field rules before replacement.
 - Do not call `pi.registerProvider()` to replay `models.json`; Pi's native ModelRegistry remains authoritative.
 - Do not change the native `models.json` schema or private `model-config-payloads.json` schema.
-- The mutation lock has no time-based stale takeover; an owner or recovery claimant is replaced only after positive process-death or changed-boot proof.
+- Mutation authority is an OS-owned local IPC endpoint: Windows named pipe, Linux abstract UDS, or one deterministic macOS loopback port with full-hash identity handshake. There is no persisted lock, stale takeover, boot/PID inference, claim, or force-unlock path.
 - Never wait for human input while holding the mutation lock; confirmation uses preview hashes followed by lock-time revalidation.
 - Payload values and literal API keys never appear in logs, notifications, errors, snapshots, or pre-filled replacement inputs.
 - Endpoint discovery keeps the existing URL probing, credential resolution, and 15-second request timeout contract.
@@ -40,7 +40,7 @@
 | `atomic-file.ts` | Hash raw artifacts, preserve absent-file identity, write same-directory temporary files, fsync, atomically replace/remove, and quarantine malformed storage. |
 | `config-validation.ts` | Validate every known Provider, Model, Model Override, cost, thinking, headers, and compat field plus Pi 0.80.6 cross-field rules while allowing unknown future fields. |
 | `config.ts` | Parse/serialize JSONC native config and delegate durable replacement to `atomic-file.ts`; no UI or payload knowledge. |
-| `process-lock.ts` | Own process identity, positive liveness probes, exclusive lock acquisition, dead-owner claims, recursive claim recovery, owner-token fencing, and release. |
+| `process-lock.ts` | Derive local IPC endpoint identities, acquire/release OS-owned mutation authority, serve non-secret handshakes, and fence writes after handle loss. |
 | `payload-config.ts` | Parse/serialize/clone the unchanged private payload schema and provide pure identity transformations; direct uncoordinated writes are removed. |
 | `payload-coordinator.ts` | Read coherent native/private snapshots, commit journaled mutations, resolve request-time payload views, and expose deterministic automatic/manual recovery APIs. |
 | `config-actions.ts` | Provide Provider/Model CRUD, field/subtree patches, payload edits, collision previews, optimistic conflicts, and identity lifecycle operations to controllers. |
@@ -53,13 +53,14 @@
 | `index.ts` | Register the extension hook/command, reject non-TUI commands, show top-level menus/diagnostics, and delegate to domain controllers. |
 | `tests/helpers/temp-agent-dir.ts` | Isolate `PI_CODING_AGENT_DIR` and restore environment reliably. |
 | `tests/helpers/scripted-ui.ts` | Record prompts/notifications and return typed scripted panel, input, select, editor, and confirmation outcomes. |
-| `tests/fixtures/lock-worker.ts` | Exercise real cross-process lock ownership from the Node test suite. |
+| `tests/fixtures/lock-worker.ts` | Exercise real Node/Bun cross-process IPC ownership, pause, release, kill, and crash behavior. |
+| `tests/fixtures/coordinator-worker.ts` | Exit at selected journal/native/payload boundaries to verify OS endpoint release and next-process recovery. |
 | `tests/fixtures/manual-endpoint-server.ts` | Serve deterministic non-secret discovery records for controlled TUI verification. |
 | `tests/fixtures/manual-agent-state.ts` | Seed isolated editor and recovery scenarios for controlled TUI verification. |
 | `tests/fixtures/assert-package.ts` | Parse `npm pack --dry-run --json` and fail on missing runtime or included private/test artifacts. |
 | `tests/atomic-file.test.ts` | Verify atomic replacement, mode handling, hashes, and injected pre-rename failures. |
 | `tests/config-validation.test.ts` | Verify known shapes, cross-field constraints, override allowlist, and unknown-field preservation. |
-| `tests/process-lock.test.ts` | Verify exclusion, owner death, claim races/crashes, liveness uncertainty, fencing, and release. |
+| `tests/process-lock.test.ts` | Verify endpoint derivation, platform adapters, handshakes, real-process exclusion, crash release, fencing, and close behavior. |
 | `tests/payload-coordinator.test.ts` | Verify journal boundaries, stable request snapshots, retries, recovery, malformed storage, and fail-closed behavior. |
 | `tests/config-actions.test.ts` | Verify patch scope, optimistic conflicts, CRUD collisions, identity transactions, payload lifecycle, and failure injection. |
 | `tests/endpoint-models.test.ts` | Verify endpoint probing, normalization, deduplication, merge/replace/cancel semantics, collisions, and failures. |
@@ -143,79 +144,56 @@ git commit -m "feat: validate and atomically write model config"
 
 ---
 
-### Task 2: Serialize editor processes with recoverable owner and claim records
+### Task 2: Serialize editor processes with an OS-owned local IPC lock
 
-**Purpose:** Two Pi processes cannot mutate configuration concurrently, a paused live owner never loses the lock, and a dead owner or dead recovery claimant has one deterministic successor.
+**Purpose:** Two Pi processes cannot mutate configuration concurrently; a paused process retains authority, while process exit or crash releases authority without a stale-file takeover protocol.
 
 **Files/modules:**
 - Create: `process-lock.ts`
 - Create: `tests/process-lock.test.ts`
 - Create: `tests/fixtures/lock-worker.ts`
-- Modify: `atomic-file.ts`
 - Modify: `package.json`
 
 **Interfaces and dependencies:**
-- Produces `ProcessIdentity`, `LockOwnerRecord`, `RecoveryClaimRecordV1`, `ReleaseRecordV1`, `ClaimEvidenceMismatch`, `MutationLockHandle`, and `AcquireLockResult`.
-- Produces `tryAcquireMutationLock(paths, deps): AcquireLockResult`; acquired handles expose `assertOwned(): void` and `release(): void` bound to one opaque token. `inspectClaimEvidenceMismatch()` returns a non-secret directory-snapshot token, and `restoreCapturedState(snapshotToken)` revalidates that token before explicit operator recovery.
-- `LockDependencies` injects token generation, `BootSessionAdapter`, `ProcessStartAdapter`, PID-existence probing, journal hashing, recursive directory snapshotting, and same-parent directory rename/remove operations for deterministic fault/race tests. Wall clock and elapsed time are not liveness evidence.
-- The fixed owner is the non-empty directory `<agent-dir>/model-config-transaction.lock/` containing a complete `owner.json`. Claim states are sibling directories `...claim.<generation>.<token>/`; release states are `...release.<token>/`. Every transition stays in the same parent directory.
-- `RecoveryClaimRecordV1` is the complete JSON owner record at `claim.json` and has exactly: `version: 1`, `generation`, opaque claim `token`, claimant `ProcessIdentity`, `journalHash | null`, complete `rootOwner`, and `source: { kind: "lock" | "claim", originalPath, snapshotHash, recordHash }`. Its sibling `claimed-state/` is the atomically moved raw source directory whose sorted relative-path/byte hash must equal `source.snapshotHash`; `recordHash` identifies its root `owner.json` or `claim.json`.
-- `ReleaseRecordV1` is the complete JSON record at `release.json` and contains version, release token, complete expected owner, original lock path, and the exact lock-directory snapshot hash; `released-state/` holds the moved lock directory.
+- Produces `EndpointIdentity`, `IpcHandshakeV1`, `MutationLockHandle`, and `AcquireLockResult`.
+- Produces async `tryAcquireMutationLock(agentDir, deps): Promise<AcquireLockResult>`; acquired handles expose `token`, synchronous `assertOwned(): void`, and async `release(): Promise<void>`.
+- `AcquireLockResult` is exactly `acquired`, `busy`, `collision`, or `unsupported`; only `acquired` carries a handle. Other results never mutate files.
+- `LockDependencies` injects canonical realpath, SHA-256, token generation, platform, `node:net` server/client factories, and a bounded diagnostic-handshake timer for deterministic tests.
+- `IpcHandshakeV1` contains only `version: 1`, full endpoint identity hash, opaque owner token, and PID.
 
 **Constraints and invariants:**
-- Acquisition never waits: it returns acquired, busy-live, recovery-required/unknown-liveness, blocking claim-evidence-mismatch, or blocking release-evidence-mismatch.
-- No mtime lease, elapsed-time takeover, or `Date.now() - os.uptime()` boot inference exists.
-- Runtime boot-session adapters read a kernel/OS-owned stable identifier: Linux `/proc/sys/kernel/random/boot_id`; Windows PowerShell/CIM `Win32_OperatingSystem.LastBootUpTime.ToFileTimeUtc()`; macOS raw `sysctl -n kern.boottime`. Adapter failure returns unknown; wall-clock movement never changes or substitutes for this ID.
-- Runtime process-start adapters use Linux `/proc/<pid>/stat` field 22 and Windows CIM `Win32_Process.CreationDate.ToFileTimeUtc()`. macOS has no default start-ID adapter in this release; an existing PID is treated as alive and an absent PID as dead. A different boot ID or different trusted start ID positively proves the recorded owner cannot resume; a matching live PID is alive; an unambiguous absent PID is dead; permission, parse, PID-reuse-without-start-ID, or adapter failure is unknown and blocks.
-- Initial acquisition builds a complete non-empty staged owner directory and atomically renames that directory to the absent fixed lock path. A real-filesystem test must prove rename-to-existing-non-empty-directory fails without replacement on supported platforms; unsupported semantics fail closed.
-- A staged claim directory is inactive until it contains `claimed-state/`. The atomic rename of exactly one current state directory into that child selects one contender; losing staged directories have no `claimed-state/`, are never owners, and only their creating token may remove them.
-- A claim rename is never assumed token-conditional. The winner compares the complete moved directory snapshot plus its root record bytes with the claim's pre-rename hashes. Any mismatch preserves the entire new claim directory and nested source, installs no owner, cleans up nothing, writes no journal/native/payload, and returns `claim-evidence-mismatch`.
-- Exactly one top-level claim directory with a matching `claim.json` + `claimed-state/` is an active claimant owner. Multiple active claims, a missing half, symlinks, path escapes, altered cardinality, or any recursive cross-hash mismatch are blocking evidence-mismatch states.
-- A verified claim writes the claimant's complete `owner.json` into its own directory atomically, then atomically renames that entire active claim directory to the absent fixed lock path. This one directory rename simultaneously removes the active-claim path and installs the successor; a separate successor-lock-plus-active-claim state cannot exist. If the fixed lock path reappeared, promotion never overwrites it: the active claim remains intact, the competing valid owner aborts after its post-scan/release, and only that same live claimant token may resume promotion on retry.
-- After promotion, claim history is nested inside the lock directory. The owner must verify its token and remove all nested claim records/evidence before receiving a write-capable handle. If it crashes during cleanup, the complete lock directory remains the only owner state and the next generation claims that entire directory.
-- Normal acquisition scans active claim/release directories both before and after owner publication; seeing one causes a just-published owner to enter the same verified release transition and abort. Orphan staged directories without moved state are inert and never authorize cleanup by another token.
-- Recovery and release never delete a path based only on filename, age, or an earlier read; recursive snapshots reject symlinks and include exact sorted paths, file bytes, type, and cardinality.
+- Endpoint identity is SHA-256 of the canonical native real agent-directory path. Windows normalizes separators and drive-letter form but preserves component casing returned by `realpath.native`, so case-sensitive directories are not conflated. Canonicalization failure returns `unsupported` without a write.
+- Windows listens on `\\.\pipe\pi-model-config-<full-hash>`. Linux listens on the abstract UDS name `\0pi-model-config-<full-hash>`. Both full-hash names are process-owned and leave no persistent filesystem entry.
+- macOS uses one loopback-only port: `49152 + (firstUnsigned16BitWord(hash) % 16384)`. On `EADDRINUSE`, a valid matching handshake is `busy`; a valid different identity, unrecognized listener, timeout, or protocol error is `collision`. It never tries another port or permits takeover, so endpoint identity cannot drift while an owner is alive.
+- `listen` success is the sole ownership transition. There is no persisted lock/claim, mtime lease, boot/PID liveness inference, stale cleanup, or force-unlock path.
+- Acquisition does not wait for owner release. The only bounded wait is the injectable macOS identity probe after `EADDRINUSE`; a paused/unresponsive listener fails closed rather than being replaced.
+- The owner server accepts only local IPC/loopback connections, caps handshake input/output, emits no path or secret, and closes accepted sockets immediately after one response.
+- A handle is write-capable only while its exact server instance remains `listening` and has emitted neither unexpected `error` nor `close`. `assertOwned()` checks that state immediately before a synchronous journal/native/payload replacement in the same JavaScript turn with no intervening `await`; loss throws before the write.
+- `release()` marks the close as expected, awaits `server.close()`, and invalidates the handle. A second release is idempotent; any later `assertOwned()` fails. No mutation runs after release.
+- Process pause keeps the OS endpoint bound. Process exit, kill, or crash releases it automatically; the next process may acquire and then recover any journal.
 
 **Acceptance evidence:**
-- RED: `node --experimental-strip-types --test tests/process-lock.test.ts` -> fails because owner/claim acquisition does not exist.
-- GREEN: the same command -> passes real-process exclusion and deterministic fault tests for live pause, forward/backward wall-clock jumps, dead owner, simultaneous contenders, pre-rename token replacement, owner-token loss, claimant crashes at every directory transition, PID reuse/unknown state, true boot-session change, serialized claim cross-links, claim/release evidence mismatch, exact captured-state restoration, owner cleanup, and owner-bound release.
+- RED: `node --experimental-strip-types --test tests/process-lock.test.ts` -> fails because IPC acquisition does not exist.
+- GREEN: the same command -> passes endpoint derivation, handshake, fake-adapter faults, and real cross-process exclusion/release/crash tests with zero failures.
 - Regression: `npm test && npm run check` -> zero failures.
 
 **Risk and rollback:**
-- Risk: the claim protocol is a correctness boundary; an ambiguous state must block instead of attempting cleanup.
-- Rollback: revert this commit and remove test-created lock artifacts; production mutation paths do not use it until Task 3.
+- Risk: IPC behavior differs by platform/runtime. Keep endpoint derivation pure, adapters narrow, unsupported states fail closed, and execute real current-platform Node/Bun probes.
+- Rollback: revert this commit; production mutation paths do not use it until Task 3 and no persistent lock artifact exists.
 
 **Implementation intent:**
-- [ ] Write real-filesystem/cross-process tests proving same-parent staged-directory rename publishes one complete owner, refuses to replace an existing non-empty lock directory, and blocks a second process until clean release.
-- [ ] Implement platform boot-session/process-start adapters and tests for paused live owners across forward/backward wall-clock jumps, true boot-session changes, missing adapters, permission failure, and PID reuse with matching, mismatching, and unavailable start evidence.
-- [ ] Implement recursive snapshot hashing over ordinary files/directories only; reject symlinks, unexpected paths/types, missing records, duplicate active states, changed cardinality, and any `claim.json`/`claimed-state` cross-hash mismatch.
-- [ ] Implement initial/recursive claim with one uniform transition:
-
-```text
-source = fixed lock directory for generation 1,
-         or the one active claim directory for generation N
-read exact recursive snapshot S and root owner.json/claim.json bytes
-prove that root owner/claimant cannot resume
-create+fsync new sibling claim directory C with complete RecoveryClaimRecordV1
-rename source -> C/claimed-state              # exactly one contender succeeds
-re-read C/claimed-state and compare every path/type/byte/hash/cardinality to S
-mismatch -> retain all of C, publish no owner, clean nothing, return blocking state
-match -> atomically add claimant owner.json to C
-rename C -> fixed lock directory              # no-replace successor + claim removal
-verify owner token and nested evidence, clean nested history, then enable writes
-```
-
-- [ ] Cover the exact crash/race matrix: before source move (inert staged claim only); after source move before verification (active claim); after owner insertion before promotion (active claim); competing lock publication before promotion with same-claimant resume; after promotion before/during nested cleanup (single lock containing history); and recursive claims of each persisted state. Assert exact paths/bytes and that no separate successor/anchor/evidence branch exists.
-- [ ] Add a deterministic race that replaces the lock directory immediately before source rename; assert the moved different state remains preserved under `claimed-state`, no successor/config write occurs, and no path is deleted.
-- [ ] Implement owner-bound release with the same evidence rule: create+fsync `ReleaseRecordV1`, rename the exact lock directory to `releaseDir/released-state`, compare the full moved snapshot, and delete only a verified match. A mismatch remains blocking; a crash after move retains a release state that a live owner may finish or a positively dead owner may finish after the same evidence checks.
-- [ ] Test release before move, after move, during recursive delete, token replacement, and orphan staged directories; no stale stage is treated as an owner or removed by filename.
-- [ ] Expose non-secret generation/state paths and a two-phase `restoreCapturedState` API for Task 10. It requires exact unchanged paths, bytes, types, hashes, generation, and cardinality for the complete outer claim/release state and nested captured directory; when the recorded original source path is absent, atomically rename the captured directory back to that exact path, verify it, then remove only the matching outer state. Any failed precondition remains blocked without cleanup; there is no force-delete API.
-- [ ] Verify a former/external token cannot release or pass `assertOwned()` at either simulated native or payload write point.
+- [ ] Add pure endpoint tests for Windows named-pipe and Linux abstract-UDS full hashes, Windows case/path normalization, the exact macOS port formula, and secret-free `IpcHandshakeV1` serialization.
+- [ ] Add fake-`net` tests for listen success, matching/different/malformed/timed-out handshakes, bind errors, unexpected error/close, expected close, idempotent release, and post-release fencing; assert a different macOS identity never advances to another port.
+- [ ] Implement `lock-worker.ts` modes for acquire-and-hold, event-loop-block-after-ready, clean release, and process kill/crash. Its stdout protocol contains only readiness/result markers.
+- [ ] Run real child-process tests with both `node` and `bun` when available: one owner excludes simultaneous contenders, a blocked event loop retains the endpoint, clean close permits reacquisition, and killed owner permits immediate reacquisition with no cleanup step.
+- [ ] On Windows, exercise the real named-pipe adapter under both runtimes. On Linux, exercise the real abstract UDS adapter. On macOS, exercise loopback matching/different identity and foreign-listener fail-closed behavior. Platform-specific tests skip only when not running on that platform and remain mandatory in that platform's release evidence.
+- [ ] Implement owner server lifecycle and bounded one-message handshake; never listen beyond named-pipe/abstract-UDS/`127.0.0.1` scopes.
+- [ ] Verify injected endpoint loss fences simulated journal, native step 3, and payload step 4 calls before each write.
 
 **Commit:**
 ```bash
-git add process-lock.ts atomic-file.ts tests/process-lock.test.ts tests/fixtures/lock-worker.ts package.json
-git commit -m "feat: coordinate model config process ownership"
+git add process-lock.ts tests/process-lock.test.ts tests/fixtures/lock-worker.ts package.json
+git commit -m "feat: coordinate model config mutations over local IPC"
 ```
 
 ---
@@ -230,20 +208,21 @@ git commit -m "feat: coordinate model config process ownership"
 - Modify: `config.ts`
 - Modify: `index.ts`
 - Create: `tests/payload-coordinator.test.ts`
+- Create: `tests/fixtures/coordinator-worker.ts`
 - Modify: `tests/payload-config.test.ts`
 - Modify: `tests/index-runtime.test.ts`
 - Modify: `package.json`
 
 **Interfaces and dependencies:**
 - `payload-config.ts` produces strict `parsePayloadDocument`, `serializePayloadDocument`, clone, lookup, and pure set/remove/copy/move transformations. Its existing direct-writer exports remain as temporary compatibility shims in this commit so the old UI still compiles; Task 4 reroutes every caller and then removes those shims.
-- `payload-coordinator.ts` produces `readCoordinatedSnapshot()`, `commitCoordinatedMutation(request)`, `resolveRequestPayload(provider, modelId)`, `inspectRecovery()`, and `applyRecovery(snapshotToken, choice)`.
+- `payload-coordinator.ts` produces `readCoordinatedSnapshot()`, async `commitCoordinatedMutation(request)`, `resolveRequestPayload(provider, modelId)`, async `inspectRecovery()`, and async `applyRecovery(snapshotToken, choice)`; mutation/recovery APIs await IPC acquisition and release, while request-time resolution remains synchronous and lock-free.
 - `MutationRequest.build(snapshot)` returns complete validated native and payload candidates plus affected identities; it runs only after lock acquisition and hash/baseline revalidation.
 - `TransactionJournalV1` contains version, operation ID, native before/after hashes, payload before/after hashes, and complete before/after payload documents.
 - `index.ts` registers one `before_provider_request` hook that asks the coordinator for a payload object and shallow-merges it without mutation.
 
 **Constraints and invariants:**
 - Journal and payload artifacts use owner-only mode where supported and never render payload values in errors.
-- Both-changing mutations write journal -> native -> payload -> remove journal, checking the same owner token before each step.
+- Both-changing mutations write journal -> native -> payload -> remove journal. Each `assertOwned()` and synchronous atomic replacement are adjacent in one JavaScript turn; no protected write follows an `await` without another ownership check.
 - Native-only and payload-only writes still hold the lock and use atomic replacement; a journal is required whenever both candidate hashes change.
 - The request hook never acquires or waits on the lock and performs exactly three immediate stable-snapshot attempts.
 - Manual recovery is two-phase: inspect/hash under lock, release before prompting, reacquire and require byte/hash/parse-state equality before applying a choice.
@@ -273,7 +252,8 @@ repeat three times:
   otherwise fail closed
 ```
 
-- [ ] Implement mutation commit with fault hooks after journal, native, payload, and journal removal so crash tests can restart a fresh coordinator against persisted bytes.
+- [ ] Implement mutation commit with fault hooks after journal, native, payload, and journal removal so deterministic unit tests can restart a fresh coordinator against persisted bytes.
+- [ ] Add real child-process cases that exit without releasing at the journal/native/payload boundaries; the next worker must acquire the same IPC endpoint and recover the persisted before/after view without lock-file cleanup.
 - [ ] Implement automatic recovery for valid journal/native-before and journal/native-after states, including quarantine and replacement of a malformed current payload from the journal snapshot.
 - [ ] Implement `inspectRecovery`/`applyRecovery` for mismatched valid journals, malformed journals, and malformed payload without a journal; tokens include exact artifact hashes and parse states.
 - [ ] For a valid journal whose native hash matches neither side, offer the complete before or after payload snapshot and never overwrite native bytes. For a malformed journal, offer authoritative-current only when native and payload parse; if payload is malformed, offer quarantine-and-empty; if native is invalid, remain blocked until external repair.
@@ -282,7 +262,7 @@ repeat three times:
 
 **Commit:**
 ```bash
-git add payload-coordinator.ts payload-config.ts config.ts index.ts tests/payload-coordinator.test.ts tests/payload-config.test.ts tests/index-runtime.test.ts package.json
+git add payload-coordinator.ts payload-config.ts config.ts index.ts tests/payload-coordinator.test.ts tests/fixtures/coordinator-worker.ts tests/payload-config.test.ts tests/index-runtime.test.ts package.json
 git commit -m "feat: journal private model payload mutations"
 ```
 
@@ -302,7 +282,7 @@ git commit -m "feat: journal private model payload mutations"
 - Modify: `package.json`
 
 **Interfaces and dependencies:**
-- Produces `ModelConfigActions`, constructed with `PayloadCoordinator` and validation options.
+- Produces `ModelConfigActions`, constructed with `PayloadCoordinator` and validation options; every mutating or recovery-capable action returns `Promise<ActionResult>` and controllers await it.
 - Read APIs return `EditorSnapshot` containing deep-cloned native/private values and native/payload hashes.
 - Simple APIs: `patchProvider`, `patchModel`, `createProvider`, and `createModel`.
 - Nested APIs: `saveProviderSubtree`, `saveModelSubtree`, and `saveModelPayload`, each requiring a deep baseline of the exact object.
@@ -626,13 +606,13 @@ git commit -m "feat: add field-oriented provider editor"
 
 **Interfaces and dependencies:**
 - `/model-config` checks `ctx.mode === "tui"` before reading or mutating configuration.
-- Top-level diagnostics calls coordinator recovery inspection, displays only non-secret state/owner metadata, and routes automatic, two-phase manual, busy-live, and unknown-liveness outcomes.
+- Top-level diagnostics calls coordinator recovery inspection, displays only non-secret journal state or IPC busy/collision metadata, and routes automatic, two-phase manual, busy, collision, and unsupported outcomes.
 - Package and lock root versions become exactly `1.2.0`; syntax-check script includes every runtime module; `package.json.files` explicitly includes root runtime `*.ts`, both READMEs, and `LICENSE` while excluding tests, `.pi-subagents`, and runtime artifacts. `LICENSE` contains the standard MIT text with year 2026 and the package author from `package.json`.
 
 **Constraints and invariants:**
-- Recovery UI offers no force-delete. Unknown liveness offers Cancel, Retry, or retry after the listed process is closed; journal/native/payload bytes remain untouched until positive death/boot-session proof. A claim/release evidence mismatch shows preserved non-secret paths/hashes and remains blocking; a separately previewed `Restore captured state` is offered only when its recorded original source path is absent and exact unchanged paths, bytes, types, hashes, generation, and cardinality match for the outer record plus every nested claimed/released state. It atomically renames that complete captured directory back to the recorded source path, verifies it, and removes only the matching outer state; any mismatch remains blocking.
+- Recovery UI offers no force-unlock. `busy` shows a generic operation-in-progress result with Cancel/Retry; `collision` or `unsupported` shows non-secret adapter diagnostics and performs no write. Journal recovery starts only after acquiring a fresh OS endpoint; process crash requires no stale-lock cleanup.
 - No human prompt runs while a lock handle is owned; tests record lock ownership at every scripted prompt.
-- README files document two-pane/narrow controls, simple versus draft saves, full field scope, endpoint Merge/Replace/Cancel, transaction artifacts/recovery, payload secrecy, and unchanged Subagent behavior.
+- README files document two-pane/narrow controls, simple versus draft saves, full field scope, endpoint Merge/Replace/Cancel, the OS-owned IPC lock and transaction journal/recovery, payload secrecy, and unchanged Subagent behavior.
 - No stale linear `editProvider`/`editModel` implementation or direct config/payload write remains in `index.ts`.
 
 **Acceptance evidence:**
@@ -640,17 +620,17 @@ git commit -m "feat: add field-oriented provider editor"
 - GREEN: the same command -> passes activation, TUI gating, recovery routing, documentation, metadata, and complete source scan.
 - Full regression: `npm test` -> all tests pass with zero failures.
 - Syntax: `npm run check` -> every runtime `.ts` file parses successfully.
-- Package: `npm pack --dry-run --json | node --experimental-strip-types tests/fixtures/assert-package.ts` -> asserts every runtime module/README/LICENSE is present and rejects `.pi-subagents`, tests, transaction, lock, claim, temp-agent, or generated archive paths.
+- Package: `npm pack --dry-run --json | node --experimental-strip-types tests/fixtures/assert-package.ts` -> asserts every runtime module/README/LICENSE is present and rejects `.pi-subagents`, tests, transaction journals, temp-agent data, or generated archive paths.
 - Controlled TUI uses deterministic fixtures: in terminal A run `node --experimental-strip-types tests/fixtures/manual-endpoint-server.ts --port 43123`; in terminal B create `EDITOR_DIR="$(mktemp -d)"` and `EDITOR_MANIFEST="$(mktemp)"`, run `node --experimental-strip-types tests/fixtures/manual-agent-state.ts --agent-dir "$EDITOR_DIR" --scenario editor --base-url http://127.0.0.1:43123`, then run `PI_CODING_AGENT_DIR="$EDITOR_DIR" pi --no-extensions -e ./index.ts`. Verify wide (>=88) and narrow (<88) navigation, one Provider/Model scalar edit, one nested save/discard, global search, and the masked API key replacement warning. Immediately before endpoint discovery, run the fixture in terminal C with `--capture-manifest "$EDITOR_MANIFEST"`; after a successful discovery preview choose Cancel and run it again with `--assert-manifest "$EDITOR_MANIFEST"`.
 - Controlled recovery routing uses `RECOVERY_DIR="$(mktemp -d)"` and `RECOVERY_MANIFEST="$(mktemp)"`; seed it with `manual-agent-state.ts --scenario malformed-journal-valid-files`, capture its manifest, run Pi against it, open diagnostics, verify the non-secret recovery preview, Cancel, and assert the manifest is unchanged. Automated coordinator tests remain the authority for applying recovery transitions.
 
 **Risk and rollback:**
-- Risk: final dead-code cleanup can accidentally remove Subagent behavior. Use symbol search and existing Subagent tests before deletion, and keep the cleanup in this isolated commit.
+- Risk: final dead-code cleanup can accidentally remove Subagent behavior or hide an adapter limitation. Use symbol search and existing Subagent tests before deletion, keep cleanup isolated, and record current-platform IPC evidence.
 - Rollback: revert this release commit; preceding commits remain testable and the branch is not installed/published automatically.
 
 **Implementation intent:**
 - [ ] Add non-TUI tests that snapshot native/private bytes before invocation and assert no file is created or changed.
-- [ ] Add recovery-menu tests for automatic completion, two-phase refresh on concurrent change, busy-live, unknown liveness, true boot-session retry, claim/release evidence mismatch, exact captured-state restoration, and no secret output.
+- [ ] Add recovery-menu tests for automatic completion, two-phase refresh on concurrent change, IPC busy/collision/unsupported results, crash-then-reacquire routing, endpoint-handle loss, and no secret output.
 - [ ] Remove old linear Provider/Model editors, obsolete persistence wrappers, and now-unused payload imports; use `rg` to prove production writes occur only through coordinator/action modules.
 - [ ] Expand no-emoji scanning to all runtime `.ts`, all `tests/**/*.ts`, and both READMEs rather than maintaining a partial static list.
 - [ ] Add `.pi-subagents/` and `*.tgz` to `.gitignore`; set `package.json.files` to the explicit runtime/documentation allowlist; set package and both package-lock root version fields to `1.2.0`; update check script for every runtime module.
