@@ -107,3 +107,28 @@ test("atomically removes and quarantines artifacts", () => withTempAgentDir((age
   assert.equal(fs.existsSync(corruptPath), false);
   assert.equal(fs.readFileSync(quarantinedPath, "utf8"), "corrupt");
 }));
+
+test("retains a replacement when an expected-hash removal is raced", () => withTempAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "journal.json");
+  fs.writeFileSync(filePath, "original");
+  assert.throws(() => atomicRemove(filePath, {
+    expectedHash: hashArtifact(Buffer.from("original")),
+    beforeUnlink() { fs.writeFileSync(filePath, "replacement"); },
+  }), /changed before removal/);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "replacement");
+}));
+
+test("quarantines private artifacts with owner-only permissions and cleans no replacement", () => withTempAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "private.json");
+  fs.writeFileSync(filePath, "private", { mode: 0o666 });
+  fs.chmodSync(filePath, 0o666);
+  const quarantinedPath = quarantineArtifact(filePath, "private", { mode: 0o600, expectedHash: hashArtifact(Buffer.from("private")) });
+  assert.equal(fs.existsSync(filePath), false);
+  assert.equal(fs.readFileSync(quarantinedPath, "utf8"), "private");
+  if (process.platform !== "win32") assert.equal(fs.statSync(quarantinedPath).mode & 0o777, 0o600);
+
+  fs.writeFileSync(filePath, "current");
+  assert.throws(() => quarantineArtifact(filePath, "mismatch", { expectedHash: hashArtifact(Buffer.from("old")) }), /changed before quarantine/);
+  assert.equal(fs.existsSync(`${filePath}.corrupt-mismatch`), false);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "current");
+}));

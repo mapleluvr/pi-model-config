@@ -114,6 +114,7 @@ test("commit journals both-changing mutations in native/payload order", async ()
 
 test("automatic recovery restores journal-selected complete payloads without native overwrite", async () => withAgentDir(async (agentDir) => {
   writeState(agentDir, nativeBefore, "{");
+  fs.chmodSync(getPayloadConfigPath(agentDir), 0o666);
   const nativeBytes = fs.readFileSync(getModelsPath());
   writeJournal(agentDir);
   const result = await inspectRecovery();
@@ -121,7 +122,9 @@ test("automatic recovery restores journal-selected complete payloads without nat
   assert.deepEqual(fs.readFileSync(getModelsPath()), nativeBytes);
   assert.deepEqual(resolveRequestPayload("local", "one"), { setting: "before" });
   assert.equal(fs.existsSync(getTransactionJournalPath(agentDir)), false);
-  assert.equal(fs.readdirSync(agentDir).some((entry) => entry.startsWith("model-config-payloads.json.corrupt-")), true);
+  const quarantinedPayload = fs.readdirSync(agentDir).find((entry) => entry.startsWith("model-config-payloads.json.corrupt-"));
+  assert.ok(quarantinedPayload);
+  if (process.platform !== "win32") assert.equal(fs.statSync(path.join(agentDir, quarantinedPayload)).mode & 0o777, 0o600);
 
   writeState(agentDir, nativeAfter, payloadBefore);
   writeJournal(agentDir);
@@ -180,8 +183,125 @@ test("crashed owners release the OS endpoint after journal/native/payload bounda
       const fixture = path.resolve("tests/fixtures/coordinator-worker.ts");
       const child = spawn(process.execPath, ["--experimental-strip-types", fixture, boundary, agentDir], { stdio: "ignore" });
       await new Promise<void>((resolve, reject) => child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`worker exit ${code}`))));
+      const expectedNative = boundary === "journal" ? bytes(nativeBefore) : bytes(nativeAfter);
+      const expectedPayload = boundary === "journal" ? bytes(payloadBefore) : bytes(payloadAfter);
+      assert.deepEqual(fs.readFileSync(getModelsPath(agentDir)), expectedNative);
       const result = await inspectRecovery({ agentDir });
       assert.ok(result.type === "automatic-recovered" || result.type === "clean");
+      assert.deepEqual(fs.readFileSync(getModelsPath(agentDir)), expectedNative);
+      assert.deepEqual(fs.readFileSync(getPayloadConfigPath(agentDir)), expectedPayload);
     }));
   }
 });
+
+test("uses the explicit coordinator directory without touching an ambient agent directory", async () => withAgentDir(async (ambientDir) => {
+  const explicitDir = fs.mkdtempSync(path.join(path.dirname(ambientDir), "pi-model-config-explicit-"));
+  try {
+    writeState(ambientDir, nativeBefore, payloadBefore);
+    writeState(explicitDir, nativeBefore, payloadBefore);
+    const ambientNative = fs.readFileSync(getModelsPath(ambientDir));
+    const result = await commitCoordinatedMutation({
+      build: () => ({ native: nativeAfter, payload: payloadAfter, affectedIdentities: [["local", "two"]] }),
+    }, { agentDir: explicitDir });
+    assert.deepEqual(result, { type: "committed" });
+    assert.deepEqual(fs.readFileSync(getModelsPath(ambientDir)), ambientNative);
+    assert.deepEqual(resolveRequestPayload("local", "two", { agentDir: explicitDir }), { setting: "after" });
+    assert.equal(resolveRequestPayload("local", "two", { agentDir: ambientDir }), undefined);
+  } finally {
+    fs.rmSync(explicitDir, { recursive: true, force: true });
+  }
+}));
+
+test("fails closed for schema-invalid native documents in requests and mutation recovery", async () => withAgentDir(async (agentDir) => {
+  writeState(agentDir, { providers: { invalid: null } }, payloadBefore);
+  let diagnostics = 0;
+  assert.equal(resolveRequestPayload("local", "one", { agentDir, onDiagnostic() { diagnostics += 1; } }), undefined);
+  assert.equal(diagnostics, 1);
+  assert.deepEqual(await inspectRecovery({ agentDir }), { type: "blocked" });
+  assert.deepEqual(await commitCoordinatedMutation({
+    build: () => ({ native: nativeAfter, payload: payloadAfter, affectedIdentities: [] }),
+  }, { agentDir }), { type: "recovery-required" });
+}));
+
+test("rejects malformed journal hashes without recovering or deleting the journal", async () => withAgentDir(async (agentDir) => {
+  writeState(agentDir, nativeBefore, payloadBefore);
+  const invalidJournal = { ...journal(agentDir), nativeBeforeHash: "sha256:not-a-digest" };
+  fs.writeFileSync(getTransactionJournalPath(agentDir), bytes(invalidJournal), { mode: 0o600 });
+  assert.equal(resolveRequestPayload("local", "one", { agentDir }), undefined);
+  fs.chmodSync(getTransactionJournalPath(agentDir), 0o666);
+  const recovery = await inspectRecovery({ agentDir });
+  assert.equal(recovery.type, "needs-choice");
+  if (recovery.type !== "needs-choice") throw new Error("missing recovery preview");
+  assert.deepEqual(await applyRecovery(recovery.snapshotToken, "accept-current", { agentDir }), { type: "recovered" });
+  const quarantinedJournal = fs.readdirSync(agentDir).find((entry) => entry.startsWith("model-config-transaction.json.corrupt-"));
+  assert.ok(quarantinedJournal);
+  if (process.platform !== "win32") assert.equal(fs.statSync(path.join(agentDir, quarantinedJournal)).mode & 0o777, 0o600);
+}));
+
+test("request resolution makes exactly three attempts and contains reader failures", () => withAgentDir((agentDir) => {
+  writeState(agentDir, nativeBefore, payloadBefore);
+  let reads = 0;
+  let diagnostics = 0;
+  assert.equal(resolveRequestPayload("local", "one", {
+    agentDir,
+    readArtifact() { reads += 1; throw new Error("reader failure"); },
+    onDiagnostic() { diagnostics += 1; },
+  }), undefined);
+  assert.equal(reads, 3);
+  assert.equal(diagnostics, 1);
+
+  let singleReads = 0;
+  assert.equal(resolveRequestPayload("local", "one", {
+    agentDir,
+    readArtifact(filePath) {
+      singleReads += 1;
+      if (singleReads === 1) throw new Error("reader failure");
+      return readArtifact(filePath);
+    },
+  }), undefined);
+  assert.ok(singleReads > 1);
+}));
+
+test("recomputes snapshot hashes from bytes before recovery token comparison", async () => withAgentDir(async (agentDir) => {
+  writeState(agentDir, { providers: { external: { baseUrl: "http://localhost", api: "openai-completions", models: [] } } }, payloadBefore);
+  writeJournal(agentDir);
+  const preview = await inspectRecovery({ agentDir });
+  assert.equal(preview.type, "needs-choice");
+  if (preview.type !== "needs-choice") throw new Error("missing recovery preview");
+  const nativePath = getModelsPath(agentDir);
+  const before = readArtifact(nativePath);
+  const changed = bytes(nativeBefore);
+  const result = await applyRecovery(preview.snapshotToken, "restore-before-payload", {
+    agentDir,
+    readArtifact(filePath) {
+      const snapshot = readArtifact(filePath);
+      return filePath === nativePath ? { ...snapshot, bytes: changed, hash: before.hash } : snapshot;
+    },
+  });
+  assert.deepEqual(result, { type: "refresh" });
+  assert.deepEqual(fs.readFileSync(nativePath), before.bytes);
+}));
+
+test("isolates build input and journal before-payload from mutating builders", async () => withAgentDir(async (agentDir) => {
+  writeState(agentDir, nativeBefore, payloadBefore);
+  await assert.rejects(commitCoordinatedMutation({
+    build(snapshot) {
+      snapshot.payload.document!.extraPayloads = { [modelPayloadKey("local", "one")]: { setting: "mutated" } };
+      return { native: nativeAfter, payload: payloadAfter, affectedIdentities: [["local", "two"]] };
+    },
+    onBoundary(boundary) { if (boundary === "journal") throw new Error("stop after journal"); },
+  }, { agentDir }), /stop after journal/);
+  assert.equal((await inspectRecovery({ agentDir })).type, "automatic-recovered");
+  assert.deepEqual(resolveRequestPayload("local", "one", { agentDir }), { setting: "before" });
+}));
+
+test("does not remove a journal replaced at the final unlink boundary", async () => withAgentDir(async (agentDir) => {
+  writeState(agentDir, nativeBefore, payloadBefore);
+  await assert.rejects(commitCoordinatedMutation({
+    build: () => ({ native: nativeAfter, payload: payloadAfter, affectedIdentities: [["local", "two"]] }),
+    onBoundary(boundary) {
+      if (boundary === "payload") fs.writeFileSync(getTransactionJournalPath(agentDir), bytes(journal(agentDir)), { mode: 0o600 });
+    },
+  }, { agentDir }), /changed before removal/);
+  assert.equal(fs.existsSync(getTransactionJournalPath(agentDir)), true);
+}));

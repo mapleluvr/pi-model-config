@@ -15,6 +15,17 @@ export interface AtomicReplaceOptions {
   beforeRename?: () => void;
 }
 
+export interface AtomicRemoveOptions {
+  expectedHash?: string;
+  beforeUnlink?: () => void;
+}
+
+export interface QuarantineArtifactOptions {
+  expectedHash?: string;
+  mode?: number;
+  beforeRename?: () => void;
+}
+
 export function hashArtifact(bytesOrAbsent: Uint8Array | undefined): string {
   const hash = createHash("sha256");
   if (bytesOrAbsent === undefined) hash.update(Buffer.from([0]));
@@ -122,19 +133,43 @@ export function atomicReplace(filePath: string, bytes: Uint8Array, options: Atom
   }
 }
 
-export function atomicRemove(filePath: string): void {
+export function atomicRemove(filePath: string, options: AtomicRemoveOptions = {}): void {
+  options.beforeUnlink?.();
+  if (options.expectedHash !== undefined) {
+    const currentHash = readArtifact(filePath).hash;
+    if (currentHash !== options.expectedHash) throw new Error(`Artifact at ${filePath} changed before removal`);
+  }
   try {
     fs.unlinkSync(filePath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && options.expectedHash === undefined) return;
     throw error;
   }
   syncDirectory(path.dirname(filePath));
 }
 
-export function quarantineArtifact(filePath: string, timestamp: number | string): string {
+export function quarantineArtifact(
+  filePath: string,
+  timestamp: number | string,
+  options: QuarantineArtifactOptions = {},
+): string {
   const quarantinePath = `${filePath}.corrupt-${timestamp}`;
+  options.beforeRename?.();
+  if (options.expectedHash !== undefined) {
+    const currentHash = readArtifact(filePath).hash;
+    if (currentHash !== options.expectedHash) throw new Error(`Artifact at ${filePath} changed before quarantine`);
+  }
   fs.renameSync(filePath, quarantinePath);
-  syncDirectory(path.dirname(filePath));
-  return quarantinePath;
+  try {
+    if (options.mode !== undefined) fs.chmodSync(quarantinePath, options.mode);
+    syncDirectory(path.dirname(filePath));
+    return quarantinePath;
+  } catch (error) {
+    try {
+      fs.renameSync(quarantinePath, filePath);
+    } catch {
+      // Preserve the permission or directory-sync failure.
+    }
+    throw error;
+  }
 }

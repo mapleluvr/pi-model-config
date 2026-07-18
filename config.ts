@@ -18,8 +18,7 @@ export class ModelsConfigError extends Error {
 }
 
 /** 获取 models.json 的完整路径 */
-export function getModelsPath(): string {
-  const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+export function getModelsPath(agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent")): string {
   return path.join(agentDir, "models.json");
 }
 
@@ -37,7 +36,13 @@ export function parseModelsDocument(filePath: string, raw: string | Uint8Array):
   if (root.providers !== undefined && (!root.providers || typeof root.providers !== "object" || Array.isArray(root.providers))) {
     throw new ModelsConfigError(filePath, "providers must be a JSON object when present");
   }
-  return { ...root, providers: (root.providers as Record<string, ProviderConfig> | undefined) ?? {} } as ModelsConfig;
+  const config = { ...root, providers: (root.providers as Record<string, ProviderConfig> | undefined) ?? {} } as ModelsConfig;
+  try {
+    assertValidModelsCandidate(config);
+  } catch {
+    throw new ModelsConfigError(filePath, "document does not satisfy the Pi models schema");
+  }
+  return config;
 }
 
 /** 读取 models.json */

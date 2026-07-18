@@ -2,18 +2,28 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ModelsConfigError, readModelsConfig, writeModelsConfig } from "../config.ts";
+import { getModelsPath, ModelsConfigError, parseModelsDocument, readModelsConfig, writeModelsConfig } from "../config.ts";
 import { ModelsCandidateValidationError } from "../config-validation.ts";
 import { withTempAgentDir as withAgentDir } from "./helpers/temp-agent-dir.ts";
 
 test("reads Pi models.json JSONC and preserves unknown root fields", () => withAgentDir((agentDir) => {
   const filePath = path.join(agentDir, "models.json");
-  fs.writeFileSync(filePath, `// Pi accepts comments\n{\n  "feature": true,\n  "providers": {\n    "local": { "models": [], },\n  },\n}\n`);
+  fs.writeFileSync(filePath, `// Pi accepts comments\n{\n  "feature": true,\n  "providers": {\n    "local": { "headers": { "X-Test": "yes" }, "models": [], },\n  },\n}\n`);
 
   assert.deepEqual(readModelsConfig(), {
     feature: true,
-    providers: { local: { models: [] } },
+    providers: { local: { headers: { "X-Test": "yes" }, models: [] } },
   });
+}));
+
+test("uses an explicit agent directory for models paths and rejects schema-invalid documents", () => withAgentDir((ambientDir) => {
+  const explicitDir = fs.mkdtempSync(path.join(path.dirname(ambientDir), "pi-model-config-explicit-"));
+  try {
+    assert.equal(getModelsPath(explicitDir), path.join(explicitDir, "models.json"));
+    assert.throws(() => parseModelsDocument(path.join(explicitDir, "models.json"), JSON.stringify({ providers: { invalid: null } })), ModelsConfigError);
+  } finally {
+    fs.rmSync(explicitDir, { recursive: true, force: true });
+  }
 }));
 
 test("writes canonical JSON while retaining parsed root and provider fields", () => withAgentDir((agentDir) => {
@@ -32,7 +42,7 @@ test("writes canonical JSON while retaining parsed root and provider fields", ()
 
 test("retains existing root fields when replacing providers", () => withAgentDir((agentDir) => {
   const filePath = path.join(agentDir, "models.json");
-  fs.writeFileSync(filePath, `{ "nativeRoot": true, "providers": { "p": { "models": [] } } }`);
+  fs.writeFileSync(filePath, `{ "nativeRoot": true, "providers": { "p": { "headers": { "X-Test": "yes" }, "models": [] } } }`);
 
   writeModelsConfig({ providers: {} });
 
