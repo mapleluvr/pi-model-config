@@ -14,6 +14,8 @@ import {
   writeProviderSubtree,
   describeSubtreePresence,
   subtreePresenceEqual,
+  getThinkingMapWarning,
+  THINKING_MAP_INACTIVE_WARNING,
 } from "../model-fields.ts";
 
 test("provider merge changes managed values while retaining headers, modelOverrides, and unknown values", () => {
@@ -65,6 +67,27 @@ test("cost tiers require a positive integer threshold and non-negative finite ra
   assert.equal(validateCostTier({ inputTokensAbove: 100, input: -1, output: 1, cacheRead: 1, cacheWrite: 1 }), undefined);
   assert.equal(validateCostTier({ inputTokensAbove: 100, input: Number.NaN, output: 1, cacheRead: 1, cacheWrite: 1 }), undefined);
   assert.equal(validateCostTier({ inputTokensAbove: 100, input: 1, output: Infinity, cacheRead: 1, cacheWrite: 1 }), undefined);
+  assert.deepEqual(validateCostTier({
+    inputTokensAbove: 100,
+    input: 1,
+    output: 2,
+    cacheRead: 3,
+    cacheWrite: 4,
+    futureTier: { retained: true },
+  }), {
+    inputTokensAbove: 100,
+    input: 1,
+    output: 2,
+    cacheRead: 3,
+    cacheWrite: 4,
+    futureTier: { retained: true },
+  });
+});
+
+test("thinking map warning is stable and only shown for an explicitly inactive model", () => {
+  assert.equal(getThinkingMapWarning(false), THINKING_MAP_INACTIVE_WARNING);
+  assert.equal(getThinkingMapWarning(true), undefined);
+  assert.equal(getThinkingMapWarning(undefined), undefined);
 });
 
 test("replaces only tiers while retaining base cost rates", () => {

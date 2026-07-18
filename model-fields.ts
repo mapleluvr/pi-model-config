@@ -8,6 +8,12 @@ export type ConfigPatch<T extends Record<string, unknown>> = {
 export type ProviderSubtreeKey = "headers" | "compat" | "modelOverrides";
 export type ModelSubtreeKey = "headers" | "compat" | "thinkingLevelMap" | "cost";
 
+export const THINKING_MAP_INACTIVE_WARNING = "Thinking Level Map is inactive while reasoning is false";
+
+export function getThinkingMapWarning(reasoning: boolean | undefined): string | undefined {
+  return reasoning === false ? THINKING_MAP_INACTIVE_WARNING : undefined;
+}
+
 function mergeDefined<T extends Record<string, unknown>>(existing: T | undefined, changes: ConfigPatch<T>): T {
   const next: Record<string, unknown> = { ...(existing ?? {}) };
   for (const [key, value] of Object.entries(changes)) {
@@ -119,13 +125,7 @@ export function validateCostTier(candidate: unknown): ModelCostTier | undefined 
   const value = candidate as Record<string, unknown>;
   if (typeof value.inputTokensAbove !== "number" || !Number.isInteger(value.inputTokensAbove) || value.inputTokensAbove <= 0) return undefined;
   if (!finiteNonNegative(value.input) || !finiteNonNegative(value.output) || !finiteNonNegative(value.cacheRead) || !finiteNonNegative(value.cacheWrite)) return undefined;
-  return {
-    inputTokensAbove: value.inputTokensAbove,
-    input: value.input,
-    output: value.output,
-    cacheRead: value.cacheRead,
-    cacheWrite: value.cacheWrite,
-  };
+  return deepCloneJson(value) as unknown as ModelCostTier;
 }
 
 export function replaceCostTiers(

@@ -1,3 +1,5 @@
+import { cloneOwnJsonData, getOwnValue, setOwnValue } from "./own-keys.ts";
+
 export type CompatBooleanChoice = "default" | "false" | "true";
 
 export const COMPAT_BOOLEAN_FIELDS = [
@@ -44,4 +46,30 @@ export function applyCompatObjectChoice(compat: Record<string, unknown>, key: st
   if (value === undefined) delete next[key];
   else next[key] = value;
   return next;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergeObjectPatch(existing: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const next = cloneOwnJsonData(existing, { objectPrototype: "ordinary" });
+  for (const key of Object.keys(patch)) {
+    const current = getOwnValue(next, key);
+    const value = getOwnValue(patch, key);
+    setOwnValue(next, key, isObject(current) && isObject(value)
+      ? mergeObjectPatch(current, value)
+      : cloneOwnJsonData(value, { objectPrototype: "ordinary" }));
+  }
+  return next;
+}
+
+/** Apply a JSON object as a patch while retaining unedited future nested fields. */
+export function applyCompatObjectPatch(
+  compat: Record<string, unknown>,
+  key: string,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const current = getOwnValue(compat, key);
+  return applyCompatObjectChoice(compat, key, mergeObjectPatch(isObject(current) ? current : {}, patch));
 }

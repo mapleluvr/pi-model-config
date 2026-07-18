@@ -7,6 +7,7 @@ import {
   THINKING_FORMATS,
   applyCompatBooleanChoice,
   applyCompatObjectChoice,
+  applyCompatObjectPatch,
 } from "../compat-settings.ts";
 
 test("sets compat boolean fields to explicit true, explicit false, or default deletion", () => {
@@ -44,4 +45,22 @@ test("declares every Pi 0.80.6 boolean, object, and thinking-format option", () 
 test("sets, replaces, and clears compat object fields", () => {
   assert.deepEqual(applyCompatObjectChoice({}, "openRouterRouting", { only: ["bedrock"] }), { openRouterRouting: { only: ["bedrock"] } });
   assert.deepEqual(applyCompatObjectChoice({ openRouterRouting: { only: ["bedrock"] } }, "openRouterRouting", undefined), {});
+});
+
+test("patches known compat objects while retaining future nested fields", () => {
+  const existing = {
+    openRouterRouting: {
+      only: ["old"],
+      future: { retained: true, nested: { value: 1 } },
+    },
+    futureRoot: true,
+  };
+  assert.deepEqual(applyCompatObjectPatch(existing, "openRouterRouting", { only: ["new"] }), {
+    openRouterRouting: {
+      only: ["new"],
+      future: { retained: true, nested: { value: 1 } },
+    },
+    futureRoot: true,
+  });
+  assert.deepEqual(existing.openRouterRouting.only, ["old"]);
 });
