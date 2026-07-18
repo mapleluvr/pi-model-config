@@ -394,60 +394,90 @@ field it encounters and all cross-field invariants affected by the candidate.
 ### Native and Private Payload Transactions
 
 The private payload config schema remains unchanged. Coordination uses two
-implementation-private files beside it:
+implementation-private artifacts beside it:
 
-- `model-config-transaction.lock`, created exclusively and containing the owner
-  process identity;
+- a cross-process lock managed by a proven pure-JavaScript lockfile library with
+  atomic stale takeover, an opaque owner token, compromise detection, and an
+  owner-bound release handle;
 - `model-config-transaction.json`, an atomically written recovery journal.
 
-Every extension mutation of native or private model configuration acquires the
-same cross-process lock, re-reads the files after acquisition, and revalidates
-its baselines and candidate. If a live owner holds the lock, the operation does
-not wait or write; it reports the active operation and offers retry. A lock whose
-recorded process is no longer alive enters journal recovery before it can be
-removed. Payload-edit and unsupported-override cleanup confirmations also
-revalidate under this lock, so a preview cannot race an identity transaction.
+No code path manually unlinks a lock observed as stale. Every extension
+mutation of native or private model configuration acquires the same lock through
+the lock manager, re-reads both files after acquisition, and revalidates its
+baselines and candidate. A live owner causes a no-write "operation in progress"
+result with a retry action. Stale ownership is transferred only by the lock
+manager's atomic takeover; release succeeds only for the acquired owner token,
+preventing an ABA contender from deleting a replacement owner's lock. A stale
+lock with no journal means no recoverable transaction remains: the takeover
+winner validates both current files and then continues from a fresh read.
 
-Each individual native, payload, and journal write uses a temporary file in the
-same directory followed by atomic replacement. A transaction that changes both
-native identities and private payload entries proceeds as follows:
+Human confirmation is never awaited while holding the lock. A preview records
+native and payload hashes; after confirmation, the operation acquires the lock,
+re-reads both files, and commits only if the hashes and previewed identity set
+still match. Otherwise it releases the lock and returns to a refreshed preview.
+This applies to payload edits, unsupported-override cleanup, payload-identity
+reuse/removal, and endpoint discovery. Each native, payload, and journal write
+uses a temporary file in the same directory followed by atomic replacement. A
+transaction that changes both native identities and private payload entries
+proceeds as follows:
 
 1. Compute complete validated native and payload candidates in memory.
-2. Write a journal containing operation identity, before/after native hashes,
-   before/after payload hashes, and only the affected payload entries in their
-   before and after states. Payload values are protected like the private config
-   and are never included in logs or error text.
+2. Write a journal containing a unique operation ID, before/after native hashes,
+   before/after payload hashes, and the complete payload document in both before
+   and after states. Journal payload values receive the same file protection as
+   private config and never appear in logs or error text.
 3. Atomically write the native candidate.
 4. Atomically write the private payload candidate.
-5. Atomically remove the journal and release the lock.
+5. Atomically remove the journal and release the owner-bound lock handle.
 
-`before_provider_request` never waits on the mutation lock. When no journal
-exists it reads the normal private payload config. While a valid journal exists,
-it hashes the current native file and resolves affected identities from the
-journal's before payload view when the native hash matches `before`, or from the
-after view when it matches `after`; unaffected identities continue to use the
-persisted payload file. This makes rename, copy, delete, and endpoint Replace
-consistent for the current session, built-in fallback Models, and dynamically
-registered Models even between the two file writes.
+`before_provider_request` never acquires or waits on the mutation lock. It uses
+at most three immediate stable-snapshot attempts. One attempt reads journal,
+native, and payload bytes, then re-reads native and payload hashes and the
+journal. It accepts the attempt only when both journal reads represent the same
+absence or the same unique operation ID and bytes, and both file hashes remained
+unchanged. Consecutive transactions, journal creation/removal, or a file change
+causes retry. If three attempts remain unstable, the hook fails closed for that
+request and emits only a non-secret diagnostic.
 
-Recovery is deterministic:
+For an accepted snapshot with no journal, the hook uses the payload document it
+read. With a valid journal, the native hash must match the journal's before or
+after hash and the hook uses the corresponding complete journal payload view;
+it does not mix that view with the persisted payload file. A stable malformed
+journal, malformed payload without a valid journal, or native hash matching
+neither journal side fails closed for all extension payload injection. This
+point-in-time protocol remains coherent for current-session Models, built-in
+fallback Models, dynamically registered Models, and journal boundaries.
 
-- native hash equals `before`: restore the affected before payload entries,
-  remove the journal, and report that the operation rolled back;
-- native hash equals `after`: apply the affected after payload entries, remove
-  the journal, and report that the operation rolled forward;
-- native hash matches neither side: fail closed for affected payload identities,
-  block further editor mutations, and show a recovery screen. The screen never
-  overwrites native configuration; it previews the operation and lets the user
-  choose the before or after payload view after another fresh read.
+Recovery runs under the owner-bound lock:
 
-A malformed journal also fails closed for payload injection and blocks mutation
-until explicit recovery; no payload values are displayed. There is no generic
-"orphan" inference or registry-based cleanup. Existing unrelated private keys
-remain untouched. If create, rename, or copy finds a pre-existing payload at a
-target identity that is not the operation's source, it reports an identity
-collision and performs no write; any removal or reuse requires a separate,
-previewed confirmation under the same lock.
+- native hash equals `before`: atomically restore the complete before payload
+  snapshot, quarantine a malformed current payload when necessary, remove the
+  journal, and report rollback;
+- native hash equals `after`: atomically restore the complete after payload
+  snapshot, quarantine a malformed current payload when necessary, remove the
+  journal, and report roll-forward;
+- native hash matches neither side: keep injection and mutations blocked and
+  show a recovery screen. After another fresh read, the user may apply the full
+  before or after payload snapshot; native configuration is never overwritten.
+
+A malformed journal cannot identify affected fields, so all extension payload
+injection and editor mutations remain blocked. Recovery first validates current
+native and payload files without overwriting them. If both are valid, the user
+may explicitly accept them as authoritative; the malformed journal is atomically
+renamed to a timestamped quarantine file and normal operation resumes. If native
+configuration is invalid, recovery remains blocked until it is repaired
+externally. If payload storage is malformed, the user may either remain blocked
+or explicitly quarantine it and initialize an empty payload document; this
+special recovery path is the only operation allowed to replace an unreadable
+payload without a valid journal snapshot. A malformed payload with no journal
+uses the same explicit quarantine-and-reset path. Quarantine files retain the
+private file's protections, and payload contents are never displayed.
+
+There is no generic "orphan" inference or registry-based cleanup. Existing
+unrelated private keys remain untouched. If create, rename, or copy finds a
+pre-existing payload at a target identity that is not the operation's source,
+it performs no write; reuse or removal requires a separate previewed confirmation
+under the same lock.
 
 ## Endpoint Model Discovery
 
@@ -477,6 +507,14 @@ skipped/duplicate counts, and an ID summary, then offers:
 - `Replace`: require a second confirmation, replace the native list, and remove
   private payload entries for Models no longer present;
 - `Cancel`: write nothing.
+
+After Merge or Replace is chosen, discovery previews introduced IDs and any
+exact private payload identities. Reuse requires explicit `Reuse existing
+payloads` confirmation. After confirmation it acquires the shared lock, re-reads
+both files, and recomputes the candidate and collision list; any mismatch
+returns to a refreshed preview instead of writing. Cancelling performs no native
+or private write. This check applies equally to Merge and Replace and occurs
+before journal creation.
 
 Endpoint records are treated as discovery data, not authoritative replacements
 for hand-edited records with the same ID.
@@ -536,10 +574,16 @@ Implementation follows TDD for new behavior. Focused tests cover:
 - Provider/Model rename, delete, and copy transactions with injected failure or
   crash after journal creation, native replacement, payload replacement, and
   journal removal;
+- stable hook snapshots across journal creation/removal and consecutive
+  transactions, including retry exhaustion and fail-closed behavior;
 - before/after request-hook resolution for current-session Models, built-in
   fallback identities, and dynamically registered identities;
-- cross-process lock exclusion, confirm-time revalidation, stale-lock recovery,
-  and mismatched-native-hash manual recovery;
+- cross-process lock exclusion, simultaneous stale-lock contenders, owner-token
+  release protection, stale-lock-without-journal handling, confirm-time
+  revalidation, and mismatched-native-hash manual recovery;
+- valid-journal recovery with a malformed current payload, malformed-journal
+  quarantine with valid files, malformed-payload quarantine/reset, and invalid
+  native recovery blocking;
 - stale-target refresh after an external modification;
 - creation wizard minimum fields, post-create panel state, and collision
   rejection without mutation;
@@ -558,6 +602,8 @@ Implementation follows TDD for new behavior. Focused tests cover:
   keep the first endpoint record;
 - merge preserves existing same-ID Model objects, appends each new ID once, and
   updates its seen-ID set while processing;
+- Merge and Replace revalidate introduced IDs under the lock and require
+  explicit confirmation before reusing any exact private payload identities;
 - replace requires confirmation and commits native/payload changes through the
   same journal; injected failures preserve the before or after request view;
 - cancel performs no write.
@@ -586,9 +632,11 @@ The existing test suite and syntax checks must continue to pass.
 9. `Fetch Models from endpoint` remains available and satisfies the specified
    normalization, deduplication, merge, replace, cancel, and failure behavior.
 10. Create, copy, and rename reject all target collisions without mutation.
-11. Journaled cross-file operations preserve a coherent before or after payload
-   view under injected failures, crashes, built-in fallback, current-session
-   Models, dynamic registrations, and concurrent editor processes.
+11. Journaled cross-file operations and stable hook snapshots preserve a
+   coherent before or after payload view under injected failures, crashes,
+   built-in fallback, current-session Models, dynamic registrations, and
+   concurrent editor processes; malformed storage has an explicit quarantined
+   recovery path.
 12. Wide terminals use two panes and narrow terminals remain fully operable.
 13. Stored API key literals are masked outside the explicitly warned active
    replacement input and are never pre-filled.
