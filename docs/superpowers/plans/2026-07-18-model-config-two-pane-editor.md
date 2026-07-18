@@ -73,6 +73,7 @@
 | `package.json`, `package-lock.json` | Publish 1.2.0 metadata, explicit package contents, and syntax checks for every runtime module. |
 | `.gitignore` | Exclude subagent review artifacts and generated package archives from worktree/package status. |
 | `README.md`, `README-CN.md` | Document the new field-oriented workflow, responsive controls, data safety, discovery behavior, and recovery artifacts. |
+| `LICENSE` | Provide the standard MIT license already linked by both READMEs and required by the package allowlist. |
 
 ---
 
@@ -154,26 +155,30 @@ git commit -m "feat: validate and atomically write model config"
 - Modify: `package.json`
 
 **Interfaces and dependencies:**
-- Produces `ProcessIdentity`, `LockOwnerRecord`, `RecoveryClaimRecord`, `ClaimEvidenceMismatch`, `MutationLockHandle`, and `AcquireLockResult`.
-- Produces `tryAcquireMutationLock(paths, deps): AcquireLockResult`; acquired handles expose `assertOwned(): void` and `release(): void` bound to one opaque token. `inspectClaimEvidenceMismatch()` returns a non-secret byte/hash snapshot token, and `restoreCapturedOwner(snapshotToken)` revalidates that token before any explicit operator recovery.
-- `LockDependencies` injects token generation, `BootSessionAdapter`, `ProcessStartAdapter`, PID-existence probing, journal hashing, and atomic file operations for deterministic fault/race tests. Wall clock and elapsed time are not liveness evidence.
-- Runtime artifacts are `<agent-dir>/model-config-transaction.lock`, complete `...lock-intent.<token>.json` files, complete `...claim-intent.<generation>.<token>.json` files, one active `...claim-anchor.<generation>.<token>.bin`, and an optional `...claim-successor-evidence.<generation>.<token>.bin`.
+- Produces `ProcessIdentity`, `LockOwnerRecord`, `RecoveryClaimRecordV1`, `ReleaseRecordV1`, `ClaimEvidenceMismatch`, `MutationLockHandle`, and `AcquireLockResult`.
+- Produces `tryAcquireMutationLock(paths, deps): AcquireLockResult`; acquired handles expose `assertOwned(): void` and `release(): void` bound to one opaque token. `inspectClaimEvidenceMismatch()` returns a non-secret directory-snapshot token, and `restoreCapturedState(snapshotToken)` revalidates that token before explicit operator recovery.
+- `LockDependencies` injects token generation, `BootSessionAdapter`, `ProcessStartAdapter`, PID-existence probing, journal hashing, recursive directory snapshotting, and same-parent directory rename/remove operations for deterministic fault/race tests. Wall clock and elapsed time are not liveness evidence.
+- The fixed owner is the non-empty directory `<agent-dir>/model-config-transaction.lock/` containing a complete `owner.json`. Claim states are sibling directories `...claim.<generation>.<token>/`; release states are `...release.<token>/`. Every transition stays in the same parent directory.
+- `RecoveryClaimRecordV1` is the complete JSON owner record at `claim.json` and has exactly: `version: 1`, `generation`, opaque claim `token`, claimant `ProcessIdentity`, `journalHash | null`, complete `rootOwner`, and `source: { kind: "lock" | "claim", originalPath, snapshotHash, recordHash }`. Its sibling `claimed-state/` is the atomically moved raw source directory whose sorted relative-path/byte hash must equal `source.snapshotHash`; `recordHash` identifies its root `owner.json` or `claim.json`.
+- `ReleaseRecordV1` is the complete JSON record at `release.json` and contains version, release token, complete expected owner, original lock path, and the exact lock-directory snapshot hash; `released-state/` holds the moved lock directory.
 
 **Constraints and invariants:**
-- Acquisition never waits: it returns acquired, busy-live, recovery-required/unknown-liveness, or blocking claim-evidence-mismatch.
+- Acquisition never waits: it returns acquired, busy-live, recovery-required/unknown-liveness, blocking claim-evidence-mismatch, or blocking release-evidence-mismatch.
 - No mtime lease, elapsed-time takeover, or `Date.now() - os.uptime()` boot inference exists.
 - Runtime boot-session adapters read a kernel/OS-owned stable identifier: Linux `/proc/sys/kernel/random/boot_id`; Windows PowerShell/CIM `Win32_OperatingSystem.LastBootUpTime.ToFileTimeUtc()`; macOS raw `sysctl -n kern.boottime`. Adapter failure returns unknown; wall-clock movement never changes or substitutes for this ID.
 - Runtime process-start adapters use Linux `/proc/<pid>/stat` field 22 and Windows CIM `Win32_Process.CreationDate.ToFileTimeUtc()`. macOS has no default start-ID adapter in this release; an existing PID is treated as alive and an absent PID as dead. A different boot ID or different trusted start ID positively proves the recorded owner cannot resume; a matching live PID is alive; an unambiguous absent PID is dead; permission, parse, PID-reuse-without-start-ID, or adapter failure is unknown and blocks.
-- A complete owner/claim intent exists before its public owner/anchor path becomes visible. Initial owner publication uses a same-directory complete intent plus exclusive hard-link; unsupported hard-link semantics fail closed instead of exposing a partially written owner.
-- A claim rename is never assumed token-conditional. The winner must compare the moved anchor bytes and referenced intent bytes with its pre-rename snapshot before successor installation.
-- Any post-move byte/token/hash mismatch preserves the new intent, moved anchor, prior intent chain, and any successor evidence; it performs no successor installation, cleanup, journal write, native write, or payload write and returns a blocking `claim-evidence-mismatch` state.
-- Normal acquisition scans active claim anchors both before and after owner installation; seeing one causes a just-installed owner to owner-bound release and abort. Zero anchors is normal, exactly one identifies the active generation, and multiple anchors are a blocking evidence-mismatch state with no automatic cleanup.
-- No configuration write is permitted until one verified successor owner exists, all matching claim artifacts are removed, and that successor token passes `assertOwned()`.
-- Recovery never deletes a path based only on filename, age, or an earlier read.
+- Initial acquisition builds a complete non-empty staged owner directory and atomically renames that directory to the absent fixed lock path. A real-filesystem test must prove rename-to-existing-non-empty-directory fails without replacement on supported platforms; unsupported semantics fail closed.
+- A staged claim directory is inactive until it contains `claimed-state/`. The atomic rename of exactly one current state directory into that child selects one contender; losing staged directories have no `claimed-state/`, are never owners, and only their creating token may remove them.
+- A claim rename is never assumed token-conditional. The winner compares the complete moved directory snapshot plus its root record bytes with the claim's pre-rename hashes. Any mismatch preserves the entire new claim directory and nested source, installs no owner, cleans up nothing, writes no journal/native/payload, and returns `claim-evidence-mismatch`.
+- Exactly one top-level claim directory with a matching `claim.json` + `claimed-state/` is an active claimant owner. Multiple active claims, a missing half, symlinks, path escapes, altered cardinality, or any recursive cross-hash mismatch are blocking evidence-mismatch states.
+- A verified claim writes the claimant's complete `owner.json` into its own directory atomically, then atomically renames that entire active claim directory to the absent fixed lock path. This one directory rename simultaneously removes the active-claim path and installs the successor; a separate successor-lock-plus-active-claim state cannot exist. If the fixed lock path reappeared, promotion never overwrites it: the active claim remains intact, the competing valid owner aborts after its post-scan/release, and only that same live claimant token may resume promotion on retry.
+- After promotion, claim history is nested inside the lock directory. The owner must verify its token and remove all nested claim records/evidence before receiving a write-capable handle. If it crashes during cleanup, the complete lock directory remains the only owner state and the next generation claims that entire directory.
+- Normal acquisition scans active claim/release directories both before and after owner publication; seeing one causes a just-published owner to enter the same verified release transition and abort. Orphan staged directories without moved state are inert and never authorize cleanup by another token.
+- Recovery and release never delete a path based only on filename, age, or an earlier read; recursive snapshots reject symlinks and include exact sorted paths, file bytes, type, and cardinality.
 
 **Acceptance evidence:**
 - RED: `node --experimental-strip-types --test tests/process-lock.test.ts` -> fails because owner/claim acquisition does not exist.
-- GREEN: the same command -> passes real-process exclusion and deterministic fault tests for live pause, forward/backward wall-clock jumps, dead owner, simultaneous contenders, pre-rename token replacement, owner-token loss, claimant crashes, PID reuse/unknown state, true boot-session change, claim-evidence mismatch, exact captured-owner restoration, and owner-bound release.
+- GREEN: the same command -> passes real-process exclusion and deterministic fault tests for live pause, forward/backward wall-clock jumps, dead owner, simultaneous contenders, pre-rename token replacement, owner-token loss, claimant crashes at every directory transition, PID reuse/unknown state, true boot-session change, serialized claim cross-links, claim/release evidence mismatch, exact captured-state restoration, owner cleanup, and owner-bound release.
 - Regression: `npm test && npm run check` -> zero failures.
 
 **Risk and rollback:**
@@ -181,29 +186,30 @@ git commit -m "feat: validate and atomically write model config"
 - Rollback: revert this commit and remove test-created lock artifacts; production mutation paths do not use it until Task 3.
 
 **Implementation intent:**
-- [ ] Write cross-process worker tests proving a second process receives busy while the first owns the lock and acquires only after clean release.
+- [ ] Write real-filesystem/cross-process tests proving same-parent staged-directory rename publishes one complete owner, refuses to replace an existing non-empty lock directory, and blocks a second process until clean release.
 - [ ] Implement platform boot-session/process-start adapters and tests for paused live owners across forward/backward wall-clock jumps, true boot-session changes, missing adapters, permission failure, and PID reuse with matching, mismatching, and unavailable start evidence.
-- [ ] Implement exclusive owner installation by writing/fsyncing a complete same-directory intent and hard-linking it to the absent lock path; verify bytes/token after publication and fail closed when the primitive is unavailable.
-- [ ] Implement the generational claim state machine with this exact boundary:
+- [ ] Implement recursive snapshot hashing over ordinary files/directories only; reject symlinks, unexpected paths/types, missing records, duplicate active states, changed cardinality, and any `claim.json`/`claimed-state` cross-hash mismatch.
+- [ ] Implement initial/recursive claim with one uniform transition:
 
 ```text
-read source bytes S (lock for generation 1, prior active anchor for generation N)
-prove the source owner/claimant process cannot resume
-write+fsync complete intent I(N+1) with claimant identity, S hash/token,
-  referenced prior-intent hashes, original owner, and observed journal hash
-rename the one expected source path to unique anchor A(N+1) to select one contender
-read A(N+1) and every referenced intent again
-if any byte/hash/token differs from the pre-rename snapshot:
-  retain I(N+1), A(N+1), prior intents, and successor evidence unchanged
-  return claim-evidence-mismatch; install no successor and clean up nothing
-otherwise continue the verified claim transition
+source = fixed lock directory for generation 1,
+         or the one active claim directory for generation N
+read exact recursive snapshot S and root owner.json/claim.json bytes
+prove that root owner/claimant cannot resume
+create+fsync new sibling claim directory C with complete RecoveryClaimRecordV1
+rename source -> C/claimed-state              # exactly one contender succeeds
+re-read C/claimed-state and compare every path/type/byte/hash/cardinality to S
+mismatch -> retain all of C, publish no owner, clean nothing, return blocking state
+match -> atomically add claimant owner.json to C
+rename C -> fixed lock directory              # no-replace successor + claim removal
+verify owner token and nested evidence, clean nested history, then enable writes
 ```
 
-- [ ] For a verified initial dead-owner claim with no successor, publish the claimant's successor owner. For a verified recursive claim, carry the original owner/journal evidence forward; if the dead claimant already installed a successor, move that exact lock to claimant-specific successor evidence and perform the same post-move byte/token comparison before publishing the next successor.
-- [ ] Verify successor lock bytes/token and all intent/anchor/evidence hashes again before removing only matching claim artifacts; only after cleanup may the returned handle authorize config/journal writes.
-- [ ] Add a deterministic race that replaces the lock token immediately before the claim rename; assert the moved different owner remains preserved as anchor evidence, no successor/config write occurs, and no path is unlinked.
-- [ ] Cover claimant crashes before successor installation, after successor installation, and after successor-evidence movement; one later generation wins while all journal/native/payload bytes remain unchanged.
-- [ ] Expose non-secret owner, generation, evidence-path, and mismatch metadata plus a two-phase captured-owner restoration API for Task 10. Restoration requires an absent lock path, one complete parseable captured owner, and exact unchanged intent/anchor/successor-evidence bytes; it writes/fsyncs a complete restore intent from those exact captured bytes, hard-links that intent to the absent lock path, verifies equality, then removes only the matching claim chain. Every failed precondition remains blocked without cleanup; there is no force-delete API.
+- [ ] Cover the exact crash/race matrix: before source move (inert staged claim only); after source move before verification (active claim); after owner insertion before promotion (active claim); competing lock publication before promotion with same-claimant resume; after promotion before/during nested cleanup (single lock containing history); and recursive claims of each persisted state. Assert exact paths/bytes and that no separate successor/anchor/evidence branch exists.
+- [ ] Add a deterministic race that replaces the lock directory immediately before source rename; assert the moved different state remains preserved under `claimed-state`, no successor/config write occurs, and no path is deleted.
+- [ ] Implement owner-bound release with the same evidence rule: create+fsync `ReleaseRecordV1`, rename the exact lock directory to `releaseDir/released-state`, compare the full moved snapshot, and delete only a verified match. A mismatch remains blocking; a crash after move retains a release state that a live owner may finish or a positively dead owner may finish after the same evidence checks.
+- [ ] Test release before move, after move, during recursive delete, token replacement, and orphan staged directories; no stale stage is treated as an owner or removed by filename.
+- [ ] Expose non-secret generation/state paths and a two-phase `restoreCapturedState` API for Task 10. It requires exact unchanged paths, bytes, types, hashes, generation, and cardinality for the complete outer claim/release state and nested captured directory; when the recorded original source path is absent, atomically rename the captured directory back to that exact path, verify it, then remove only the matching outer state. Any failed precondition remains blocked without cleanup; there is no force-delete API.
 - [ ] Verify a former/external token cannot release or pass `assertOwned()` at either simulated native or payload write point.
 
 **Commit:**
@@ -318,7 +324,7 @@ git commit -m "feat: journal private model payload mutations"
 
 **Risk and rollback:**
 - Risk: this changes the write path before changing the UI. Keep old prompt sequencing intact in this task and assert its observable storage behavior through existing runtime tests.
-- Rollback: revert this commit; the coordinator remains unused except by its request hook and tests.
+- Rollback: revert this commit to restore the previous persistence path; at this intermediate point the coordinator/action layer is deliberately active behind the existing UI and remains independent of the later panel replacement.
 
 **Implementation intent:**
 - [ ] Define typed patch/result contracts and RED tests for false/zero preservation, explicit clear, stale identity, invalid full candidate, and unrelated-versus-same-subtree external edits.
@@ -610,6 +616,7 @@ git commit -m "feat: add field-oriented provider editor"
 - Modify: `.gitignore`
 - Modify: `README.md`
 - Modify: `README-CN.md`
+- Create: `LICENSE`
 - Create: `tests/fixtures/manual-agent-state.ts`
 - Create: `tests/fixtures/assert-package.ts`
 - Modify: `tests/index-runtime.test.ts`
@@ -620,10 +627,10 @@ git commit -m "feat: add field-oriented provider editor"
 **Interfaces and dependencies:**
 - `/model-config` checks `ctx.mode === "tui"` before reading or mutating configuration.
 - Top-level diagnostics calls coordinator recovery inspection, displays only non-secret state/owner metadata, and routes automatic, two-phase manual, busy-live, and unknown-liveness outcomes.
-- Package and lock root versions become exactly `1.2.0`; syntax-check script includes every runtime module; `package.json.files` explicitly includes root runtime `*.ts`, both READMEs, and `LICENSE` while excluding tests, `.pi-subagents`, and runtime artifacts.
+- Package and lock root versions become exactly `1.2.0`; syntax-check script includes every runtime module; `package.json.files` explicitly includes root runtime `*.ts`, both READMEs, and `LICENSE` while excluding tests, `.pi-subagents`, and runtime artifacts. `LICENSE` contains the standard MIT text with year 2026 and the package author from `package.json`.
 
 **Constraints and invariants:**
-- Recovery UI offers no force-delete. Unknown liveness offers Cancel, Retry, or retry after the listed process is closed; journal/native/payload bytes remain untouched until positive death/boot-session proof. A claim-evidence mismatch shows preserved non-secret paths/hashes and remains blocking; a separately previewed `Restore captured owner record` is offered only when the lock path is absent, the captured bytes parse as one complete owner, and every intent/anchor hash is unchanged, then writes a complete restore intent from those bytes, hard-links it to the absent lock path, verifies equality, and removes only matching claim artifacts.
+- Recovery UI offers no force-delete. Unknown liveness offers Cancel, Retry, or retry after the listed process is closed; journal/native/payload bytes remain untouched until positive death/boot-session proof. A claim/release evidence mismatch shows preserved non-secret paths/hashes and remains blocking; a separately previewed `Restore captured state` is offered only when its recorded original source path is absent and exact unchanged paths, bytes, types, hashes, generation, and cardinality match for the outer record plus every nested claimed/released state. It atomically renames that complete captured directory back to the recorded source path, verifies it, and removes only the matching outer state; any mismatch remains blocking.
 - No human prompt runs while a lock handle is owned; tests record lock ownership at every scripted prompt.
 - README files document two-pane/narrow controls, simple versus draft saves, full field scope, endpoint Merge/Replace/Cancel, transaction artifacts/recovery, payload secrecy, and unchanged Subagent behavior.
 - No stale linear `editProvider`/`editModel` implementation or direct config/payload write remains in `index.ts`.
@@ -643,7 +650,7 @@ git commit -m "feat: add field-oriented provider editor"
 
 **Implementation intent:**
 - [ ] Add non-TUI tests that snapshot native/private bytes before invocation and assert no file is created or changed.
-- [ ] Add recovery-menu tests for automatic completion, two-phase refresh on concurrent change, busy-live, unknown liveness, true boot-session retry, claim-evidence mismatch, exact captured-owner restoration, and no secret output.
+- [ ] Add recovery-menu tests for automatic completion, two-phase refresh on concurrent change, busy-live, unknown liveness, true boot-session retry, claim/release evidence mismatch, exact captured-state restoration, and no secret output.
 - [ ] Remove old linear Provider/Model editors, obsolete persistence wrappers, and now-unused payload imports; use `rg` to prove production writes occur only through coordinator/action modules.
 - [ ] Expand no-emoji scanning to all runtime `.ts`, all `tests/**/*.ts`, and both READMEs rather than maintaining a partial static list.
 - [ ] Add `.pi-subagents/` and `*.tgz` to `.gitignore`; set `package.json.files` to the explicit runtime/documentation allowlist; set package and both package-lock root version fields to `1.2.0`; update check script for every runtime module.
@@ -653,7 +660,7 @@ git commit -m "feat: add field-oriented provider editor"
 
 **Commit:**
 ```bash
-git add index.ts package.json package-lock.json .gitignore README.md README-CN.md tests/fixtures/manual-agent-state.ts tests/fixtures/assert-package.ts tests/index-runtime.test.ts tests/no-emoji.test.ts tests/release-docs.test.ts
+git add index.ts package.json package-lock.json .gitignore README.md README-CN.md LICENSE tests/fixtures/manual-agent-state.ts tests/fixtures/assert-package.ts tests/index-runtime.test.ts tests/no-emoji.test.ts tests/release-docs.test.ts
 git commit -m "release: prepare model config 1.2.0"
 ```
 
