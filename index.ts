@@ -7,28 +7,18 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { ModelConfigActions } from "./config-actions.ts";
+import { readModelsConfig } from "./config.ts";
+import { mergePayloadIntoRequest } from "./payload-config.ts";
 import {
-  ModelConfigActions,
-  parseLegacyExtraPayload,
-  type ActionResult,
-  type EndpointPreviewDescriptor,
-  type LegacyDiscardResolution,
-  type PayloadCollisionResolution,
-} from "./config-actions.ts";
-import { getModelsPath, readModelsConfig } from "./config.ts";
-import {
-  fetchEndpointModels,
-  type EndpointDiscoveryFailure,
-  type EndpointDiscoverySuccess,
-} from "./endpoint-models.ts";
-import { lookupModelPayload, mergePayloadIntoRequest } from "./payload-config.ts";
-import { resolveRequestPayload } from "./payload-coordinator.ts";
-import {
-  applyCompatBooleanChoice, applyCompatObjectChoice, COMPAT_BOOLEAN_FIELDS,
-  COMPAT_JSON_OBJECT_FIELDS, THINKING_FORMATS, type CompatBooleanChoice,
-} from "./compat-settings.ts";
-import { mergeModelConfig, mergeProviderConfig, replaceCostTiers, validateCostTier } from "./model-fields.ts";
-import { THINKING_LEVELS, type ModelCostTier, type ModelsConfig, type ProviderConfig, type ModelConfig } from "./types.ts";
+  applyRecovery,
+  inspectRecovery,
+  resolveRequestPayload,
+  type ApplyRecoveryResult,
+  type RecoveryChoice,
+  type RecoveryResult,
+} from "./payload-coordinator.ts";
+import type { ModelsConfig } from "./types.ts";
 import { searchableSelect, type SearchableSelectOption } from "./searchable-select.ts";
 import { searchableMultiSelect } from "./searchable-multi-select.ts";
 import { runProviderList } from "./provider-editor.ts";
@@ -59,77 +49,10 @@ import {
 // Helpers
 // ═══════════════════════════════════════════════════════
 
-/** 从 OpenAI 兼容的 API 端点自动拉取并规范化模型列表。 */
-async function fetchModelsFromProvider(
-  ctx: ExtensionCommandContext,
-  _providerId: string,
-  provider: ProviderConfig,
-): Promise<EndpointDiscoverySuccess | null> {
-  ctx.ui.notify("正在拉取模型列表...", "info");
-  const result = await fetchEndpointModels(provider);
-  if (result.type === "failure") {
-    notifyEndpointFailure(ctx, result);
-    return null;
-  }
-  const ids = result.idSummary.ids.join(", ");
-  ctx.ui.notify(
-    `成功拉取 ${result.validCount} 个模型\n` +
-    `来源: ${boundedText(result.source)}\n` +
-    `跳过 ${result.skippedCount}，重复 ${result.duplicateCount}\n` +
-    ids + (result.idSummary.remaining > 0 ? ` ... 另有 ${result.idSummary.remaining} 个` : ""),
-    "success",
-  );
-  return result;
-}
-
-function boundedText(value: string, limit = 512): string {
-  return value.length <= limit ? value : `${value.slice(0, limit - 3)}...`;
-}
-
-function notifyEndpointFailure(ctx: ExtensionCommandContext, failure: EndpointDiscoveryFailure): void {
-  const messages: Record<EndpointDiscoveryFailure["reason"], string> = {
-    "missing-base-url": "请先设置 Provider 的 Base URL",
-    "missing-api-key": "请先设置 API Key（Ollama 可填写 'ollama'）",
-    "request-failed": "端点请求失败",
-    timeout: "端点请求超时",
-    "http-error": "端点返回 HTTP 错误",
-    "parse-error": "端点返回内容无法解析",
-    "unsupported-shape": "端点返回了不支持的模型列表格式",
-    empty: "端点返回了空模型列表",
-    "all-invalid": "端点没有返回有效的 Model 记录",
-  };
-  ctx.ui.notify(`拉取失败: ${messages[failure.reason]}（已尝试 ${failure.diagnostics.length} 个地址）`, "error");
-}
-
-function providerSummary(p: ProviderConfig): string {
-  const name = p.name || "(未命名)";
-  const api = p.api || "?";
-  const count = p.models?.length ?? 0;
-  return `${name}  [${api}]  ${count} models`;
-}
-
-function modelSummary(m: ModelConfig): string {
-  const name = m.name || m.id;
-  const r = m.reasoning ? " reasoning" : "";
-  const ctx = m.contextWindow ? `${(m.contextWindow / 1000).toFixed(0)}k` : "?";
-  const max = m.maxTokens ? `${(m.maxTokens / 1000).toFixed(0)}k` : "?";
-  return `${name}${r}  ctx=${ctx}  max=${max}`;
-}
-
-const ACTION_ADD_MODEL = "__pi_model_config_action:add_model";
 const ACTION_BACK = "__pi_model_config_action:back";
 const ACTION_MANUAL_MODEL = "__pi_model_config_action:manual_model";
 const ACTION_CLEAR_MODEL = "__pi_model_config_action:clear_model";
 const ACTION_CURRENT_MODEL = "__pi_model_config_action:current_model";
-
-function providerModelOptions(models: ModelConfig[]): SearchableSelectOption[] {
-  return models.map((model, index) => ({
-    value: `model:${index}`,
-    label: `${index + 1}. Model ${model.id}`,
-    description: modelSummary(model),
-    searchText: [model.id, model.name, modelSummary(model)].filter(Boolean).join(" "),
-  }));
-}
 
 function availableModelOptions(ctx: ExtensionCommandContext, current?: string): SearchableSelectOption[] {
   const registry = (ctx as ExtensionCommandContext & { modelRegistry?: { getAvailable?: () => any[] } }).modelRegistry;
@@ -172,1086 +95,98 @@ async function promptText(
   return result === undefined ? undefined : result.trim();
 }
 
-function cloneModelsConfig(config: ModelsConfig): ModelsConfig {
-  return structuredClone(config);
+interface RecoveryApi {
+  inspect(): Promise<RecoveryResult>;
+  apply(snapshotToken: string, choice: RecoveryChoice): Promise<ApplyRecoveryResult>;
 }
 
-function notifyError(ctx: ExtensionCommandContext, error: unknown): void {
-  ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+const DEFAULT_RECOVERY_API: RecoveryApi = {
+  inspect: () => inspectRecovery(),
+  apply: (snapshotToken, choice) => applyRecovery(snapshotToken, choice),
+};
+
+const RECOVERY_CHOICE_LABELS: Record<RecoveryChoice, string> = {
+  "restore-before-payload": "恢复事务前状态",
+  "restore-after-payload": "恢复事务后状态",
+  "accept-current": "接受当前文件并隔离损坏日志",
+  "quarantine-and-empty": "隔离损坏数据并初始化空私有配置",
+};
+
+async function retryOrCancel(ctx: ExtensionCommandContext): Promise<boolean> {
+  return await ctx.ui.select("配置恢复", ["重试", "取消"]) === "重试";
 }
 
-function modelConfigActions(): ModelConfigActions {
-  return new ModelConfigActions();
-}
-
-function notifyActionFailure(ctx: ExtensionCommandContext, result: ActionResult): void {
-  switch (result.type) {
-    case "lock-busy":
-      ctx.ui.notify("配置操作进行中，请稍后重试", "error");
-      return;
-    case "lock-collision":
-      ctx.ui.notify("无法获取配置锁（冲突）", "error");
-      return;
-    case "lock-unsupported":
-      ctx.ui.notify("当前环境不支持配置锁", "error");
-      return;
-    case "recovery-required":
-      ctx.ui.notify("配置事务需要恢复后才能继续修改", "error");
-      return;
-    case "stale-target":
-      ctx.ui.notify("目标已被外部修改，请刷新后重试", "error");
-      return;
-    case "subtree-conflict":
-      ctx.ui.notify("子树已被外部修改，请重新加载后再保存", "error");
-      return;
-    case "native-collision":
-      ctx.ui.notify(`目标 "${result.target}" 已存在`, "error");
-      return;
-    case "payload-collision":
-      ctx.ui.notify("目标已存在私有 Payload，需要显式确认冲突处理", "error");
-      return;
-    case "validation-error":
-      ctx.ui.notify(result.issues.map((issue) => `${issue.path} ${issue.message}`).join("; "), "error");
-      return;
-    default:
-      return;
-  }
-}
-
-function notifySaved(ctx: ExtensionCommandContext | undefined, config: ModelsConfig): void {
-  const pCount = Object.keys(config.providers).length;
-  let mCount = 0;
-  for (const provider of Object.values(config.providers)) mCount += (provider.models || []).length;
-  ctx?.ui.notify(
-    `已保存 ${pCount} Providers / ${mCount} Models → ${getModelsPath()}\n` +
-    `请关闭并重新打开 /model (Ctrl+L) 查看新模型`,
-    "success",
-  );
-}
-
-function applyActionResult(
+function notifyRecoveryDiagnostic(
   ctx: ExtensionCommandContext,
-  actions: ModelConfigActions,
-  result: ActionResult,
-): ModelsConfig | undefined {
-  if (result.type === "success") {
-    const snapshot = actions.readEditorSnapshot();
-    if (snapshot.type === "recovery-required") {
-      notifyActionFailure(ctx, snapshot);
-      return undefined;
-    }
-    notifySaved(ctx, snapshot.native);
-    return cloneModelsConfig(snapshot.native);
-  }
-  notifyActionFailure(ctx, result);
-  return undefined;
+  type: "busy" | "collision" | "unsupported" | "blocked",
+): void {
+  const messages = {
+    busy: "配置操作正在进行，未执行任何更改",
+    collision: "配置协调端点发生冲突，未执行任何更改",
+    unsupported: "当前环境不支持配置协调，未执行任何更改",
+    blocked: "配置恢复暂时无法继续，未执行任何更改",
+  } as const;
+  ctx.ui.notify(messages[type], "error");
 }
 
-function endpointIdSummaryText(summary: { ids: string[]; remaining: number }): string {
-  const ids = summary.ids.length > 0 ? summary.ids.join(", ") : "(无)";
-  return ids + (summary.remaining > 0 ? ` ... 另有 ${summary.remaining} 个` : "");
-}
-
-function endpointPreviewMessage(descriptor: EndpointPreviewDescriptor): string {
-  return [
-    `来源: ${descriptor.source}`,
-    `有效 ${descriptor.validCount}，跳过 ${descriptor.skippedCount}，重复 ${descriptor.duplicateCount}`,
-    `端点 ID: ${endpointIdSummaryText(descriptor.idSummary)}`,
-    `新增: ${endpointIdSummaryText(descriptor.introduced)}`,
-    `移除: ${endpointIdSummaryText(descriptor.removed)}`,
-    `私有 Payload 冲突: ${descriptor.collisions.length}`,
-  ].join("\n");
-}
-
-async function completeEndpointChange(
+export async function runRecoveryDiagnostics(
   ctx: ExtensionCommandContext,
-  actions: ModelConfigActions,
-  first: ActionResult,
-): Promise<ModelsConfig | undefined> {
-  if (first.type !== "endpoint-preview") return applyActionResult(ctx, actions, first);
-  let token = first.token;
-  let descriptor = first.descriptor;
-
+  recovery: RecoveryApi = DEFAULT_RECOVERY_API,
+): Promise<"ready" | "cancelled"> {
   while (true) {
-    const confirmed = await ctx.ui.confirm(
-      descriptor.mode === "replace" ? "确认替换 Model 列表" : "确认合并 Model 列表",
-      endpointPreviewMessage(descriptor),
-    );
-    if (!confirmed) {
-      actions.discardIdentityPreview(token);
-      return undefined;
-    }
-
-    let legacyDiscardResolution: LegacyDiscardResolution | undefined;
-    if (descriptor.malformedIdentities.length > 0) {
-      const discard = await ctx.ui.confirm(
-        "Malformed legacy extraPayload",
-        `将移除 ${descriptor.malformedIdentities.length} 个含有 malformed native legacy rows 的 Model。确认丢弃这些 rows？`,
-      );
-      if (!discard) {
-        actions.discardIdentityPreview(token);
-        return undefined;
-      }
-      legacyDiscardResolution = "discard-malformed-legacy";
-    }
-
-    let payloadCollisionResolution: PayloadCollisionResolution | undefined;
-    if (descriptor.collisions.length > 0) {
-      const collisionChoice = await ctx.ui.select("发现私有 Payload 冲突", [
-        "复用现有 Payload",
-        "移除冲突 Payload",
-        "取消",
-      ]);
-      if (!collisionChoice || collisionChoice === "取消") {
-        actions.discardIdentityPreview(token);
-        return undefined;
-      }
-      payloadCollisionResolution = collisionChoice.startsWith("复用") ? "reuse-target" : "replace-target";
-    }
-
-    const result = await actions.commitEndpointChange(token, {
-      ...(payloadCollisionResolution ? { payloadCollisionResolution } : {}),
-      ...(legacyDiscardResolution ? { legacyDiscardResolution } : {}),
-    });
-    if (result.type === "stale-target" && result.endpointPreview) {
-      ctx.ui.notify("配置已变化，请重新确认刷新后的端点预览", "warning");
-      token = result.endpointPreview.token;
-      descriptor = result.endpointPreview;
-      continue;
-    }
-    return applyActionResult(ctx, actions, result);
-  }
-}
-
-async function commitProviderIdentity(
-  ctx: ExtensionCommandContext,
-  request: Parameters<ModelConfigActions["previewProviderIdentityAction"]>[0],
-): Promise<ModelsConfig | undefined> {
-  const actions = modelConfigActions();
-  const preview = await actions.previewProviderIdentityAction(request);
-  if (preview.type !== "preview") return applyActionResult(ctx, actions, preview);
-  return applyActionResult(ctx, actions, await actions.commitProviderIdentityAction(preview.token));
-}
-
-async function commitModelIdentity(
-  ctx: ExtensionCommandContext,
-  request: Parameters<ModelConfigActions["previewModelIdentityAction"]>[0],
-): Promise<ModelsConfig | undefined> {
-  const actions = modelConfigActions();
-  const preview = await actions.previewModelIdentityAction(request);
-  if (preview.type !== "preview") return applyActionResult(ctx, actions, preview);
-  return applyActionResult(ctx, actions, await actions.commitModelIdentityAction(preview.token));
-}
-
-function managedProviderPatch(config: ProviderConfig): Record<string, unknown> {
-  return {
-    name: config.name ?? null,
-    baseUrl: config.baseUrl ?? null,
-    api: config.api ?? null,
-    apiKey: config.apiKey ?? null,
-    authHeader: config.authHeader ?? null,
-    compat: config.compat ?? null,
-    headers: config.headers ?? null,
-    modelOverrides: config.modelOverrides ?? null,
-  };
-}
-
-function managedProviderBaselines(existing: ProviderConfig): Record<string, unknown> {
-  return {
-    name: existing.name,
-    baseUrl: existing.baseUrl,
-    api: existing.api,
-    apiKey: existing.apiKey,
-    authHeader: existing.authHeader,
-    compat: existing.compat,
-    headers: existing.headers,
-    modelOverrides: existing.modelOverrides,
-  };
-}
-
-function managedModelPatch(model: ModelConfig): Record<string, unknown> {
-  return {
-    name: model.name ?? null,
-    ...(model.reasoning !== undefined ? { reasoning: model.reasoning } : {}),
-    ...(model.input !== undefined ? { input: model.input } : {}),
-    contextWindow: model.contextWindow ?? null,
-    maxTokens: model.maxTokens ?? null,
-    ...(model.cost !== undefined ? { cost: model.cost } : {}),
-    thinkingLevelMap: model.thinkingLevelMap ?? null,
-    compat: model.compat ?? null,
-    headers: model.headers ?? null,
-    api: model.api ?? null,
-    baseUrl: model.baseUrl ?? null,
-  };
-}
-
-function managedModelBaselines(existing: ModelConfig): Record<string, unknown> {
-  return {
-    name: existing.name,
-    reasoning: existing.reasoning,
-    input: existing.input,
-    contextWindow: existing.contextWindow,
-    maxTokens: existing.maxTokens,
-    cost: existing.cost,
-    thinkingLevelMap: existing.thinkingLevelMap,
-    compat: existing.compat,
-    headers: existing.headers,
-    api: existing.api,
-    baseUrl: existing.baseUrl,
-  };
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function payloadLabel(key: string, value: unknown): string {
-  const type = typeof value === "boolean" ? "bool" : typeof value === "string" ? "string" : "json";
-  const serialized = typeof value === "string" ? value : JSON.stringify(value);
-  const preview = serialized.length > 40 ? `${serialized.slice(0, 37)}...` : serialized;
-  return `[${type}] ${key} = ${preview}`;
-}
-
-// ═══════════════════════════════════════════════════════
-// Provider Editor
-// ═══════════════════════════════════════════════════════
-
-async function editProvider(
-  ctx: ExtensionCommandContext,
-  existing?: ProviderConfig & { _providerId?: string },
-): Promise<{ providerId: string; config: ProviderConfig } | null> {
-  const { _providerId: existingId, ...existingProvider } = existing ?? {};
-  const base: ProviderConfig = existing ? existingProvider : { models: [] };
-  const providerId = await promptText(
-    ctx,
-    existing ? "编辑 Provider" : "添加 Provider",
-    "输入 Provider ID（唯一标识）：\n例如: ollama, my-llm, openrouter",
-    existingId,
-  );
-  if (providerId === undefined) return null;
-  if (!providerId.trim()) {
-    ctx.ui.notify("Provider ID 不能为空", "error");
-    return null;
-  }
-
-  const name = await promptText(ctx, `Provider: ${providerId}`, "显示名称（可选）", base.name);
-  if (name === undefined) return null;
-  const baseUrl = await promptText(ctx, `Provider: ${providerId}`, "API Base URL:\n例如 http://localhost:11434/v1", base.baseUrl);
-  if (baseUrl === undefined) return null;
-
-  const apiTypes = [
-    "openai-completions - OpenAI Chat Completions（推荐，兼容性最广）",
-    "anthropic-messages - Anthropic Messages",
-    "openai-responses - OpenAI Responses",
-    "google-generative-ai - Google Generative AI",
-    "google-vertex - Google Vertex AI",
-    "bedrock-converse-stream - Amazon Bedrock",
-    "mistral-conversations - Mistral SDK",
-  ];
-  const apiChoice = await ctx.ui.select(`Provider: ${providerId} - API 类型`, apiTypes);
-  if (apiChoice === undefined) return null;
-  const apiKey = await promptText(
-    ctx,
-    `Provider: ${providerId}`,
-    "API Key:\n  字面值: sk-xxx\n  环境变量: $MY_VAR\n  命令: !op read ...\n留空 = 无认证",
-    base.apiKey,
-  );
-  if (apiKey === undefined) return null;
-  const authChoice = await ctx.ui.select(`Provider: ${providerId} - Auth Header`, [
-    "否 - 不自动添加 Bearer",
-    "是 - 添加 Authorization: Bearer 头",
-  ]);
-  if (authChoice === undefined) return null;
-
-  const changes: Record<string, unknown> = {
-    name: name === "" ? null : name,
-    baseUrl: baseUrl === "" ? null : baseUrl,
-    api: apiChoice.split(" - ")[0]?.trim() || "openai-completions",
-    apiKey: apiKey === "" ? null : apiKey,
-    authHeader: authChoice.includes("是"),
-  };
-
-  const doCompat = await ctx.ui.confirm(`Provider: ${providerId}`, "配置高级兼容性选项？");
-  if (doCompat) {
-    const compat = await editCompat(ctx, providerId, base.compat);
-    if (compat !== undefined) changes.compat = Object.keys(compat).length > 0 ? compat : null;
-  }
-
-  const config = mergeProviderConfig(base, changes);
-  if ((!config.models || config.models.length === 0) && config.baseUrl) {
-    const doFetch = await ctx.ui.confirm(
-      `Provider: ${providerId}`,
-      "当前没有配置任何 Model。要自动从 API 端点拉取模型列表吗？",
-    );
-    if (doFetch) {
-      const fetched = await fetchModelsFromProvider(ctx, providerId, config);
-      if (fetched) config.models = fetched.models;
-    }
-  }
-
-  return { providerId: providerId.trim(), config };
-}
-
-// ═══════════════════════════════════════════════════════
-// Model Editor
-// ═══════════════════════════════════════════════════════
-
-interface ModelEditResult {
-  model: ModelConfig;
-  payload?: Record<string, unknown>;
-  /** Present only when payload was loaded from native legacy extraPayload and should migrate on successful save. */
-  migrateLegacy?: Record<string, unknown>;
-  /** True when native model carries malformed legacy rows that require explicit discard before save. */
-  hasMalformedLegacy?: boolean;
-}
-
-function parseLegacyPayload(value: unknown): Record<string, unknown> | undefined {
-  const parsed = parseLegacyExtraPayload(value);
-  return parsed.ok ? parsed.payload : undefined;
-}
-
-function loadModelPayload(
-  ctx: ExtensionCommandContext,
-  providerId: string,
-  existing?: ModelConfig,
-): {
-  type: "loaded";
-  payload?: Record<string, unknown>;
-  migrateLegacy?: Record<string, unknown>;
-  hasMalformedLegacy?: boolean;
-} | { type: "recovery-required" } {
-  if (!existing) return { type: "loaded" };
-  const snapshot = modelConfigActions().readEditorSnapshot();
-  if (snapshot.type === "recovery-required") {
-    notifyActionFailure(ctx, snapshot);
-    return snapshot;
-  }
-  const privatePayload = lookupModelPayload(snapshot.payload, providerId, existing.id);
-  if (!Object.hasOwn(existing, "extraPayload")) {
-    return privatePayload ? { type: "loaded", payload: privatePayload } : { type: "loaded" };
-  }
-  const legacy = (existing as Record<string, unknown>)["extraPayload"];
-  const migrated = parseLegacyPayload(legacy);
-  if (!migrated) {
-    // Malformed rows are preserved until the user explicitly confirms discard at save time.
-    ctx.ui.notify("Legacy extraPayload is malformed and will be kept until you confirm discard on save", "error");
-    return privatePayload
-      ? { type: "loaded", payload: privatePayload, hasMalformedLegacy: true }
-      : { type: "loaded", hasMalformedLegacy: true };
-  }
-  if (privatePayload) return { type: "loaded", payload: privatePayload };
-  return { type: "loaded", payload: migrated, migrateLegacy: migrated };
-}
-
-/**
- * Simple actions return a bound resolutionToken when malformed legacy / payload collisions need review.
- * Confirm discard when needed, then retry with the token (never bare resolution flags).
- * Payload collisions are still notify-only for the old UI (Task 5 dialogs).
- */
-async function completeSimpleAction(
-  ctx: ExtensionCommandContext,
-  actions: ModelConfigActions,
-  first: ActionResult,
-  retryWith: (resolution: {
-    resolutionToken: string;
-    legacyDiscardResolution?: LegacyDiscardResolution;
-    payloadCollisionResolution?: PayloadCollisionResolution;
-  }) => Promise<ActionResult>,
-  scopeLabel = "This model",
-): Promise<ActionResult> {
-  if (first.type === "validation-error" && first.resolutionToken) {
-    const ok = await ctx.ui.confirm(
-      "Malformed legacy extraPayload",
-      `${scopeLabel} has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.`,
-    );
-    if (!ok) {
-      // Discard on the SAME instance that created the binding.
-      actions.discardResolutionToken(first.resolutionToken);
-      return first;
-    }
-    return retryWith({
-      resolutionToken: first.resolutionToken,
-      legacyDiscardResolution: "discard-malformed-legacy",
-    });
-  }
-  if (first.type === "payload-collision" && first.resolutionToken) {
-    // Old UI notifies only; discard the bound token so it does not linger with secret-bearing request.
-    actions.discardResolutionToken(first.resolutionToken);
-    return first;
-  }
-  if (first.type === "stale-target" && first.resolutionToken) {
-    // Drift rebind still needs a fresh confirm; drop binding if UI is not handling it here.
-    actions.discardResolutionToken(first.resolutionToken);
-    return first;
-  }
-  return first;
-}
-
-function modelHasMalformedLegacy(model: ModelConfig | undefined): boolean {
-  if (!model || !Object.hasOwn(model, "extraPayload")) return false;
-  return !parseLegacyPayload((model as Record<string, unknown>)["extraPayload"]);
-}
-
-function providerHasMalformedLegacy(provider: ProviderConfig | undefined): boolean {
-  return (provider?.models ?? []).some((model) => modelHasMalformedLegacy(model));
-}
-
-function finiteNumberOr(value: string, fallback: number): number {
-  const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-async function manageCostTiers(
-  ctx: ExtensionCommandContext,
-  modelId: string,
-  existingTiers?: ModelCostTier[],
-): Promise<ModelCostTier[] | undefined> {
-  const tiers = existingTiers ? existingTiers.map((tier) => ({ ...tier })) : [];
-
-  while (true) {
-    const items = tiers.map((tier, index) =>
-      `Edit tier ${index + 1}: above ${tier.inputTokensAbove}, input ${tier.input}, output ${tier.output}`,
-    );
-    items.push("Add tier", "Delete tier", "Done");
-    const choice = await ctx.ui.select(`Cost tiers - ${modelId}`, items);
-    if (choice === undefined) return undefined;
-    if (choice === "Done") return tiers;
-
-    if (choice === "Delete tier") {
-      if (tiers.length === 0) continue;
-      const target = await ctx.ui.select(`Cost tiers - ${modelId}`, tiers.map((tier, index) =>
-        `Delete tier ${index + 1}: above ${tier.inputTokensAbove}`,
-      ));
-      const match = target?.match(/^Delete tier (\d+):/);
-      if (match) tiers.splice(Number.parseInt(match[1]!, 10) - 1, 1);
-      continue;
-    }
-
-    const editMatch = choice.match(/^Edit tier (\d+):/);
-    const index = choice === "Add tier" ? undefined : editMatch ? Number.parseInt(editMatch[1]!, 10) - 1 : undefined;
-    if (choice !== "Add tier" && index === undefined) continue;
-    const current = index === undefined ? undefined : tiers[index];
-    const threshold = await promptText(ctx, `Cost tier - ${modelId}`, "Input tokens above:", current ? String(current.inputTokensAbove) : undefined);
-    if (threshold === undefined) continue;
-    const inputRate = await promptText(ctx, `Cost tier - ${modelId}`, "Input rate:", current ? String(current.input) : undefined);
-    if (inputRate === undefined) continue;
-    const outputRate = await promptText(ctx, `Cost tier - ${modelId}`, "Output rate:", current ? String(current.output) : undefined);
-    if (outputRate === undefined) continue;
-    const cacheReadRate = await promptText(ctx, `Cost tier - ${modelId}`, "Cache read rate:", current ? String(current.cacheRead) : undefined);
-    if (cacheReadRate === undefined) continue;
-    const cacheWriteRate = await promptText(ctx, `Cost tier - ${modelId}`, "Cache write rate:", current ? String(current.cacheWrite) : undefined);
-    if (cacheWriteRate === undefined) continue;
-
-    const candidate = validateCostTier({
-      inputTokensAbove: Number.parseInt(threshold, 10),
-      input: Number.parseFloat(inputRate),
-      output: Number.parseFloat(outputRate),
-      cacheRead: Number.parseFloat(cacheReadRate),
-      cacheWrite: Number.parseFloat(cacheWriteRate),
-    });
-    if (!candidate) {
-      ctx.ui.notify("Cost tier requires a positive integer threshold and non-negative finite rates", "error");
-      continue;
-    }
-    if (index === undefined) tiers.push(candidate);
-    else tiers[index] = candidate;
-  }
-}
-
-async function editModel(
-  ctx: ExtensionCommandContext,
-  providerId: string,
-  existing?: ModelConfig,
-): Promise<ModelEditResult | null> {
-  const modelId = await promptText(
-    ctx,
-    `Model - ${providerId}`,
-    "Model ID（如 gpt-4o, llama3.1:8b）",
-    existing?.id,
-  );
-  if (modelId === undefined) return null;
-  if (!modelId.trim()) {
-    ctx.ui.notify("Model ID 不能为空", "error");
-    return null;
-  }
-
-  const base: ModelConfig = existing ?? {
-    id: modelId.trim(), reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  };
-  const payloadState = loadModelPayload(ctx, providerId, existing);
-  if (payloadState.type === "recovery-required") return null;
-  let payload = payloadState.payload;
-  const migrateLegacy = payloadState.migrateLegacy;
-  const name = await promptText(ctx, `Model: ${modelId}`, "显示名称（留空使用 ID）", base.name);
-  if (name === undefined) return null;
-  const reasoningChoice = await ctx.ui.select(`Model: ${modelId} - Extended Thinking`, [
-    `否${base.reasoning ? "" : " ← 当前"}`, `是${base.reasoning ? " ← 当前" : ""}`,
-  ]);
-  if (reasoningChoice === undefined) return null;
-  const inputChoice = await ctx.ui.select(`Model: ${modelId} - 输入类型`, [
-    `仅文本${!base.input?.includes("image") ? " ← 当前" : ""}`, `文本 + 图片${base.input?.includes("image") ? " ← 当前" : ""}`,
-  ]);
-  if (inputChoice === undefined) return null;
-  const ctxWin = await promptText(ctx, `Model: ${modelId}`, "Context Window (tokens):", String(base.contextWindow ?? 128000));
-  if (ctxWin === undefined) return null;
-  const maxTok = await promptText(ctx, `Model: ${modelId}`, "Max Output Tokens:", String(base.maxTokens ?? 16384));
-  if (maxTok === undefined) return null;
-  const costIn = await promptText(ctx, `Model: ${modelId}`, "输入价格 ($/百万 tokens):", String(base.cost?.input ?? 0));
-  if (costIn === undefined) return null;
-  const costOut = await promptText(ctx, `Model: ${modelId}`, "输出价格 ($/百万 tokens):", String(base.cost?.output ?? 0));
-  if (costOut === undefined) return null;
-
-  const cost = {
-    ...(base.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
-    input: finiteNumberOr(costIn, 0), output: finiteNumberOr(costOut, 0),
-  };
-  const changes: Record<string, unknown> = {
-    id: modelId.trim(),
-    name: name === "" ? null : name,
-    reasoning: reasoningChoice.includes("是"),
-    input: inputChoice.includes("图片") ? ["text", "image"] : ["text"],
-    contextWindow: ctxWin === "" ? null : Number.parseInt(ctxWin, 10) || 128000,
-    maxTokens: maxTok === "" ? null : Number.parseInt(maxTok, 10) || 16384,
-    cost,
-  };
-
-  if (changes.reasoning) {
-    const doMap = await ctx.ui.confirm(`Model: ${modelId}`, "配置 Thinking Level Map？");
-    if (doMap) {
-      const thinkingMap = { ...base.thinkingLevelMap };
-      for (const level of THINKING_LEVELS) {
-        const current = thinkingMap[level];
-        const value = await promptText(
-          ctx,
-          `Model: ${modelId} - Thinking: ${level}`,
-          'null = 禁用, "default" = 默认, 或自定义',
-          current === null ? "null" : current ?? "",
-        );
-        if (value === undefined) break;
-        if (value === "default") delete thinkingMap[level];
-        else if (value === "null") thinkingMap[level] = null;
-        else if (value !== "") thinkingMap[level] = value;
-      }
-      changes.thinkingLevelMap = Object.keys(thinkingMap).length > 0 ? thinkingMap : null;
-    }
-  }
-
-  const doTiers = await ctx.ui.confirm(`Model: ${modelId}`, "管理 Cost tiers？");
-  if (doTiers) {
-    const tiers = await manageCostTiers(ctx, modelId, base.cost?.tiers);
-    if (tiers !== undefined) changes.cost = replaceCostTiers(cost, tiers);
-  }
-
-  const doCompat = await ctx.ui.confirm(`Model: ${modelId}`, "配置高级兼容性选项？");
-  if (doCompat) {
-    const compat = await editCompat(ctx, modelId, base.compat);
-    if (compat !== undefined) changes.compat = Object.keys(compat).length > 0 ? compat : null;
-  }
-
-  const model = mergeModelConfig(base, changes);
-  const doPayload = await ctx.ui.confirm(
-    `Model: ${modelId}`,
-    `【Pi Agent 默认参数】\n` +
-    `  contextWindow = ${model.contextWindow || 128000} tokens\n` +
-    `  maxTokens      = ${model.maxTokens || 16384} tokens\n` +
-    `  reasoning      = ${model.reasoning ? "是" : "否"}\n` +
-    `  input          = ${(model.input || ["text"]).join(", ")}\n` +
-    `  cost           = input $${model.cost?.input || 0} / output $${model.cost?.output || 0} (per 1M tokens)\n` +
-    (model.thinkingLevelMap ? `  thinkingMap    = ${JSON.stringify(model.thinkingLevelMap)}\n` : "") +
-    `\n是否管理 自定义 Payload 参数？（附加到 API 请求体的额外键值对）`,
-  );
-  if (doPayload) {
-    const editedPayload = await editExtraPayload(ctx, modelId, payload);
-    if (editedPayload !== undefined) payload = editedPayload;
-  }
-
-  return {
-    model,
-    payload,
-    migrateLegacy,
-    hasMalformedLegacy: payloadState.hasMalformedLegacy,
-  };
-}
-
-// ═══════════════════════════════════════════════════════
-// Extra Payload Editor — 自定义 API 请求体参数
-// ═══════════════════════════════════════════════════════
-
-async function editPayloadValue(
-  ctx: ExtensionCommandContext,
-  modelId: string,
-  key: string,
-  type: "string" | "bool" | "json",
-  current?: unknown,
-): Promise<unknown | undefined> {
-  if (type === "bool") {
-    const value = await ctx.ui.select(`Payload - ${modelId} - ${key}`, ["true", "false"]);
-    return value === undefined ? undefined : value === "true";
-  }
-  if (type === "string") {
-    return await promptText(ctx, `Payload - ${modelId} - ${key}`, "输入字符串值：", typeof current === "string" ? current : undefined);
-  }
-  const raw = await promptText(
-    ctx,
-    `Payload - ${modelId} - ${key} (JSON)`,
-    "输入合法 JSON 值：",
-    current === undefined ? undefined : JSON.stringify(current, null, 2),
-  );
-  if (raw === undefined) return undefined;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    ctx.ui.notify("JSON 格式不合法", "error");
-    return undefined;
-  }
-}
-
-async function editExtraPayload(
-  ctx: ExtensionCommandContext,
-  modelId: string,
-  existing?: Record<string, unknown>,
-): Promise<Record<string, unknown> | undefined> {
-  const payload = structuredClone(existing ?? {});
-
-  while (true) {
-    const entries = Object.entries(payload);
-    const items = entries.map(([key, value], index) => `${index + 1}. ${payloadLabel(key, value)}`);
-    items.push("添加参数", "完成");
-    const choice = await ctx.ui.select(`Payload 参数 - ${modelId} (${entries.length} 个)`, items);
-    if (choice === undefined) return undefined;
-    if (choice === "完成") {
-      if (!isPlainObject(payload)) {
-        ctx.ui.notify("Payload must be a JSON object", "error");
-        continue;
-      }
-      return payload;
-    }
-
-    if (choice === "添加参数") {
-      const key = await promptText(ctx, `Payload - ${modelId}`, "参数键名（如 temperature, top_p）：");
-      if (key === undefined || !key.trim()) continue;
-      if (Object.hasOwn(payload, key)) {
-        ctx.ui.notify(`参数 "${key}" 已存在`, "warning");
-        continue;
-      }
-      const typeChoice = await ctx.ui.select(`Payload - ${modelId} - ${key}`, [
-        "string - 字符串", "bool - 布尔值 (true/false)", "json - JSON 值",
-      ]);
-      if (typeChoice === undefined) continue;
-      const type = typeChoice.startsWith("bool") ? "bool" : typeChoice.startsWith("json") ? "json" : "string";
-      const value = await editPayloadValue(ctx, modelId, key, type);
-      if (value === undefined) continue;
-      payload[key] = value;
-      ctx.ui.notify(`参数 "${key}" 已添加`, "success");
-      continue;
-    }
-
-    const indexMatch = choice.match(/^(\d+)\./);
-    if (!indexMatch) continue;
-    const entry = entries[Number.parseInt(indexMatch[1]!, 10) - 1];
-    if (!entry) continue;
-    const [key, value] = entry;
-    const action = await ctx.ui.select(`Payload: ${payloadLabel(key, value)}`, ["修改", "删除", "返回"]);
-    if (!action || action === "返回") continue;
-    if (action === "删除") {
-      delete payload[key];
-      ctx.ui.notify(`参数 "${key}" 已删除`, "info");
-      continue;
-    }
-    const type = typeof value === "boolean" ? "bool" : typeof value === "string" ? "string" : "json";
-    const nextValue = await editPayloadValue(ctx, modelId, key, type, value);
-    if (nextValue === undefined) continue;
-    payload[key] = nextValue;
-    ctx.ui.notify(`参数 "${key}" 已更新`, "success");
-  }
-}
-
-// ═══════════════════════════════════════════════════════
-// Compat Editor
-// ═══════════════════════════════════════════════════════
-
-async function editCompat(
-  ctx: ExtensionCommandContext,
-  parentId: string,
-  existing?: Record<string, unknown>,
-): Promise<Record<string, unknown> | undefined> {
-  let c: Record<string, unknown> = existing ? { ...existing } : {};
-
-  while (true) {
-    const items = [
-      ...COMPAT_BOOLEAN_FIELDS.map((field) => {
-        const value = c[field.key];
-        return `${value === true ? "[yes]" : value === false ? "[no]" : "[-]"} ${field.label}`;
-      }),
-      `maxTokensField = ${c.maxTokensField ?? "(unset)"}`,
-      `thinkingFormat = ${c.thinkingFormat ?? "(unset)"}`,
-      `cacheControlFormat = ${c.cacheControlFormat ?? "(unset)"}`,
-      ...COMPAT_JSON_OBJECT_FIELDS.map((field) => `${field.label} = ${c[field.key] === undefined ? "(unset)" : "(set)"}`),
-      "完成",
-    ];
-    const choice = await ctx.ui.select(`Compat - ${parentId}`, items);
-    if (choice === undefined) return undefined;
-    if (choice === "完成") return c;
-
-    const boolField = COMPAT_BOOLEAN_FIELDS.find((field) => choice.includes(field.label));
-    if (boolField) {
-      const current = c[boolField.key];
-      const valueChoice = await ctx.ui.select(`Compat - ${parentId} - ${boolField.label}`, [
-        `${current === undefined ? "[当前] " : ""}不指定 / 使用默认值`,
-        `${current === false ? "[当前] " : ""}false`,
-        `${current === true ? "[当前] " : ""}true`,
-        "返回",
-      ]);
-      if (!valueChoice || valueChoice === "返回") continue;
-      const compatChoice: CompatBooleanChoice = valueChoice.includes("false")
-        ? "false"
-        : valueChoice.includes("true") ? "true" : "default";
-      c = applyCompatBooleanChoice(c, boolField.key, compatChoice);
-      continue;
-    }
-    if (choice.startsWith("maxTokensField")) {
-      const value = await ctx.ui.select(`Compat - ${parentId}`, ["max_completion_tokens", "max_tokens", "(clear)"]);
-      if (value === "(clear)") delete c.maxTokensField;
-      else if (value !== undefined) c.maxTokensField = value;
-      continue;
-    }
-    if (choice.startsWith("thinkingFormat")) {
-      const value = await ctx.ui.select(`Compat - ${parentId}`, [...THINKING_FORMATS, "(clear)"]);
-      if (value === "(clear)") delete c.thinkingFormat;
-      else if (value !== undefined) c.thinkingFormat = value;
-      continue;
-    }
-    if (choice.startsWith("cacheControlFormat")) {
-      const value = await ctx.ui.select(`Compat - ${parentId}`, ["anthropic", "(clear)"]);
-      if (value === "(clear)") delete c.cacheControlFormat;
-      else if (value !== undefined) c.cacheControlFormat = value;
-      continue;
-    }
-
-    const objectField = COMPAT_JSON_OBJECT_FIELDS.find((field) => choice.startsWith(field.label));
-    if (!objectField) continue;
-    const current = c[objectField.key];
-    const raw = await ctx.ui.editor(
-      `Compat - ${parentId} - ${objectField.label}`,
-      current === undefined ? "" : JSON.stringify(current, null, 2),
-    );
-    if (raw === undefined) continue;
-    if (!raw.trim()) {
-      c = applyCompatObjectChoice(c, objectField.key, undefined);
-      continue;
-    }
+    let inspected: RecoveryResult;
     try {
-      const parsed: unknown = JSON.parse(raw);
-      if (!isPlainObject(parsed)) throw new Error("must be a JSON object");
-      c = applyCompatObjectChoice(c, objectField.key, parsed);
-    } catch (error) {
-      ctx.ui.notify(`Invalid ${objectField.label}: ${error instanceof Error ? error.message : String(error)}`, "error");
-    }
-  }
-}
-
-// ═══════════════════════════════════════════════════════
-// Provider Management
-// ═══════════════════════════════════════════════════════
-
-async function manageProviders(
-  ctx: ExtensionCommandContext,
-  initialConfig: ModelsConfig,
-): Promise<ModelsConfig> {
-  let config = initialConfig;
-  const actions = modelConfigActions();
-  while (true) {
-    const pids = Object.keys(config.providers);
-    const items = pids.map((pid) => `编辑 [${pid}] ${providerSummary(config.providers[pid]!)}`);
-    items.push("添加新 Provider", "返回主菜单");
-    const choice = await ctx.ui.select("Provider 管理", items);
-    if (choice === undefined || choice.startsWith("返回")) return config;
-
-    if (choice.startsWith("添加")) {
-      const result = await editProvider(ctx);
-      if (!result) continue;
-      const first = await actions.createProvider(result.providerId, result.config);
-      const completed = await completeSimpleAction(
-        ctx,
-        actions,
-        first,
-        (resolution) => actions.createProvider(result.providerId, result.config, resolution),
-        `Provider "${result.providerId}"`,
-      );
-      const saved = applyActionResult(ctx, actions, completed);
-      if (saved) config = saved;
-      continue;
+      inspected = await recovery.inspect();
+    } catch {
+      notifyRecoveryDiagnostic(ctx, "blocked");
+      if (await retryOrCancel(ctx)) continue;
+      return "cancelled";
     }
 
-    const match = choice.match(/^编辑\s+\[(.+?)\]/);
-    if (!match) continue;
-    const providerId = match[1]!;
-    const existing = config.providers[providerId];
-    if (!existing) continue;
-    const action = await ctx.ui.select(`Provider: ${providerId}`, [
-      "编辑设置", "管理 Models", "自动拉取 Model 列表（从 API 发现）", "复制 Provider", "删除 Provider", "返回",
+    if (inspected.type === "clean") {
+      ctx.ui.notify("配置文件和事务状态正常", "info");
+      return "ready";
+    }
+    if (inspected.type === "automatic-recovered") {
+      ctx.ui.notify("配置事务自动恢复完成", "success");
+      return "ready";
+    }
+    if (inspected.type === "busy" || inspected.type === "collision" || inspected.type === "unsupported" || inspected.type === "blocked") {
+      notifyRecoveryDiagnostic(ctx, inspected.type);
+      if (await retryOrCancel(ctx)) continue;
+      return "cancelled";
+    }
+
+    const choiceByLabel = new Map(inspected.choices.map((choice) => [RECOVERY_CHOICE_LABELS[choice], choice] as const));
+    const selected = await ctx.ui.select("配置恢复预览", [
+      ...choiceByLabel.keys(),
+      "重试",
+      "取消",
     ]);
-    if (!action || action.startsWith("返回")) continue;
+    if (!selected || selected === "取消") return "cancelled";
+    if (selected === "重试") continue;
+    const choice = choiceByLabel.get(selected);
+    if (!choice) return "cancelled";
 
-    if (action.startsWith("删除")) {
-      if (!await ctx.ui.confirm("确认删除", `删除 Provider "${providerId}" 及其所有 Models？`)) continue;
-      // Identity previews bind the full request; pre-confirm discard when native legacy is malformed.
-      let discard: LegacyDiscardResolution | undefined;
-      if (providerHasMalformedLegacy(existing)) {
-        const ok = await ctx.ui.confirm(
-          "Malformed legacy extraPayload",
-          `Provider "${providerId}" has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.`,
-        );
-        if (!ok) continue;
-        discard = "discard-malformed-legacy";
-      }
-      const saved = await commitProviderIdentity(ctx, {
-        kind: "delete",
-        providerId,
-        ...(discard ? { legacyDiscardResolution: discard } : {}),
-      });
-      if (saved) config = saved;
+    let applied: ApplyRecoveryResult;
+    try {
+      applied = await recovery.apply(inspected.snapshotToken, choice);
+    } catch {
+      notifyRecoveryDiagnostic(ctx, "blocked");
+      if (await retryOrCancel(ctx)) continue;
+      return "cancelled";
+    }
+    if (applied.type === "recovered") {
+      ctx.ui.notify("配置恢复完成", "success");
+      return "ready";
+    }
+    if (applied.type === "refresh") {
+      ctx.ui.notify("配置状态已变化，已刷新恢复预览", "warning");
       continue;
     }
-    if (action.startsWith("复制")) {
-      const newId = await promptText(ctx, "复制 Provider", "输入新 ID", `${providerId}-copy`);
-      if (newId === undefined || !newId.trim()) continue;
-      const copyId = newId.trim();
-      if (Object.hasOwn(config.providers, copyId)) {
-        ctx.ui.notify(`Provider "${copyId}" 已存在`, "error");
-        continue;
-      }
-      let discard: LegacyDiscardResolution | undefined;
-      if (providerHasMalformedLegacy(existing)) {
-        const ok = await ctx.ui.confirm(
-          "Malformed legacy extraPayload",
-          `Provider "${providerId}" has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.`,
-        );
-        if (!ok) continue;
-        discard = "discard-malformed-legacy";
-      }
-      const saved = await commitProviderIdentity(ctx, {
-        kind: "copy",
-        providerId,
-        targetProviderId: copyId,
-        ...(discard ? { legacyDiscardResolution: discard } : {}),
-      });
-      if (saved) config = saved;
-      continue;
-    }
-    if (action.startsWith("管理")) {
-      config = await manageModels(ctx, providerId, config);
-      continue;
-    }
-    if (action.startsWith("自动拉取")) {
-      const fetched = await fetchModelsFromProvider(ctx, providerId, existing);
-      if (!fetched) continue;
-      const choice = await ctx.ui.select(`发现 ${fetched.validCount} 个模型`, [
-        "合并：保留现有 Model 并添加新 ID",
-        "替换：仅保留端点返回的 Model ID",
-        "取消",
-      ]);
-      if (!choice || choice === "取消") continue;
-      const mode = choice.startsWith("替换") ? "replace" : "merge";
-      const preview = await actions.previewEndpointChange({ providerId, mode, discovery: fetched });
-      const saved = await completeEndpointChange(ctx, actions, preview);
-      if (saved) config = saved;
-      continue;
-    }
-    if (action.startsWith("编辑")) {
-      const result = await editProvider(ctx, { ...existing, _providerId: providerId });
-      if (!result) continue;
-      if (result.providerId !== providerId && Object.hasOwn(config.providers, result.providerId)) {
-        ctx.ui.notify(`Provider "${result.providerId}" 已存在`, "error");
-        continue;
-      }
-      if (result.providerId !== providerId) {
-        let discard: LegacyDiscardResolution | undefined;
-        if (providerHasMalformedLegacy(existing)) {
-          const ok = await ctx.ui.confirm(
-            "Malformed legacy extraPayload",
-            `Provider "${providerId}" has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.`,
-          );
-          if (!ok) continue;
-          discard = "discard-malformed-legacy";
-        }
-        const saved = await commitProviderIdentity(ctx, {
-          kind: "rename",
-          providerId,
-          targetProviderId: result.providerId,
-          providerPatch: managedProviderPatch(result.config),
-          fieldBaselines: managedProviderBaselines(existing),
-          ...(discard ? { legacyDiscardResolution: discard } : {}),
-        });
-        if (saved) config = saved;
-      } else {
-        const saved = applyActionResult(ctx, actions, await actions.patchProvider(
-          providerId,
-          managedProviderPatch(result.config),
-          { fieldBaselines: managedProviderBaselines(existing) },
-        ));
-        if (saved) config = saved;
-      }
-    }
-  }
-}
-
-// ═══════════════════════════════════════════════════════
-// Model Management
-// ═══════════════════════════════════════════════════════
-
-async function manageModels(
-  ctx: ExtensionCommandContext,
-  providerId: string,
-  initialConfig: ModelsConfig,
-): Promise<ModelsConfig> {
-  let config = initialConfig;
-  const actions = modelConfigActions();
-  while (true) {
-    const provider = config.providers[providerId];
-    if (!provider) return config;
-    const models = provider.models ?? [];
-    const choice = await searchableSelect(
-      ctx,
-      `Models - ${providerId}`,
-      [
-        ...providerModelOptions(models),
-        { value: ACTION_ADD_MODEL, label: "添加新 Model", searchText: "add new model 添加 新增" },
-        { value: ACTION_BACK, label: "返回", searchText: "back return 返回" },
-      ],
-      { maxVisible: 10, hint: "输入 model id/name 搜索，↑/↓ 选择，Enter 操作，Esc 返回" },
-    );
-    if (choice === undefined || choice === ACTION_BACK) return config;
-
-    if (choice === ACTION_ADD_MODEL) {
-      const result = await editModel(ctx, providerId);
-      if (!result) continue;
-      const modelToSave = structuredClone(result.model);
-      delete (modelToSave as Record<string, unknown>)["extraPayload"];
-      const payload = result.payload && Object.keys(result.payload).length > 0 ? result.payload : undefined;
-      const first = await actions.createModel(providerId, modelToSave, payload ? { payload } : undefined);
-      const completed = await completeSimpleAction(
-        ctx,
-        actions,
-        first,
-        (resolution) => actions.createModel(providerId, modelToSave, {
-          ...(payload ? { payload } : {}),
-          ...resolution,
-        }),
-      );
-      const saved = applyActionResult(ctx, actions, completed);
-      if (saved) config = saved;
-      continue;
-    }
-
-    const match = choice.match(/^model:(\d+)$/);
-    if (!match) continue;
-    const index = Number.parseInt(match[1]!, 10);
-    const existing = models[index];
-    if (!existing) continue;
-    const action = await ctx.ui.select(`Model: ${modelSummary(existing)}`, ["编辑", "复制", "删除", "返回"]);
-    if (!action || action.startsWith("返回")) continue;
-
-    if (action.startsWith("删除")) {
-      if (!await ctx.ui.confirm("确认删除", `删除 Model "${existing.id}"？`)) continue;
-      let discard: LegacyDiscardResolution | undefined;
-      if (modelHasMalformedLegacy(existing)) {
-        const ok = await ctx.ui.confirm(
-          "Malformed legacy extraPayload",
-          "This model has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.",
-        );
-        if (!ok) continue;
-        discard = "discard-malformed-legacy";
-      }
-      const saved = await commitModelIdentity(ctx, {
-        kind: "delete",
-        providerId,
-        modelId: existing.id,
-        ...(discard ? { legacyDiscardResolution: discard } : {}),
-      });
-      if (saved) config = saved;
-      continue;
-    }
-    if (action.startsWith("复制")) {
-      const targetModelId = `${existing.id}-copy`;
-      let discard: LegacyDiscardResolution | undefined;
-      if (Object.hasOwn(existing, "extraPayload") && !parseLegacyPayload((existing as Record<string, unknown>)["extraPayload"])) {
-        const ok = await ctx.ui.confirm(
-          "Malformed legacy extraPayload",
-          "This model has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.",
-        );
-        if (!ok) continue;
-        discard = "discard-malformed-legacy";
-      }
-      const saved = await commitModelIdentity(ctx, {
-        kind: "copy",
-        providerId,
-        modelId: existing.id,
-        targetModelId,
-        modelPatch: {
-          name: `${existing.name || existing.id} (Copy)`,
-        },
-        ...(discard ? { legacyDiscardResolution: discard } : {}),
-      });
-      if (saved) config = saved;
-      continue;
-    }
-    if (action.startsWith("编辑")) {
-      const fieldBaselines = managedModelBaselines(existing);
-      const result = await editModel(ctx, providerId, existing);
-      if (!result) continue;
-      const modelToSave = structuredClone(result.model);
-      delete (modelToSave as Record<string, unknown>)["extraPayload"];
-      const payloadOption = result.payload && Object.keys(result.payload).length > 0
-        ? result.payload
-        : null;
-      if (modelToSave.id !== existing.id) {
-        let discard: LegacyDiscardResolution | undefined;
-        if (result.hasMalformedLegacy) {
-          const ok = await ctx.ui.confirm(
-            "Malformed legacy extraPayload",
-            "This model has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.",
-          );
-          if (!ok) continue;
-          discard = "discard-malformed-legacy";
-        }
-        const saved = await commitModelIdentity(ctx, {
-          kind: "rename",
-          providerId,
-          modelId: existing.id,
-          targetModelId: modelToSave.id,
-          modelPatch: managedModelPatch(modelToSave),
-          fieldBaselines,
-          payload: payloadOption,
-          ...(payloadOption !== null && result.migrateLegacy
-            ? { migrateLegacyExtraPayload: result.migrateLegacy }
-            : {}),
-          ...(discard ? { legacyDiscardResolution: discard } : {}),
-        });
-        if (saved) config = saved;
-      } else {
-        const first = await actions.patchModel(
-          providerId,
-          existing.id,
-          managedModelPatch(modelToSave),
-          { fieldBaselines, payload: payloadOption },
-        );
-        const completed = await completeSimpleAction(
-          ctx,
-          actions,
-          first,
-          (resolution) => actions.patchModel(
-            providerId,
-            existing.id,
-            managedModelPatch(modelToSave),
-            { fieldBaselines, payload: payloadOption, ...resolution },
-          ),
-        );
-        const saved = applyActionResult(ctx, actions, completed);
-        if (saved) config = saved;
-      }
-    }
+    notifyRecoveryDiagnostic(ctx, applied.type);
+    if (await retryOrCancel(ctx)) continue;
+    return "cancelled";
   }
 }
 
@@ -1741,11 +676,16 @@ export default async function (pi: ExtensionAPI) {
   pi.registerCommand("model-config", {
     description: "可视化配置自定义模型 Providers 和 Models → 保存到 models.json",
     handler: async (_args, ctx) => {
+      if ((ctx as ExtensionCommandContext & { mode?: string }).mode !== "tui") {
+        ctx.ui.notify("模型配置编辑器仅支持交互式 TUI；未读取或修改配置", "error");
+        return;
+      }
+
       let config: ModelsConfig;
       try {
         config = readModelsConfig();
-      } catch (error) {
-        notifyError(ctx, error);
+      } catch {
+        ctx.ui.notify("无法读取模型配置；未执行任何更改", "error");
         return;
       }
 
@@ -1757,7 +697,7 @@ export default async function (pi: ExtensionAPI) {
         const choice = await ctx.ui.select("模型配置编辑器", [
           `管理 Providers (当前 ${pCount} providers, ${mCount} models)`,
           "Subagent 配置",
-          "诊断：检查 models.json 状态",
+          "诊断与事务恢复",
           "提示：保存后关闭并重开 /model (Ctrl+L) 即可看到",
           "退出",
         ]);
@@ -1767,23 +707,19 @@ export default async function (pi: ExtensionAPI) {
           const actions = new ModelConfigActions();
           await runProviderList(ctx, { actions });
           const refreshed = actions.readEditorSnapshot();
-          if (refreshed.type === "snapshot") config = cloneModelsConfig(refreshed.native);
-        } else if (choice.startsWith("Subagent")) await manageSubagentModelSettings(pi, ctx);
-        else if (choice.startsWith("诊断")) {
-          const path = getModelsPath();
-          const fs = await import("node:fs");
-          const exists = fs.existsSync(path);
-          const size = exists ? `${(fs.statSync(path).size / 1024).toFixed(1)} KB` : "N/A";
-          try {
-            const diskConfig = readModelsConfig();
-            const providers = Object.values(diskConfig.providers);
-            const models = providers.reduce((count, provider) => count + (provider.models || []).length, 0);
-            ctx.ui.notify(
-              `文件路径: ${path}\n存在: ${exists ? "是" : "否"} | 大小: ${size}\nProviders: ${providers.length} | Models: ${models}`,
-              "info",
-            );
-          } catch (error) {
-            ctx.ui.notify(`文件路径: ${path}\n无法读取 models.json: ${error instanceof Error ? error.message : String(error)}`, "error");
+          if (refreshed.type === "snapshot") config = structuredClone(refreshed.native);
+        } else if (choice.startsWith("Subagent")) {
+          await manageSubagentModelSettings(pi, ctx);
+        } else if (choice.startsWith("诊断")) {
+          if (await runRecoveryDiagnostics(ctx) === "ready") {
+            try {
+              config = readModelsConfig();
+              const providers = Object.values(config.providers);
+              const models = providers.reduce((count, provider) => count + (provider.models || []).length, 0);
+              ctx.ui.notify(`Providers: ${providers.length} | Models: ${models}`, "info");
+            } catch {
+              ctx.ui.notify("恢复后仍无法读取模型配置；未执行额外更改", "error");
+            }
           }
         } else if (choice.includes("提示")) {
           ctx.ui.notify(

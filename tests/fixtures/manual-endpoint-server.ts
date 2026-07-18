@@ -1,7 +1,7 @@
 import * as http from "node:http";
 import * as readline from "node:readline";
 
-const requestedPort = Number(process.argv[2] ?? 0);
+const requestedPort = Number(process.argv[2] === "--port" ? process.argv[3] : process.argv[2] ?? 0);
 if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65_535) process.exit(64);
 
 const server = http.createServer((request, response) => {

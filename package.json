@@ -1,6 +1,6 @@
 {
   "name": "pi-model-config",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Pi 可视化模型配置插件 — 管理自定义 Providers、Models、Payload 参数，支持自动拉取模型列表",
   "type": "module",
   "keywords": [
@@ -11,6 +11,12 @@
   ],
   "author": "使用 DeepSeek V4 Pro 开发",
   "license": "MIT",
+  "files": [
+    "*.ts",
+    "README.md",
+    "README-CN.md",
+    "LICENSE"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/mapleluvr/pi-model-config"

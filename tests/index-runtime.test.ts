@@ -4,11 +4,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import extension from "../index.ts";
+import extension, { runRecoveryDiagnostics } from "../index.ts";
 import { ModelConfigActions } from "../config-actions.ts";
 import { getModelsPath, readModelsConfig, writeModelsConfig } from "../config.ts";
 import { getPayloadConfigPath, lookupModelPayload, readPayloadConfig, serializePayloadDocument, setPayloadDocumentValue } from "../payload-config.ts";
 import { getTransactionJournalPath } from "../payload-coordinator.ts";
+import { tryAcquireMutationLock } from "../process-lock.ts";
 import { runModelEditor } from "../model-editor.ts";
 import type { SettingsPanelResult } from "../settings-panel.ts";
 
@@ -37,6 +38,7 @@ function take<T>(values: T[], label: string): T {
 
 function scriptedContext(script: Script, notifications: Array<{ message: string; level: string }> = []): any {
   return {
+    mode: "tui",
     ui: {
       select: async () => take(script.selects, "select"),
       input: async () => take(script.inputs, "input"),
@@ -64,12 +66,12 @@ function panelResult(type: SettingsPanelResult["type"], categoryId = "general", 
   } as SettingsPanelResult;
 }
 
-async function withRuntimeAgentDir(run: () => Promise<void>): Promise<void> {
+async function withRuntimeAgentDir(run: (agentDir: string) => Promise<void>): Promise<void> {
   const previous = process.env.PI_CODING_AGENT_DIR;
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-config-runtime-"));
   try {
     process.env.PI_CODING_AGENT_DIR = agentDir;
-    await run();
+    await run(agentDir);
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previous;
@@ -77,7 +79,7 @@ async function withRuntimeAgentDir(run: () => Promise<void>): Promise<void> {
   }
 }
 
-async function runModelConfigCommand(script: Script, notifications: Array<{ message: string; level: string }> = []): Promise<void> {
+async function commandHandler(): Promise<(args: string, ctx: any) => Promise<void>> {
   let handler: ((args: string, ctx: any) => Promise<void>) | undefined;
   await extension({
     registerCommand: (name: string, command: { handler: (args: string, ctx: any) => Promise<void> }) => {
@@ -87,7 +89,12 @@ async function runModelConfigCommand(script: Script, notifications: Array<{ mess
     on: () => {},
   } as any);
   assert.ok(handler);
-  await handler!("", scriptedContext(script, notifications));
+  return handler;
+}
+
+async function runModelConfigCommand(script: Script, notifications: Array<{ message: string; level: string }> = []): Promise<void> {
+  const handler = await commandHandler();
+  await handler("", scriptedContext(script, notifications));
   assert.deepEqual(script, { selects: [], inputs: [], editors: [], confirms: [], customs: [] });
 }
 
@@ -105,6 +112,199 @@ test("activation does not dynamically register native providers and injects only
     assert.deepEqual(hook!({ payload: { model: "one" } }, { model: { provider: "local", id: "one" } }), { model: "one", temperature: 0.4 });
     assert.equal(hook!({ payload: { model: "two" } }, { model: { provider: "local", id: "two" } }), undefined);
   });
+});
+
+test("non-TUI command exits before prompts or storage mutation with a generic message", async () => {
+  await withRuntimeAgentDir(async (agentDir) => {
+    const nativePath = getModelsPath(agentDir);
+    const payloadPath = getPayloadConfigPath(agentDir);
+    fs.writeFileSync(nativePath, "{ malformed-native-marker");
+    fs.writeFileSync(payloadPath, "{ malformed-payload-marker", { mode: 0o600 });
+    const before = [fs.readFileSync(nativePath), fs.readFileSync(payloadPath)];
+    const notifications: Array<{ message: string; level: string }> = [];
+    const handler = await commandHandler();
+    await handler("", {
+      mode: "rpc",
+      ui: {
+        select: async () => { throw new Error("non-TUI command must not prompt"); },
+        notify: (message: string, level: string) => notifications.push({ message, level }),
+      },
+    });
+    assert.deepEqual(fs.readFileSync(nativePath), before[0]);
+    assert.deepEqual(fs.readFileSync(payloadPath), before[1]);
+    assert.equal(fs.existsSync(getTransactionJournalPath(agentDir)), false);
+    assert.deepEqual(notifications, [{ message: "模型配置编辑器仅支持交互式 TUI；未读取或修改配置", level: "error" }]);
+    assert.doesNotMatch(notifications[0]!.message, /marker|models\.json|payload/i);
+  });
+});
+
+test("top-level diagnostics previews malformed journal recovery after releasing the IPC lock and Cancel is byte-stable", async () => {
+  await withRuntimeAgentDir(async (agentDir) => {
+    writeModelsConfig({ providers: { local: { baseUrl: "http://localhost", api: "openai-completions", models: [{ id: "one" }] } } });
+    seedModelPayload("local", "one", { fixtureFlag: true });
+    fs.writeFileSync(getTransactionJournalPath(agentDir), "{ malformed journal\n", { mode: 0o600 });
+    const artifactPaths = [getModelsPath(agentDir), getPayloadConfigPath(agentDir), getTransactionJournalPath(agentDir)];
+    const before = artifactPaths.map((filePath) => fs.readFileSync(filePath));
+    const handler = await commandHandler();
+    const notifications: Array<{ message: string; level: string }> = [];
+    let mainPrompts = 0;
+    let previewPrompts = 0;
+
+    await handler("", {
+      mode: "tui",
+      ui: {
+        select: async (title: string, options: string[]) => {
+          if (title === "模型配置编辑器") {
+            mainPrompts += 1;
+            return mainPrompts === 1 ? "诊断与事务恢复" : "退出";
+          }
+          assert.equal(title, "配置恢复预览");
+          previewPrompts += 1;
+          assert.match(options.join("|"), /接受当前文件/);
+          assert.match(options.join("|"), /取消/);
+          assert.match(options.join("|"), /重试/);
+          const contender = await tryAcquireMutationLock(agentDir);
+          assert.equal(contender.type, "acquired", "recovery preview opened while coordinator still owned the lock");
+          if (contender.type === "acquired") await contender.handle.release();
+          return "取消";
+        },
+        notify: (message: string, level: string) => notifications.push({ message, level }),
+      },
+    });
+
+    assert.equal(previewPrompts, 1);
+    artifactPaths.forEach((filePath, index) => assert.deepEqual(fs.readFileSync(filePath), before[index]));
+    assert.doesNotMatch(JSON.stringify(notifications), /fixtureFlag|malformed journal/i);
+  });
+});
+
+test("recovery diagnostics handles automatic and refreshed manual recovery without prompting under lock", async () => {
+  let lockOwned = false;
+  const prompts: string[] = [];
+  const notifications: Array<{ message: string; level: string }> = [];
+  const selects = ["恢复事务前状态", "恢复事务后状态"];
+  const inspections = [
+    { type: "automatic-recovered" as const },
+    { type: "needs-choice" as const, snapshotToken: "token-one", choices: ["restore-before-payload" as const] },
+    { type: "needs-choice" as const, snapshotToken: "token-two", choices: ["restore-after-payload" as const] },
+  ];
+  const applied: Array<[string, string]> = [];
+  const context = {
+    mode: "tui",
+    ui: {
+      select: async (_title: string, options: string[]) => {
+        assert.equal(lockOwned, false, "prompt opened while recovery lock was owned");
+        prompts.push(options.join("|"));
+        return selects.shift();
+      },
+      notify: (message: string, level: string) => notifications.push({ message, level }),
+    },
+  } as any;
+  const recovery = {
+    inspect: async () => {
+      lockOwned = true;
+      const result = inspections.shift();
+      lockOwned = false;
+      assert.ok(result);
+      return result;
+    },
+    apply: async (token: string, choice: string) => {
+      lockOwned = true;
+      applied.push([token, choice]);
+      const result = token === "token-one" ? { type: "refresh" as const } : { type: "recovered" as const };
+      lockOwned = false;
+      return result;
+    },
+  };
+
+  assert.equal(await runRecoveryDiagnostics(context, recovery), "ready");
+  assert.equal(await runRecoveryDiagnostics(context, recovery), "ready");
+  assert.deepEqual(applied, [
+    ["token-one", "restore-before-payload"],
+    ["token-two", "restore-after-payload"],
+  ]);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0]!, /取消/);
+  assert.match(prompts[0]!, /重试/);
+  assert.match(notifications.map((entry) => entry.message).join("\n"), /自动恢复完成/);
+  assert.match(notifications.map((entry) => entry.message).join("\n"), /状态已变化/);
+  assert.match(notifications.map((entry) => entry.message).join("\n"), /恢复完成/);
+});
+
+for (const diagnostic of ["busy", "collision", "unsupported"] as const) {
+  test(`recovery diagnostics reports ${diagnostic} generically and offers retry or cancel`, async () => {
+    const notifications: Array<{ message: string; level: string }> = [];
+    let calls = 0;
+    const result = await runRecoveryDiagnostics({
+      mode: "tui",
+      ui: {
+        select: async (_title: string, options: string[]) => {
+          assert.deepEqual(options, ["重试", "取消"]);
+          return calls === 1 ? "重试" : "取消";
+        },
+        notify: (message: string, level: string) => notifications.push({ message, level }),
+      },
+    } as any, {
+      inspect: async () => {
+        calls += 1;
+        return { type: diagnostic };
+      },
+      apply: async () => { throw new Error("diagnostic outcome must not apply recovery"); },
+    });
+    assert.equal(result, "cancelled");
+    assert.equal(calls, 2);
+    const output = notifications.map((entry) => entry.message).join("\n");
+    assert.doesNotMatch(output, /secret-value|token|path|payload|provider|model/i);
+    assert.doesNotMatch(output, /force|unlock|强制|解锁/i);
+  });
+}
+
+test("recovery apply handle loss is generic and Retry re-inspects through a fresh endpoint", async () => {
+  const results = [
+    { type: "needs-choice" as const, snapshotToken: "opaque", choices: ["accept-current" as const] },
+    { type: "clean" as const },
+  ];
+  const notifications: Array<{ message: string; level: string }> = [];
+  const selections = ["接受当前文件并隔离损坏日志", "重试"];
+  const result = await runRecoveryDiagnostics({
+    mode: "tui",
+    ui: {
+      select: async () => selections.shift(),
+      notify: (message: string, level: string) => notifications.push({ message, level }),
+    },
+  } as any, {
+    inspect: async () => results.shift()!,
+    apply: async () => { throw new Error("endpoint-lost private-marker"); },
+  });
+  assert.equal(result, "ready");
+  assert.deepEqual(results, []);
+  assert.deepEqual(selections, []);
+  assert.doesNotMatch(JSON.stringify(notifications), /endpoint-lost|private-marker/);
+});
+
+test("recovery retry routes a released crashed endpoint to a fresh clean inspection", async () => {
+  const results = [{ type: "busy" as const }, { type: "clean" as const }];
+  const result = await runRecoveryDiagnostics({
+    mode: "tui",
+    ui: {
+      select: async () => "重试",
+      notify() {},
+    },
+  } as any, {
+    inspect: async () => results.shift()!,
+    apply: async () => { throw new Error("clean retry must not apply recovery"); },
+  });
+  assert.equal(result, "ready");
+  assert.deepEqual(results, []);
+});
+
+test("index has no reachable linear Provider or Model editor pipeline", () => {
+  const source = fs.readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+  for (const obsolete of ["editProvider", "editModel", "manageProviders", "manageModels", "editExtraPayload", "editCompat"]) {
+    assert.doesNotMatch(source, new RegExp(`(?:async\\s+)?function\\s+${obsolete}\\b`), obsolete);
+  }
+  assert.doesNotMatch(source, /from "\.\/config\.ts";[^\n]*writeModelsConfig/);
+  assert.doesNotMatch(source, /from "\.\/payload-config\.ts";[^\n]*(?:writePayloadConfig|savePayloadConfig)/);
 });
 
 test("top-level Provider route opens the two-pane Model pipeline and renames through actions", async () => {
