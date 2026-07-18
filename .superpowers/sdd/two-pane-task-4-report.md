@@ -321,3 +321,22 @@ DONE.
 - RED: bare `payloadCollisionResolution` retries now fail; empty-legacy / writeModelsConfig pollution gaps.
 - GREEN: token-first retries; drift/forged token tests; empty `[]` regression; `writeModelsConfig` pollution test.
 - Validation: focused actions+config green; full `npm test` 183/183; `npm run check` + `git diff --check` pass.
+
+
+## Follow-up 6 — final review (2026-07-18)
+
+### Finding -> fix
+
+1. **Inherited nested validation** -> `materializeOwnOnly` + own-key field access in `validateModelsCandidate`; prototype pollution cannot satisfy baseUrl/api/models.
+2. **Legacy row parser** -> require own `key`/`type`/`value`; polluted `{}` rows malformed, zero-write, no private migration.
+3. **Exact subtree baseline** -> `describeSubtreePresence` / `subtreePresenceEqual`; absent, null, `{}` distinct for provider/model subtrees.
+4. **Simple-action drift** -> always `stale-target` + fresh `resolutionToken` when requirements remain; no either/or; new confirm required.
+5. **Identity drift** -> always stale with refreshed preview; `clearIdentityResolutions` so old replace/discard cannot auto-apply.
+6. **Model delete** -> malformed check before mutation; `legacyDiscardResolution` on delete; controller confirm/cancel.
+7. **completeSimpleAction** -> discard on same `ModelConfigActions` instance that created the token.
+8. **patchProvider non-models** -> reject resolutionToken/collision/discard flags as stale zero-write.
+
+### RED -> GREEN
+
+- RED: inherited prototype validation; polluted empty legacy rows; absent vs {}; either/or drift; model delete without discard; wrong-instance discard; non-models resolution flags.
+- GREEN: expanded focused suites; full `npm test` 192/192; `npm run check` + `git diff --check` pass.
