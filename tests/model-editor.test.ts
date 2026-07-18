@@ -80,7 +80,7 @@ test("Override draft requires explicit previewed cleanup and preserves cancel by
 });
 
 test("Override catalog exposes only the approved restricted surface", () => {
-  const categories = buildModelOverrideCategories("target", { 
+  const categories = buildModelOverrideCategories("target", {
     name: "Target",
     future: { keep: true },
     cost: { input: 0, futureNested: true },

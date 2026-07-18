@@ -525,7 +525,7 @@ export async function runProviderList(
         label: `编辑 [${id}]`,
         description: `${typeof getOwnValue(provider, "name") === "string" ? getOwnValue(provider, "name") : ""} ${Array.isArray(getOwnValue(provider, "models")) ? (getOwnValue(provider, "models") as unknown[]).length : 0} models`,
         searchText: [id, getOwnValue(provider, "name")].filter((value): value is string => typeof value === "string").join(" "),
-      })), 
+      })),
       { value: ACTION_ADD_PROVIDER, label: "添加新 Provider", searchText: "add new 添加 新建" },
       { value: ACTION_BACK, label: "返回", searchText: "back return 返回" },
     ];
