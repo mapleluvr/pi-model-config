@@ -30,8 +30,28 @@ export interface ProviderConfig {
   /** Models registered under this provider */
   models?: ModelConfig[];
   /** Per-model overrides for built-in providers */
-  modelOverrides?: Record<string, Partial<ModelConfig>>;
+  modelOverrides?: Record<string, ModelOverrideConfig>;
   /** Provider-level compatibility settings */
+  compat?: CompatConfig;
+}
+
+export interface ModelOverrideCost {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}
+
+export interface ModelOverrideConfig {
+  [key: string]: unknown;
+  name?: string;
+  reasoning?: boolean;
+  thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
+  input?: ("text" | "image")[];
+  cost?: ModelOverrideCost;
+  contextWindow?: number;
+  maxTokens?: number;
+  headers?: Record<string, string>;
   compat?: CompatConfig;
 }
 
@@ -113,5 +133,5 @@ export const API_TYPES = [
 ] as const;
 
 /** Thinking level keys */
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];

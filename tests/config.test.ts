@@ -1,22 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { ModelsConfigError, readModelsConfig, writeModelsConfig } from "../config.ts";
-
-function withAgentDir(run: (agentDir: string) => void): void {
-  const previous = process.env.PI_CODING_AGENT_DIR;
-  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-config-jsonc-"));
-  try {
-    process.env.PI_CODING_AGENT_DIR = agentDir;
-    run(agentDir);
-  } finally {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previous;
-    fs.rmSync(agentDir, { recursive: true, force: true });
-  }
-}
+import { ModelsCandidateValidationError } from "../config-validation.ts";
+import { withTempAgentDir as withAgentDir } from "./helpers/temp-agent-dir.ts";
 
 test("reads Pi models.json JSONC and preserves unknown root fields", () => withAgentDir((agentDir) => {
   const filePath = path.join(agentDir, "models.json");
@@ -76,4 +64,43 @@ test("treats a blank or whitespace-only models.json as malformed and preserves i
 
 test("returns an empty provider map only when models.json is absent", () => withAgentDir(() => {
   assert.deepEqual(readModelsConfig(), { providers: {} });
+}));
+
+test("rejects a Pi-invalid complete candidate before replacing existing bytes", () => withAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "models.json");
+  const original = `{ "rootSetting": "keep", "providers": {} }\n`;
+  fs.writeFileSync(filePath, original);
+
+  assert.throws(() => writeModelsConfig({
+    providers: { custom: { models: [{ id: "model" }] } },
+  }), ModelsCandidateValidationError);
+  assert.equal(fs.readFileSync(filePath, "utf8"), original);
+}));
+
+test("atomically writes a valid candidate while preserving unknown nested fields and native mode", () => withAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "models.json");
+  fs.writeFileSync(filePath, JSON.stringify({
+    rootPreview: true,
+    providers: {
+      openai: {
+        headers: { "X-Keep": "yes" },
+        providerPreview: true,
+        models: [{ id: "model", modelPreview: true, compat: { futureCompat: "keep" } }],
+      },
+    },
+  }), { mode: 0o640 });
+  const originalMode = fs.statSync(filePath).mode & 0o777;
+  const candidate = readModelsConfig();
+  candidate.providers.openai!.models![0]!.name = "Updated";
+
+  writeModelsConfig(candidate);
+
+  const written = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  assert.equal(written.rootPreview, true);
+  assert.equal(written.providers.openai.providerPreview, true);
+  assert.equal(written.providers.openai.models[0].modelPreview, true);
+  assert.equal(written.providers.openai.models[0].compat.futureCompat, "keep");
+  assert.equal(written.providers.openai.models[0].name, "Updated");
+  assert.equal(fs.statSync(filePath).mode & 0o777, originalMode);
+  assert.deepEqual(fs.readdirSync(agentDir).filter((entry) => entry.endsWith(".tmp")), []);
 }));

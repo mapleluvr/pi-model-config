@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parse, type ParseError } from "jsonc-parser";
+import { atomicReplace, readArtifact } from "./atomic-file.ts";
+import { assertValidModelsCandidate } from "./config-validation.ts";
 import type { ModelsConfig, ProviderConfig } from "./types.ts";
 
 export class ModelsConfigError extends Error {
@@ -47,12 +49,15 @@ export function readModelsConfig(filePath = getModelsPath()): ModelsConfig {
 
 /** 写入 models.json */
 export function writeModelsConfig(config: ModelsConfig, filePath = getModelsPath()): void {
-  const existing = fs.existsSync(filePath)
-    ? parseModelsDocument(filePath, fs.readFileSync(filePath, "utf8"))
+  const snapshot = readArtifact(filePath);
+  const existing = snapshot.exists
+    ? parseModelsDocument(filePath, snapshot.bytes!.toString("utf8"))
     : { providers: {} };
   const merged = { ...existing, ...config, providers: config.providers };
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+  assertValidModelsCandidate(merged);
+  atomicReplace(filePath, Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"), {
+    expectedHash: snapshot.hash,
+  });
 }
 
 /** 添加或更新一个 provider */
