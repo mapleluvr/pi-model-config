@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import test from "node:test";
@@ -131,4 +132,93 @@ test("quarantines private artifacts with owner-only permissions and cleans no re
   assert.throws(() => quarantineArtifact(filePath, "mismatch", { expectedHash: hashArtifact(Buffer.from("old")) }), /changed before quarantine/);
   assert.equal(fs.existsSync(`${filePath}.corrupt-mismatch`), false);
   assert.equal(fs.readFileSync(filePath, "utf8"), "current");
+}));
+
+test("injected failure after secure mode leaves original path tightened and quarantine absent", () => withTempAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "private.json");
+  const bytes = "private-payload";
+  fs.writeFileSync(filePath, bytes, { mode: 0o666 });
+  fs.chmodSync(filePath, 0o666);
+  const quarantinePath = `${filePath}.corrupt-injected`;
+
+  assert.throws(() => quarantineArtifact(filePath, "injected", {
+    mode: 0o600,
+    expectedHash: hashArtifact(Buffer.from(bytes)),
+    afterSecureMode() {
+      throw new Error("injected after secure mode");
+    },
+  }), /injected after secure mode/);
+
+  assert.equal(fs.existsSync(filePath), true);
+  assert.equal(fs.existsSync(quarantinePath), false);
+  assert.equal(fs.readFileSync(filePath, "utf8"), bytes);
+  if (process.platform !== "win32") assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+}));
+
+test("chmod failure leaves original path and does not create a quarantine", () => withTempAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "private.json");
+  const bytes = "private-payload";
+  fs.writeFileSync(filePath, bytes, { mode: 0o666 });
+  fs.chmodSync(filePath, 0o666);
+  const quarantinePath = `${filePath}.corrupt-chmod-fail`;
+  const originalMode = fs.statSync(filePath).mode & 0o777;
+
+  assert.throws(() => quarantineArtifact(filePath, "chmod-fail", {
+    mode: 0o600,
+    expectedHash: hashArtifact(Buffer.from(bytes)),
+    applySecureMode() {
+      const error = new Error("chmod failed") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    },
+  }), /chmod failed/);
+
+  assert.equal(fs.existsSync(filePath), true);
+  assert.equal(fs.existsSync(quarantinePath), false);
+  assert.equal(fs.readFileSync(filePath, "utf8"), bytes);
+  if (process.platform !== "win32") assert.equal(fs.statSync(filePath).mode & 0o777, originalMode);
+}));
+
+test("crash after secure mode keeps source at owner-only mode without a quarantine path", () => withTempAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "private.json");
+  const bytes = "private-payload";
+  fs.writeFileSync(filePath, bytes, { mode: 0o666 });
+  fs.chmodSync(filePath, 0o666);
+  const quarantinePath = `${filePath}.corrupt-crash`;
+  const fixture = path.resolve("tests/fixtures/quarantine-worker.ts");
+  const result = spawnSync(process.execPath, ["--experimental-strip-types", fixture, filePath, "crash"], {
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 86, result.stderr || result.stdout || `exit ${result.status}`);
+  assert.equal(fs.existsSync(filePath), true);
+  assert.equal(fs.existsSync(quarantinePath), false);
+  assert.equal(fs.readFileSync(filePath, "utf8"), bytes);
+  if (process.platform !== "win32") assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+}));
+
+test("rejects a quarantine raced by a non-throwing beforeRename hook", () => withTempAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "private.json");
+  fs.writeFileSync(filePath, "original", { mode: 0o666 });
+  fs.chmodSync(filePath, 0o666);
+  assert.throws(() => quarantineArtifact(filePath, "race", {
+    mode: 0o600,
+    expectedHash: hashArtifact(Buffer.from("original")),
+    beforeRename() {
+      fs.writeFileSync(filePath, "concurrent");
+    },
+  }), /changed before quarantine/);
+  assert.equal(fs.existsSync(`${filePath}.corrupt-race`), false);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "concurrent");
+  if (process.platform !== "win32") assert.equal(fs.statSync(filePath).mode & 0o777, 0o666);
+}));
+
+test("generic quarantine without mode still renames and leaves native permissions alone", () => withTempAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "models.json");
+  fs.writeFileSync(filePath, "corrupt", { mode: 0o640 });
+  fs.chmodSync(filePath, 0o640);
+  const sourceMode = fs.statSync(filePath).mode & 0o777;
+  const quarantinedPath = quarantineArtifact(filePath, 1_725_000_000_001);
+  assert.equal(fs.existsSync(filePath), false);
+  assert.equal(fs.readFileSync(quarantinedPath, "utf8"), "corrupt");
+  if (process.platform !== "win32") assert.equal(fs.statSync(quarantinedPath).mode & 0o777, sourceMode);
 }));

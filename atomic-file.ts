@@ -24,6 +24,10 @@ export interface QuarantineArtifactOptions {
   expectedHash?: string;
   mode?: number;
   beforeRename?: () => void;
+  /** Test seam: replaces fs.chmodSync when tightening the source before rename. */
+  applySecureMode?: (filePath: string, mode: number) => void;
+  /** Test seam: runs after the source mode is tightened and before rename. */
+  afterSecureMode?: () => void;
 }
 
 export function hashArtifact(bytesOrAbsent: Uint8Array | undefined): string {
@@ -159,16 +163,22 @@ export function quarantineArtifact(
     const currentHash = readArtifact(filePath).hash;
     if (currentHash !== options.expectedHash) throw new Error(`Artifact at ${filePath} changed before quarantine`);
   }
-  fs.renameSync(filePath, quarantinePath);
+  // Tighten the source mode before the artifact is reachable under the quarantine name.
+  // A crash after this leaves the original path at owner-only mode, which is safe.
+  if (options.mode !== undefined) {
+    const applySecureMode = options.applySecureMode ?? ((target, mode) => fs.chmodSync(target, mode));
+    applySecureMode(filePath, options.mode);
+    options.afterSecureMode?.();
+  }
   try {
-    if (options.mode !== undefined) fs.chmodSync(quarantinePath, options.mode);
+    fs.renameSync(filePath, quarantinePath);
     syncDirectory(path.dirname(filePath));
     return quarantinePath;
   } catch (error) {
     try {
       fs.renameSync(quarantinePath, filePath);
     } catch {
-      // Preserve the permission or directory-sync failure.
+      // Preserve the rename or directory-sync failure.
     }
     throw error;
   }
