@@ -1,10 +1,11 @@
 import * as readline from "node:readline";
 import { tryAcquireMutationLock } from "../../process-lock.ts";
 
-const [, , mode, agentDir, blockText] = process.argv;
+const [, , mode, agentDir, blockText, platformText] = process.argv;
 if (!mode || !agentDir) process.exit(64);
 
-const result = await tryAcquireMutationLock(agentDir);
+const lockOverrides = platformText === "darwin" ? { platform: "darwin" as const } : {};
+const result = await tryAcquireMutationLock(agentDir, lockOverrides);
 if (result.type !== "acquired") {
   process.stdout.write(`${result.type}\n`);
   process.exit(0);
@@ -23,7 +24,7 @@ if (mode !== "block" && mode !== "hold") {
 
 process.stdout.write("READY\n");
 if (mode === "block") {
-  const blockMs = Number(blockText ?? 900);
+  const blockMs = Number(blockText ?? 2_500);
   const until = Date.now() + blockMs;
   while (Date.now() < until) {
     // Deliberately pause the JavaScript event loop while the OS keeps the endpoint bound.

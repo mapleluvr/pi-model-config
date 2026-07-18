@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
@@ -405,18 +407,24 @@ test("unexpected server error or close fences every synchronous write boundary",
   }
 });
 
+interface WorkerOptions {
+  blockMs?: number;
+  platform?: "darwin";
+}
+
 class Worker {
   readonly child: ChildProcessWithoutNullStreams;
   private lines: string[] = [];
   private waiters: Array<{ expected: string; resolve: (line: string) => void; reject: (error: Error) => void }> = [];
   private partial = "";
 
-  constructor(runtime: "node" | "bun", mode: string, agentDir: string, blockMs = 900) {
+  constructor(runtime: "node" | "bun", mode: string, agentDir: string, options: WorkerOptions = {}) {
     const fixture = path.resolve("tests/fixtures/lock-worker.ts");
     const command = runtime === "node" ? process.execPath : "bun";
+    const workerArgs = [mode, agentDir, String(options.blockMs ?? 2_500), options.platform ?? "current"];
     const args = runtime === "node"
-      ? ["--experimental-strip-types", fixture, mode, agentDir, String(blockMs)]
-      : [fixture, mode, agentDir, String(blockMs)];
+      ? ["--experimental-strip-types", fixture, ...workerArgs]
+      : [fixture, ...workerArgs];
     this.child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.consume(chunk));
@@ -477,14 +485,48 @@ function makeRealAgentDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-config-lock-"));
 }
 
-async function runContender(runtime: "node" | "bun", agentDir: string, expected: string): Promise<void> {
-  const contender = new Worker(runtime, "acquire", agentDir);
-  await contender.waitFor(expected);
-  await contender.exited();
+function loopbackPortAvailable(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once("error", () => resolve(false));
+    server.listen({ host: "127.0.0.1", port }, () => {
+      server.close((error) => resolve(error === undefined));
+    });
+  });
+}
+
+async function makeIsolatedDarwinAgentDir(): Promise<string> {
+  for (let attempt = 0; attempt < 64; attempt += 1) {
+    const agentDir = makeRealAgentDir();
+    const canonicalPath = fs.realpathSync.native(agentDir);
+    const identity = deriveEndpointIdentity(canonicalPath, "darwin", (value) => (
+      createHash("sha256").update(value).digest("hex")
+    ));
+    if (typeof identity.address !== "string" && await loopbackPortAvailable(identity.address.port)) return agentDir;
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+  throw new Error("unable to reserve an isolated Darwin lock port");
+}
+
+async function runContender(
+  runtime: "node" | "bun",
+  agentDir: string,
+  expected: string,
+  options: WorkerOptions = {},
+): Promise<void> {
+  const contender = new Worker(runtime, "acquire", agentDir, options);
+  try {
+    await contender.waitFor(expected);
+    await contender.exited();
+  } finally {
+    contender.kill();
+    await contender.exited();
+  }
 }
 
 test("real current-platform owner/contender matrix survives pause and releases cleanly", async (t) => {
   const runtimes: Array<"node" | "bun"> = bunAvailable() ? ["node", "bun"] : ["node"];
+  const blockedResult = process.platform === "darwin" ? "collision" : "busy";
   for (const ownerRuntime of runtimes) {
     for (const contenderRuntime of runtimes) {
       await t.test(`${ownerRuntime}/${contenderRuntime}`, async () => {
@@ -492,7 +534,7 @@ test("real current-platform owner/contender matrix survives pause and releases c
         const owner = new Worker(ownerRuntime, "block", agentDir);
         try {
           await owner.waitFor("READY");
-          await runContender(contenderRuntime, agentDir, "busy");
+          await runContender(contenderRuntime, agentDir, blockedResult);
           await owner.waitFor("RESUMED");
           await runContender(contenderRuntime, agentDir, "busy");
           owner.send("RELEASE");
@@ -506,6 +548,28 @@ test("real current-platform owner/contender matrix survives pause and releases c
         }
       });
     }
+  }
+});
+
+test("forced Darwin loopback times out while blocked then matches after resume", {
+  skip: process.platform === "darwin",
+}, async () => {
+  const agentDir = await makeIsolatedDarwinAgentDir();
+  const options: WorkerOptions = { platform: "darwin" };
+  const owner = new Worker("node", "block", agentDir, options);
+  try {
+    await owner.waitFor("READY");
+    await runContender("node", agentDir, "collision", options);
+    await owner.waitFor("RESUMED");
+    await runContender("node", agentDir, "busy", options);
+    owner.send("RELEASE");
+    await owner.waitFor("RELEASED");
+    await owner.exited();
+    await runContender("node", agentDir, "acquired", options);
+  } finally {
+    owner.kill();
+    await owner.exited();
+    fs.rmSync(agentDir, { recursive: true, force: true });
   }
 });
 
