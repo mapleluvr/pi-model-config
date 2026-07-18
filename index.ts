@@ -12,6 +12,7 @@ import {
   parseLegacyExtraPayload,
   type ActionResult,
   type LegacyDiscardResolution,
+  type PayloadCollisionResolution,
 } from "./config-actions.ts";
 import { getModelsPath, readModelsConfig } from "./config.ts";
 import { lookupModelPayload, mergePayloadIntoRequest } from "./payload-config.ts";
@@ -505,18 +506,41 @@ function loadModelPayload(
   return { payload: migrated, migrateLegacy: migrated };
 }
 
-async function confirmLegacyDiscard(
+/**
+ * Simple actions return a bound resolutionToken when malformed legacy / payload collisions need review.
+ * Confirm discard when needed, then retry with the token (never bare resolution flags).
+ * Payload collisions are still notify-only for the old UI (Task 5 dialogs).
+ */
+async function completeSimpleAction(
   ctx: ExtensionCommandContext,
-  hasMalformedLegacy: boolean | undefined,
+  first: ActionResult,
+  retryWith: (resolution: {
+    resolutionToken: string;
+    legacyDiscardResolution?: LegacyDiscardResolution;
+    payloadCollisionResolution?: PayloadCollisionResolution;
+  }) => Promise<ActionResult>,
   scopeLabel = "This model",
-): Promise<LegacyDiscardResolution | undefined | "cancel"> {
-  if (!hasMalformedLegacy) return undefined;
-  const ok = await ctx.ui.confirm(
-    "Malformed legacy extraPayload",
-    `${scopeLabel} has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.`,
-  );
-  if (!ok) return "cancel";
-  return "discard-malformed-legacy";
+): Promise<ActionResult> {
+  if (first.type === "validation-error" && first.resolutionToken) {
+    const ok = await ctx.ui.confirm(
+      "Malformed legacy extraPayload",
+      `${scopeLabel} has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.`,
+    );
+    if (!ok) {
+      modelConfigActions().discardResolutionToken(first.resolutionToken);
+      return first;
+    }
+    return retryWith({
+      resolutionToken: first.resolutionToken,
+      legacyDiscardResolution: "discard-malformed-legacy",
+    });
+  }
+  if (first.type === "payload-collision" && first.resolutionToken) {
+    // Old UI notifies only; discard the bound token so it does not linger with secret-bearing request.
+    modelConfigActions().discardResolutionToken(first.resolutionToken);
+    return first;
+  }
+  return first;
 }
 
 function modelHasMalformedLegacy(model: ModelConfig | undefined): boolean {
@@ -526,10 +550,6 @@ function modelHasMalformedLegacy(model: ModelConfig | undefined): boolean {
 
 function providerHasMalformedLegacy(provider: ProviderConfig | undefined): boolean {
   return (provider?.models ?? []).some((model) => modelHasMalformedLegacy(model));
-}
-
-function modelsListHasMalformedLegacy(models: readonly ModelConfig[] | undefined): boolean {
-  return (models ?? []).some((model) => modelHasMalformedLegacy(model));
 }
 
 function finiteNumberOr(value: string, fallback: number): number {
@@ -906,7 +926,14 @@ async function manageProviders(
     if (choice.startsWith("添加")) {
       const result = await editProvider(ctx);
       if (!result) continue;
-      const saved = applyActionResult(ctx, await actions.createProvider(result.providerId, result.config));
+      const first = await actions.createProvider(result.providerId, result.config);
+      const completed = await completeSimpleAction(
+        ctx,
+        first,
+        (resolution) => actions.createProvider(result.providerId, result.config, resolution),
+        `Provider "${result.providerId}"`,
+      );
+      const saved = applyActionResult(ctx, completed);
       if (saved) config = saved;
       continue;
     }
@@ -923,12 +950,16 @@ async function manageProviders(
 
     if (action.startsWith("删除")) {
       if (!await ctx.ui.confirm("确认删除", `删除 Provider "${providerId}" 及其所有 Models？`)) continue;
-      const discard = await confirmLegacyDiscard(
-        ctx,
-        providerHasMalformedLegacy(existing),
-        `Provider "${providerId}"`,
-      );
-      if (discard === "cancel") continue;
+      // Identity previews bind the full request; pre-confirm discard when native legacy is malformed.
+      let discard: LegacyDiscardResolution | undefined;
+      if (providerHasMalformedLegacy(existing)) {
+        const ok = await ctx.ui.confirm(
+          "Malformed legacy extraPayload",
+          `Provider "${providerId}" has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.`,
+        );
+        if (!ok) continue;
+        discard = "discard-malformed-legacy";
+      }
       const saved = await commitProviderIdentity(ctx, {
         kind: "delete",
         providerId,
@@ -945,12 +976,15 @@ async function manageProviders(
         ctx.ui.notify(`Provider "${copyId}" 已存在`, "error");
         continue;
       }
-      const discard = await confirmLegacyDiscard(
-        ctx,
-        providerHasMalformedLegacy(existing),
-        `Provider "${providerId}"`,
-      );
-      if (discard === "cancel") continue;
+      let discard: LegacyDiscardResolution | undefined;
+      if (providerHasMalformedLegacy(existing)) {
+        const ok = await ctx.ui.confirm(
+          "Malformed legacy extraPayload",
+          `Provider "${providerId}" has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.`,
+        );
+        if (!ok) continue;
+        discard = "discard-malformed-legacy";
+      }
       const saved = await commitProviderIdentity(ctx, {
         kind: "copy",
         providerId,
@@ -978,20 +1012,14 @@ async function manageProviders(
       const models = replace
         ? fetched
         : [...currentModels, ...fetched.filter((model) => !existingIds.has(model.id))];
-      const affectedLegacy = replace
-        ? modelsListHasMalformedLegacy([...currentModels, ...fetched])
-        : modelsListHasMalformedLegacy(models);
-      const discard = await confirmLegacyDiscard(
+      const first = await actions.patchProvider(providerId, { models });
+      const completed = await completeSimpleAction(
         ctx,
-        affectedLegacy,
+        first,
+        (resolution) => actions.patchProvider(providerId, { models }, resolution),
         `Provider "${providerId}" model list`,
       );
-      if (discard === "cancel") continue;
-      const saved = applyActionResult(ctx, await actions.patchProvider(
-        providerId,
-        { models },
-        { legacyDiscardResolution: discard },
-      ));
+      const saved = applyActionResult(ctx, completed);
       if (saved) config = saved;
       continue;
     }
@@ -1003,12 +1031,15 @@ async function manageProviders(
         continue;
       }
       if (result.providerId !== providerId) {
-        const discard = await confirmLegacyDiscard(
-          ctx,
-          providerHasMalformedLegacy(existing),
-          `Provider "${providerId}"`,
-        );
-        if (discard === "cancel") continue;
+        let discard: LegacyDiscardResolution | undefined;
+        if (providerHasMalformedLegacy(existing)) {
+          const ok = await ctx.ui.confirm(
+            "Malformed legacy extraPayload",
+            `Provider "${providerId}" has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.`,
+          );
+          if (!ok) continue;
+          discard = "discard-malformed-legacy";
+        }
         const saved = await commitProviderIdentity(ctx, {
           kind: "rename",
           providerId,
@@ -1063,7 +1094,16 @@ async function manageModels(
       const modelToSave = structuredClone(result.model);
       delete (modelToSave as Record<string, unknown>)["extraPayload"];
       const payload = result.payload && Object.keys(result.payload).length > 0 ? result.payload : undefined;
-      const saved = applyActionResult(ctx, await actions.createModel(providerId, modelToSave, payload ? { payload } : undefined));
+      const first = await actions.createModel(providerId, modelToSave, payload ? { payload } : undefined);
+      const completed = await completeSimpleAction(
+        ctx,
+        first,
+        (resolution) => actions.createModel(providerId, modelToSave, {
+          ...(payload ? { payload } : {}),
+          ...resolution,
+        }),
+      );
+      const saved = applyActionResult(ctx, completed);
       if (saved) config = saved;
       continue;
     }
@@ -1084,11 +1124,15 @@ async function manageModels(
     }
     if (action.startsWith("复制")) {
       const targetModelId = `${existing.id}-copy`;
-      const discard = await confirmLegacyDiscard(
-        ctx,
-        Object.hasOwn(existing, "extraPayload") && !parseLegacyPayload((existing as Record<string, unknown>)["extraPayload"]),
-      );
-      if (discard === "cancel") continue;
+      let discard: LegacyDiscardResolution | undefined;
+      if (Object.hasOwn(existing, "extraPayload") && !parseLegacyPayload((existing as Record<string, unknown>)["extraPayload"])) {
+        const ok = await ctx.ui.confirm(
+          "Malformed legacy extraPayload",
+          "This model has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.",
+        );
+        if (!ok) continue;
+        discard = "discard-malformed-legacy";
+      }
       const saved = await commitModelIdentity(ctx, {
         kind: "copy",
         providerId,
@@ -1106,14 +1150,21 @@ async function manageModels(
       const fieldBaselines = managedModelBaselines(existing);
       const result = await editModel(ctx, providerId, existing);
       if (!result) continue;
-      const discard = await confirmLegacyDiscard(ctx, result.hasMalformedLegacy);
-      if (discard === "cancel") continue;
       const modelToSave = structuredClone(result.model);
       delete (modelToSave as Record<string, unknown>)["extraPayload"];
       const payloadOption = result.payload && Object.keys(result.payload).length > 0
         ? result.payload
         : null;
       if (modelToSave.id !== existing.id) {
+        let discard: LegacyDiscardResolution | undefined;
+        if (result.hasMalformedLegacy) {
+          const ok = await ctx.ui.confirm(
+            "Malformed legacy extraPayload",
+            "This model has malformed native legacy rows. Discard them to continue? Cancel keeps native/private bytes unchanged.",
+          );
+          if (!ok) continue;
+          discard = "discard-malformed-legacy";
+        }
         const saved = await commitModelIdentity(ctx, {
           kind: "rename",
           providerId,
@@ -1127,12 +1178,23 @@ async function manageModels(
         });
         if (saved) config = saved;
       } else {
-        const saved = applyActionResult(ctx, await actions.patchModel(
+        const first = await actions.patchModel(
           providerId,
           existing.id,
           managedModelPatch(modelToSave),
-          { fieldBaselines, payload: payloadOption, legacyDiscardResolution: discard },
-        ));
+          { fieldBaselines, payload: payloadOption },
+        );
+        const completed = await completeSimpleAction(
+          ctx,
+          first,
+          (resolution) => actions.patchModel(
+            providerId,
+            existing.id,
+            managedModelPatch(modelToSave),
+            { fieldBaselines, payload: payloadOption, ...resolution },
+          ),
+        );
+        const saved = applyActionResult(ctx, completed);
         if (saved) config = saved;
       }
     }

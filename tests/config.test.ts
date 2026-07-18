@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getModelsPath, ModelsConfigError, parseModelsDocument, readModelsConfig, writeModelsConfig } from "../config.ts";
 import { ModelsCandidateValidationError } from "../config-validation.ts";
+import type { ModelsConfig } from "../types.ts";
 import { withTempAgentDir as withAgentDir } from "./helpers/temp-agent-dir.ts";
 
 test("reads Pi models.json JSONC and preserves unknown root fields", () => withAgentDir((agentDir) => {
@@ -180,6 +181,34 @@ test("parseModelsDocument materializes unicode-escaped __proto__ provider key as
   assert.equal(Object.hasOwn(roundtrip.providers, "__proto__"), true);
   assert.equal(Object.hasOwn(roundtrip.providers, "__mc_own_proto__"), true);
   assert.equal(roundtrip.providers["__proto__"]!.baseUrl, "http://escaped");
+}));
+
+test("writeModelsConfig rejects input lacking own providers even with prototype pollution", () => withAgentDir((agentDir) => {
+  const filePath = getModelsPath(agentDir);
+  fs.writeFileSync(filePath, `{\n  "providers": {}\n}`, "utf8");
+  const proto = Object.prototype as Record<string, unknown>;
+  const previous = proto.providers;
+  try {
+    Object.defineProperty(Object.prototype, "providers", {
+      value: { phantom: { baseUrl: "http://evil", api: "openai-completions", models: [] } },
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+    const bare = Object.create(Object.prototype) as ModelsConfig;
+    assert.throws(() => writeModelsConfig(bare), ModelsConfigError);
+    const after = readModelsConfig();
+    assert.equal(Object.hasOwn(after.providers, "phantom"), false);
+    assert.equal(Object.keys(after.providers).length, 0);
+  } finally {
+    if (previous === undefined) delete proto.providers;
+    else Object.defineProperty(Object.prototype, "providers", {
+      value: previous,
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+  }
 }));
 
 test("parseModelsDocument ignores Object.prototype pollution for providers root", () => withAgentDir((agentDir) => {

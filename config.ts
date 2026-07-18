@@ -110,11 +110,19 @@ export function serializeModelsDocument(config: ModelsConfig): Buffer {
 
 /** 写入 models.json */
 export function writeModelsConfig(config: ModelsConfig, filePath = getModelsPath()): void {
+  // Reject inputs without an own providers map before merge/validation (never read inherited prototypes).
+  if (!config || typeof config !== "object" || Array.isArray(config) || !hasOwnKey(config as object, "providers")) {
+    throw new ModelsConfigError(filePath, "input must include an own providers map");
+  }
+  const inputProviders = getOwnValue(config as Record<string, unknown>, "providers");
+  if (!inputProviders || typeof inputProviders !== "object" || Array.isArray(inputProviders)) {
+    throw new ModelsConfigError(filePath, "input must include an own providers map");
+  }
   const snapshot = readArtifact(filePath);
   const existing = snapshot.exists
     ? parseModelsDocument(filePath, snapshot.bytes!.toString("utf8"))
     : { providers: {} };
-  const merged = { ...existing, ...config, providers: config.providers };
+  const merged = { ...existing, ...config, providers: inputProviders as ModelsConfig["providers"] };
   assertValidModelsCandidate(merged);
   atomicReplace(filePath, serializeModelsDocument(merged), { expectedHash: snapshot.hash });
 }

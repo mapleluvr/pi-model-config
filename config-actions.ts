@@ -70,7 +70,15 @@ export type ActionResult =
     path?: string;
     preview?: IdentityPreviewDescriptor & { token: IdentityPreviewToken };
   }
-  | { type: "validation-error"; issues: ValidationIssue[] }
+  | {
+    type: "validation-error";
+    issues: ValidationIssue[];
+    /** Opaque token when malformed legacy requires explicit discard review. */
+    resolutionToken?: IdentityPreviewToken;
+    nativeHash?: string;
+    payloadHash?: string;
+    malformedIdentities?: ModelIdentity[];
+  }
   | { type: "subtree-conflict"; path: string; nativeHash: string; payloadHash: string }
   | { type: "native-collision"; target: string }
   | {
@@ -80,7 +88,10 @@ export type ActionResult =
     nativeHash: string;
     payloadHash: string;
     scope: "provider" | "model";
-    kind: "rename" | "copy" | "delete" | "create";
+    kind: "rename" | "copy" | "delete" | "create" | "models-patch";
+    /** Opaque token bound to the exact collision/legacy set under review. */
+    resolutionToken?: IdentityPreviewToken;
+    malformedIdentities?: ModelIdentity[];
   }
   | {
     type: "preview";
@@ -159,9 +170,14 @@ export type ModelIdentityRequest =
 export interface FieldPatchOptions {
   /** Exact per-field baselines captured when the editor opened. Drift on an edited field conflicts. */
   fieldBaselines?: Readonly<Record<string, unknown>>;
-  /** Required to strip malformed native legacy rows during a field save. */
+  /**
+   * Opaque bound token from a prior collision/malformed result.
+   * Required together with any payload/legacy resolution; bare resolutions without a token are rejected.
+   */
+  resolutionToken?: IdentityPreviewToken;
+  /** Selected after reviewing a bound collision preview (requires resolutionToken). */
   legacyDiscardResolution?: LegacyDiscardResolution;
-  /** Required when a models patch introduces identities that collide with payload-only private rows. */
+  /** Selected after reviewing a bound collision preview (requires resolutionToken). */
   payloadCollisionResolution?: PayloadCollisionResolution;
 }
 
@@ -185,6 +201,7 @@ export interface ModelConfigActionsOptions extends PayloadCoordinatorOptions {
 }
 
 interface BoundIdentityPreview {
+  binding: "identity";
   scope: "provider" | "model";
   request: ProviderIdentityRequest | ModelIdentityRequest;
   nativeHash: string;
@@ -196,13 +213,55 @@ interface BoundIdentityPreview {
   createdAt: number;
 }
 
+type SimpleActionKind = "create-provider" | "create-model" | "patch-provider-models" | "patch-model";
+
+type SimpleBoundRequest =
+  | { action: "create-provider"; providerId: string; config: ProviderConfig }
+  | {
+    action: "create-model";
+    providerId: string;
+    model: ModelConfig;
+    payload?: Record<string, unknown>;
+  }
+  | {
+    action: "patch-provider-models";
+    providerId: string;
+    patch: ConfigPatch<ProviderConfig>;
+    fieldBaselines?: Readonly<Record<string, unknown>>;
+  }
+  | {
+    action: "patch-model";
+    providerId: string;
+    modelId: string;
+    patch: ConfigPatch<ModelConfig>;
+    fieldBaselines?: Readonly<Record<string, unknown>>;
+    payload?: Record<string, unknown> | null;
+    hasExplicitPayload: boolean;
+  };
+
+interface BoundSimpleResolution {
+  binding: "simple";
+  request: SimpleBoundRequest;
+  nativeHash: string;
+  payloadHash: string;
+  collisionSet: string[];
+  malformedSet: string[];
+  createdAt: number;
+}
+
+type BoundBinding = BoundIdentityPreview | BoundSimpleResolution;
+
 const DEFAULT_PREVIEW_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_PREVIEWS = 32;
 
 type BuildOutcome =
   | { type: "mutation"; native: ModelsConfig; payload: PayloadConfig; affectedIdentities: ModelIdentity[] }
   | { type: "stale-target"; path?: string }
-  | { type: "validation-error"; issues: ValidationIssue[] }
+  | {
+    type: "validation-error";
+    issues: ValidationIssue[];
+    simpleBind?: Omit<BoundSimpleResolution, "createdAt" | "binding">;
+  }
   | { type: "subtree-conflict"; path: string }
   | { type: "native-collision"; target: string }
   | {
@@ -210,9 +269,49 @@ type BuildOutcome =
     collisions: ModelIdentity[];
     affectedIdentities: ModelIdentity[];
     scope: "provider" | "model";
-    kind: "rename" | "copy" | "delete" | "create";
+    kind: "rename" | "copy" | "delete" | "create" | "models-patch";
+    simpleBind?: Omit<BoundSimpleResolution, "createdAt" | "binding">;
+    malformedIdentities?: ModelIdentity[];
   }
   | { type: "unchanged" };
+
+function sortedIdentityKeys(identities: readonly ModelIdentity[]): string[] {
+  return identities.map(([p, m]) => identityKey(p, m)).sort();
+}
+
+function identitiesFromKeys(keys: readonly string[]): ModelIdentity[] {
+  const out: ModelIdentity[] = [];
+  for (const key of keys) {
+    try {
+      const parsed: unknown = JSON.parse(key);
+      if (Array.isArray(parsed) && parsed.length === 2 && typeof parsed[0] === "string" && typeof parsed[1] === "string") {
+        out.push([parsed[0], parsed[1]]);
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return out;
+}
+
+function setsEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function rejectBareSimpleResolution(options?: {
+  resolutionToken?: IdentityPreviewToken;
+  payloadCollisionResolution?: PayloadCollisionResolution;
+  legacyDiscardResolution?: LegacyDiscardResolution;
+}): BuildOutcome | undefined {
+  const hasSelected = options?.payloadCollisionResolution !== undefined
+    || options?.legacyDiscardResolution !== undefined;
+  if (hasSelected && !options?.resolutionToken) {
+    return { type: "stale-target", path: "resolution-token" };
+  }
+  return undefined;
+}
 
 function cloneModels(config: ModelsConfig): ModelsConfig {
   return deepCloneJson(config);
@@ -268,9 +367,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * Legacy native extraPayload is an array of { key, type, value } rows
  * (type: string | bool | json; value always a string). Object shapes are invalid.
  */
-export function parseLegacyExtraPayload(value: unknown): { ok: true; payload: Record<string, unknown> } | { ok: false; reason: string } {
+export function parseLegacyExtraPayload(
+  value: unknown,
+): { ok: true; payload: Record<string, unknown>; empty: boolean } | { ok: false; reason: string } {
   // Reasons must stay non-secret and free of private field names (no "extraPayload" / values).
   if (!Array.isArray(value)) return { ok: false, reason: "legacy rows must be an array" };
+  // Valid empty row array: strip-only cleanup, never create an empty private identity.
+  if (value.length === 0) return { ok: true, payload: {}, empty: true };
   const payload: Record<string, unknown> = {};
   for (const row of value) {
     if (
@@ -296,11 +399,13 @@ export function parseLegacyExtraPayload(value: unknown): { ok: true; payload: Re
       return { ok: false, reason: "legacy row type is unsupported" };
     }
   }
-  return { ok: true, payload };
+  const keys = Object.keys(payload);
+  return { ok: true, payload, empty: keys.length === 0 };
 }
 
 type LegacyRead =
   | { kind: "none" }
+  | { kind: "empty" }
   | { kind: "valid"; payload: Record<string, unknown> }
   | { kind: "invalid"; reason: string };
 
@@ -309,6 +414,7 @@ function readLegacyExtraPayload(model: ModelConfig): LegacyRead {
   const legacy = getOwnValue(model as Record<string, unknown>, "extraPayload");
   const parsed = parseLegacyExtraPayload(legacy);
   if (!parsed.ok) return { kind: "invalid", reason: parsed.reason };
+  if (parsed.empty) return { kind: "empty" };
   return { kind: "valid", payload: parsed.payload };
 }
 
@@ -583,7 +689,7 @@ function migrateProviderLegacyPayloads(
 export class ModelConfigActions {
   private readonly options: ModelConfigActionsOptions;
   private readonly commit: (request: MutationRequest, options?: PayloadCoordinatorOptions) => Promise<CommitResult>;
-  private readonly previews = new Map<string, BoundIdentityPreview>();
+  private readonly previews = new Map<string, BoundBinding>();
   private readonly now: () => number;
   private readonly previewTtlMs: number;
   private readonly maxPreviews: number;
@@ -613,9 +719,14 @@ export class ModelConfigActions {
     this.rescheduleExpiry();
   }
 
-  /** Test/introspection: number of currently retained bound previews (does not force prune). */
+  /** Test/introspection: number of currently retained bound previews/resolutions (does not force prune). */
   boundPreviewCount(): number {
     return this.previews.size;
+  }
+
+  /** Explicit discard for simple-action resolution tokens (alias of discardIdentityPreview). */
+  discardResolutionToken(token: IdentityPreviewToken): void {
+    this.discardIdentityPreview(token);
   }
 
   /** Test helper: force prune using current clock (does not fire scheduled callbacks). */
@@ -692,37 +803,99 @@ export class ModelConfigActions {
         `providers.${providerId}.models.${modelId}`,
       );
       if (baselineConflict) return baselineConflict;
-      const malformed = rejectMalformedLegacyUnlessDiscarded(
-        existing,
-        `$.providers.${providerId}.models[id=${modelId}].legacy`,
-        options?.legacyDiscardResolution,
-      );
-      if (malformed) return { type: "validation-error", issues: [malformed] };
-      const legacyRead = readLegacyExtraPayload(existing);
+
+      const bare = rejectBareSimpleResolution(options);
+      if (bare) return bare;
+
+      let effectiveProviderId = providerId;
+      let effectiveModelId = modelId;
+      let effectivePatch = patch;
+      let effectiveExisting = existing;
+      let effectiveIndex = index;
+      let hasExplicitPayload = options !== undefined && hasOwnKey(options, "payload");
+      let explicitPayload = options?.payload;
+      let legacyResolution = options?.legacyDiscardResolution;
+
+      if (options?.resolutionToken) {
+        const bound = this.takeSimple(options.resolutionToken);
+        if (!bound || bound.request.action !== "patch-model") {
+          return { type: "stale-target", path: "resolution-token" };
+        }
+        effectiveProviderId = bound.request.providerId;
+        effectiveModelId = bound.request.modelId;
+        effectivePatch = bound.request.patch;
+        hasExplicitPayload = bound.request.hasExplicitPayload;
+        explicitPayload = bound.request.payload;
+        const providerNow = getProvider(snapshot.native.document!, effectiveProviderId);
+        if (!providerNow) return { type: "stale-target", path: `providers.${effectiveProviderId}` };
+        const idxNow = findModelIndex(providerNow, effectiveModelId);
+        if (idxNow < 0) return { type: "stale-target", path: `providers.${effectiveProviderId}.models:${effectiveModelId}` };
+        effectiveExisting = providerNow.models![idxNow]!;
+        effectiveIndex = idxNow;
+        const live = this.inspectPatchModel(snapshot, effectiveProviderId, effectiveModelId, effectiveExisting);
+        if (
+          snapshot.native.hash !== bound.nativeHash
+          || snapshot.payload.hash !== bound.payloadHash
+          || !setsEqual(live.malformedSet, bound.malformedSet)
+        ) {
+          return this.simpleDriftResult(snapshot, {
+            action: "patch-model",
+            providerId: effectiveProviderId,
+            modelId: effectiveModelId,
+            patch: effectivePatch,
+            fieldBaselines: bound.request.fieldBaselines,
+            payload: explicitPayload,
+            hasExplicitPayload,
+          }, live);
+        }
+        if (live.malformedSet.length > 0 && legacyResolution !== "discard-malformed-legacy") {
+          return this.simpleDriftResult(snapshot, {
+            action: "patch-model",
+            providerId: effectiveProviderId,
+            modelId: effectiveModelId,
+            patch: effectivePatch,
+            payload: explicitPayload,
+            hasExplicitPayload,
+          }, live);
+        }
+      } else {
+        const live = this.inspectPatchModel(snapshot, providerId, modelId, existing);
+        if (live.malformedSet.length > 0) {
+          return this.simpleNeedsResolution(snapshot, {
+            action: "patch-model",
+            providerId,
+            modelId,
+            patch,
+            fieldBaselines: options?.fieldBaselines,
+            payload: options?.payload,
+            hasExplicitPayload,
+          }, live, "model", "create");
+        }
+      }
+
+      const legacyRead = readLegacyExtraPayload(effectiveExisting);
       const next = cloneModels(snapshot.native.document!);
-      const nextProvider = getProvider(next, providerId)!;
-      const merged = mergeModelConfig(existing, patch);
+      const nextProvider = getProvider(next, effectiveProviderId)!;
+      const merged = mergeModelConfig(effectiveExisting, effectivePatch);
       nextProvider.models = [...(nextProvider.models ?? [])];
-      nextProvider.models[index] = stripLegacyExtraPayload(merged);
+      nextProvider.models[effectiveIndex] = stripLegacyExtraPayload(merged);
       const issues = validateOrIssues(next, this.options.validation);
       if (issues.length > 0) return { type: "validation-error", issues };
       let payload = clonePayloadDocument(snapshot.payload.document!);
       const affected: ModelIdentity[] = [];
-      const privateExists = lookupModelPayload(payload, providerId, modelId) !== undefined;
-      if (options && hasOwnKey(options, "payload")) {
-        if (options.payload === null || options.payload === undefined) {
-          payload = removePayloadDocumentValue(payload, providerId, modelId);
+      const privateExists = lookupModelPayload(payload, effectiveProviderId, effectiveModelId) !== undefined;
+      if (hasExplicitPayload) {
+        if (explicitPayload === null || explicitPayload === undefined) {
+          payload = removePayloadDocumentValue(payload, effectiveProviderId, effectiveModelId);
         } else {
-          payload = setPayloadDocumentValue(payload, providerId, modelId, options.payload);
+          payload = setPayloadDocumentValue(payload, effectiveProviderId, effectiveModelId, explicitPayload);
         }
-        affected.push([providerId, modelId]);
+        affected.push([effectiveProviderId, effectiveModelId]);
       } else if (legacyRead.kind === "valid" && !privateExists) {
-        // Auto-migrate valid legacy rows when stripping native field; private wins if present.
-        payload = setPayloadDocumentValue(payload, providerId, modelId, legacyRead.payload);
-        affected.push([providerId, modelId]);
-      } else if (legacyRead.kind === "valid" || legacyRead.kind === "invalid") {
-        // Stripped native legacy while private retained (or discarded invalid).
-        affected.push([providerId, modelId]);
+        payload = setPayloadDocumentValue(payload, effectiveProviderId, effectiveModelId, legacyRead.payload);
+        affected.push([effectiveProviderId, effectiveModelId]);
+      } else if (legacyRead.kind === "valid" || legacyRead.kind === "empty" || legacyRead.kind === "invalid") {
+        affected.push([effectiveProviderId, effectiveModelId]);
       }
       return { type: "mutation", native: next, payload, affectedIdentities: affected };
     });
@@ -732,63 +905,98 @@ export class ModelConfigActions {
     providerId: string,
     config: ProviderConfig,
     options?: {
+      resolutionToken?: IdentityPreviewToken;
       payloadCollisionResolution?: PayloadCollisionResolution;
       legacyDiscardResolution?: LegacyDiscardResolution;
     },
   ): Promise<ActionResult> {
     return this.run((snapshot) => {
-      if (hasProvider(snapshot.native.document!, providerId)) {
-        return { type: "native-collision", target: providerId };
+      const bare = rejectBareSimpleResolution(options);
+      if (bare) return bare;
+
+      let effectiveProviderId = providerId;
+      let effectiveConfig = config;
+      let payloadResolution = options?.payloadCollisionResolution;
+      let legacyResolution = options?.legacyDiscardResolution;
+
+      if (options?.resolutionToken) {
+        const bound = this.takeSimple(options.resolutionToken);
+        if (!bound || bound.request.action !== "create-provider") {
+          return { type: "stale-target", path: "resolution-token" };
+        }
+        effectiveProviderId = bound.request.providerId;
+        effectiveConfig = bound.request.config;
+        const live = this.inspectCreateProvider(snapshot, effectiveProviderId, effectiveConfig);
+        if (
+          snapshot.native.hash !== bound.nativeHash
+          || snapshot.payload.hash !== bound.payloadHash
+          || !setsEqual(live.collisionSet, bound.collisionSet)
+          || !setsEqual(live.malformedSet, bound.malformedSet)
+        ) {
+          return this.simpleDriftResult(snapshot, {
+            action: "create-provider",
+            providerId: effectiveProviderId,
+            config: effectiveConfig,
+          }, live);
+        }
+        if (live.malformedSet.length > 0 && legacyResolution !== "discard-malformed-legacy") {
+          return this.simpleDriftResult(snapshot, {
+            action: "create-provider",
+            providerId: effectiveProviderId,
+            config: effectiveConfig,
+          }, live);
+        }
+        if (live.collisionSet.length > 0 && payloadResolution !== "replace-target" && payloadResolution !== "reuse-target") {
+          return this.simpleDriftResult(snapshot, {
+            action: "create-provider",
+            providerId: effectiveProviderId,
+            config: effectiveConfig,
+          }, live);
+        }
+      } else {
+        const live = this.inspectCreateProvider(snapshot, effectiveProviderId, effectiveConfig);
+        if (live.malformedSet.length > 0 || live.collisionSet.length > 0) {
+          return this.simpleNeedsResolution(snapshot, {
+            action: "create-provider",
+            providerId: effectiveProviderId,
+            config: effectiveConfig,
+          }, live, "provider", "create");
+        }
       }
-      const legacyIssues = collectProviderMalformedLegacyIssues(
-        config,
-        `$.providers.${providerId}`,
-        options?.legacyDiscardResolution,
-      );
-      if (legacyIssues.length > 0) return { type: "validation-error", issues: legacyIssues };
-      const introduced = (config.models ?? []).map((entry) => [providerId, entry.id] as ModelIdentity);
+
+      if (hasProvider(snapshot.native.document!, effectiveProviderId)) {
+        return { type: "native-collision", target: effectiveProviderId };
+      }
+      const introduced = (effectiveConfig.models ?? []).map((entry) => [effectiveProviderId, entry.id] as ModelIdentity);
       const collisions = targetPayloadCollisions(snapshot.payload.document!, introduced, new Set());
       const collisionKeys = new Set(collisions.map(([p, m]) => identityKey(p, m)));
-      if (
-        collisions.length > 0
-        && options?.payloadCollisionResolution !== "replace-target"
-        && options?.payloadCollisionResolution !== "reuse-target"
-      ) {
-        return {
-          type: "payload-collision",
-          collisions,
-          affectedIdentities: introduced,
-          scope: "provider",
-          kind: "create",
-        };
-      }
       const next = cloneModels(snapshot.native.document!);
-      setProvider(next, providerId, stripExtraPayloadFromProviderModels(deepCloneJson(config)));
+      setProvider(next, effectiveProviderId, stripExtraPayloadFromProviderModels(deepCloneJson(effectiveConfig)));
       const issues = validateOrIssues(next, this.options.validation);
       if (issues.length > 0) return { type: "validation-error", issues };
       let payload = clonePayloadDocument(snapshot.payload.document!);
       const affected: ModelIdentity[] = [];
-      for (const model of config.models ?? []) {
-        const key = identityKey(providerId, model.id);
+      for (const model of effectiveConfig.models ?? []) {
+        const key = identityKey(effectiveProviderId, model.id);
         const targetExists = collisionKeys.has(key);
         const legacyRead = readLegacyExtraPayload(model);
         const legacy = legacyRead.kind === "valid" ? legacyRead.payload : undefined;
-        if (options?.payloadCollisionResolution === "reuse-target" && targetExists) {
-          affected.push([providerId, model.id]);
+        if (payloadResolution === "reuse-target" && targetExists) {
+          affected.push([effectiveProviderId, model.id]);
           continue;
         }
-        if (options?.payloadCollisionResolution === "replace-target" && targetExists) {
+        if (payloadResolution === "replace-target" && targetExists) {
           if (legacy) {
-            payload = setPayloadDocumentValue(payload, providerId, model.id, legacy);
+            payload = setPayloadDocumentValue(payload, effectiveProviderId, model.id, legacy);
           } else {
-            payload = removePayloadDocumentValue(payload, providerId, model.id);
+            payload = removePayloadDocumentValue(payload, effectiveProviderId, model.id);
           }
-          affected.push([providerId, model.id]);
+          affected.push([effectiveProviderId, model.id]);
           continue;
         }
         if (!targetExists && legacy) {
-          payload = setPayloadDocumentValue(payload, providerId, model.id, legacy);
-          affected.push([providerId, model.id]);
+          payload = setPayloadDocumentValue(payload, effectiveProviderId, model.id, legacy);
+          affected.push([effectiveProviderId, model.id]);
         }
       }
       return {
@@ -805,62 +1013,111 @@ export class ModelConfigActions {
     model: ModelConfig,
     options?: {
       payload?: Record<string, unknown>;
+      resolutionToken?: IdentityPreviewToken;
       payloadCollisionResolution?: PayloadCollisionResolution;
       legacyDiscardResolution?: LegacyDiscardResolution;
     },
   ): Promise<ActionResult> {
     return this.run((snapshot) => {
-      const provider = getProvider(snapshot.native.document!, providerId);
-      if (!provider) return { type: "stale-target", path: `providers.${providerId}` };
-      if (findModelIndex(provider, model.id) >= 0) return { type: "native-collision", target: model.id };
-      const malformed = rejectMalformedLegacyUnlessDiscarded(
-        model,
-        `$.providers.${providerId}.models[id=${model.id}].legacy`,
-        options?.legacyDiscardResolution,
-      );
-      if (malformed) return { type: "validation-error", issues: [malformed] };
-      const legacyRead = readLegacyExtraPayload(model);
+      const bare = rejectBareSimpleResolution(options);
+      if (bare) return bare;
+
+      let effectiveProviderId = providerId;
+      let effectiveModel = model;
+      let explicitPayload = options?.payload;
+      let hasExplicitPayload = options !== undefined && hasOwnKey(options, "payload");
+      let payloadResolution = options?.payloadCollisionResolution;
+      let legacyResolution = options?.legacyDiscardResolution;
+
+      if (options?.resolutionToken) {
+        const bound = this.takeSimple(options.resolutionToken);
+        if (!bound || bound.request.action !== "create-model") {
+          return { type: "stale-target", path: "resolution-token" };
+        }
+        effectiveProviderId = bound.request.providerId;
+        effectiveModel = bound.request.model;
+        hasExplicitPayload = bound.request.payload !== undefined;
+        explicitPayload = bound.request.payload;
+        const live = this.inspectCreateModel(snapshot, effectiveProviderId, effectiveModel);
+        if (
+          snapshot.native.hash !== bound.nativeHash
+          || snapshot.payload.hash !== bound.payloadHash
+          || !setsEqual(live.collisionSet, bound.collisionSet)
+          || !setsEqual(live.malformedSet, bound.malformedSet)
+        ) {
+          return this.simpleDriftResult(snapshot, {
+            action: "create-model",
+            providerId: effectiveProviderId,
+            model: effectiveModel,
+            payload: explicitPayload,
+          }, live);
+        }
+        if (live.malformedSet.length > 0 && legacyResolution !== "discard-malformed-legacy") {
+          return this.simpleDriftResult(snapshot, {
+            action: "create-model",
+            providerId: effectiveProviderId,
+            model: effectiveModel,
+            payload: explicitPayload,
+          }, live);
+        }
+        if (live.collisionSet.length > 0 && payloadResolution !== "replace-target" && payloadResolution !== "reuse-target") {
+          return this.simpleDriftResult(snapshot, {
+            action: "create-model",
+            providerId: effectiveProviderId,
+            model: effectiveModel,
+            payload: explicitPayload,
+          }, live);
+        }
+      } else {
+        const live = this.inspectCreateModel(snapshot, effectiveProviderId, effectiveModel);
+        if (live.malformedSet.length > 0 || live.collisionSet.length > 0) {
+          return this.simpleNeedsResolution(snapshot, {
+            action: "create-model",
+            providerId: effectiveProviderId,
+            model: effectiveModel,
+            payload: explicitPayload,
+          }, live, "model", "create");
+        }
+      }
+
+      const provider = getProvider(snapshot.native.document!, effectiveProviderId);
+      if (!provider) return { type: "stale-target", path: `providers.${effectiveProviderId}` };
+      if (findModelIndex(provider, effectiveModel.id) >= 0) {
+        return { type: "native-collision", target: effectiveModel.id };
+      }
+      const legacyRead = readLegacyExtraPayload(effectiveModel);
       const collisions = targetPayloadCollisions(
         snapshot.payload.document!,
-        [[providerId, model.id]],
+        [[effectiveProviderId, effectiveModel.id]],
         new Set(),
       );
-      if (
-        collisions.length > 0
-        && options?.payloadCollisionResolution !== "replace-target"
-        && options?.payloadCollisionResolution !== "reuse-target"
-      ) {
-        return {
-          type: "payload-collision",
-          collisions,
-          affectedIdentities: [[providerId, model.id]],
-          scope: "model",
-          kind: "create",
-        };
-      }
       const next = cloneModels(snapshot.native.document!);
-      const nextProvider = getProvider(next, providerId)!;
-      nextProvider.models = [...(nextProvider.models ?? []), stripLegacyExtraPayload(deepCloneJson(model))];
+      const nextProvider = getProvider(next, effectiveProviderId)!;
+      nextProvider.models = [...(nextProvider.models ?? []), stripLegacyExtraPayload(deepCloneJson(effectiveModel))];
       const issues = validateOrIssues(next, this.options.validation);
       if (issues.length > 0) return { type: "validation-error", issues };
       let payload = clonePayloadDocument(snapshot.payload.document!);
       const affected: ModelIdentity[] = [];
       const targetExists = collisions.length > 0;
-      if (options?.payloadCollisionResolution === "reuse-target" && targetExists) {
-        affected.push([providerId, model.id]);
-      } else if (options?.payload !== undefined) {
-        payload = setPayloadDocumentValue(payload, providerId, model.id, options.payload);
-        affected.push([providerId, model.id]);
-      } else if (options?.payloadCollisionResolution === "replace-target" && targetExists) {
-        if (legacyRead.kind === "valid") {
-          payload = setPayloadDocumentValue(payload, providerId, model.id, legacyRead.payload);
+      if (payloadResolution === "reuse-target" && targetExists) {
+        affected.push([effectiveProviderId, effectiveModel.id]);
+      } else if (hasExplicitPayload) {
+        if (explicitPayload === undefined) {
+          payload = removePayloadDocumentValue(payload, effectiveProviderId, effectiveModel.id);
         } else {
-          payload = removePayloadDocumentValue(payload, providerId, model.id);
+          payload = setPayloadDocumentValue(payload, effectiveProviderId, effectiveModel.id, explicitPayload);
         }
-        affected.push([providerId, model.id]);
+        affected.push([effectiveProviderId, effectiveModel.id]);
+      } else if (payloadResolution === "replace-target" && targetExists) {
+        if (legacyRead.kind === "valid") {
+          payload = setPayloadDocumentValue(payload, effectiveProviderId, effectiveModel.id, legacyRead.payload);
+        } else {
+          payload = removePayloadDocumentValue(payload, effectiveProviderId, effectiveModel.id);
+        }
+        affected.push([effectiveProviderId, effectiveModel.id]);
       } else if (legacyRead.kind === "valid" && !targetExists) {
-        payload = setPayloadDocumentValue(payload, providerId, model.id, legacyRead.payload);
-        affected.push([providerId, model.id]);
+        payload = setPayloadDocumentValue(payload, effectiveProviderId, effectiveModel.id, legacyRead.payload);
+        affected.push([effectiveProviderId, effectiveModel.id]);
       }
       return { type: "mutation", native: next, payload, affectedIdentities: affected };
     });
@@ -1024,10 +1281,11 @@ export class ModelConfigActions {
     }
   }
 
-  private bindPreview(bound: Omit<BoundIdentityPreview, "createdAt">): IdentityPreviewToken {
+  private bindPreview(bound: Omit<BoundIdentityPreview, "createdAt" | "binding">): IdentityPreviewToken {
     this.prunePreviews();
     const token = randomUUID();
     this.previews.set(token, {
+      binding: "identity",
       ...bound,
       request: deepCloneJson(bound.request),
       collisions: bound.collisions.map((entry) => [entry[0], entry[1]] as ModelIdentity),
@@ -1041,11 +1299,28 @@ export class ModelConfigActions {
     return token;
   }
 
+  private bindSimple(bound: Omit<BoundSimpleResolution, "createdAt" | "binding">): IdentityPreviewToken {
+    this.prunePreviews();
+    const token = randomUUID();
+    this.previews.set(token, {
+      binding: "simple",
+      request: deepCloneJson(bound.request),
+      nativeHash: bound.nativeHash,
+      payloadHash: bound.payloadHash,
+      collisionSet: [...bound.collisionSet],
+      malformedSet: [...bound.malformedSet],
+      createdAt: this.now(),
+    });
+    this.prunePreviews();
+    this.rescheduleExpiry();
+    return token;
+  }
+
   private takeBound(token: IdentityPreviewToken): BoundIdentityPreview | undefined {
     this.prunePreviews();
     this.rescheduleExpiry();
     const bound = this.previews.get(token);
-    if (!bound) return undefined;
+    if (!bound || bound.binding !== "identity") return undefined;
     if (this.now() - bound.createdAt >= this.previewTtlMs) {
       this.previews.delete(token);
       this.rescheduleExpiry();
@@ -1061,9 +1336,61 @@ export class ModelConfigActions {
     };
   }
 
+  /** Consumes a simple resolution token (deleted even when returned). */
+  private takeSimple(token: IdentityPreviewToken): BoundSimpleResolution | undefined {
+    this.prunePreviews();
+    const bound = this.previews.get(token);
+    if (!bound || bound.binding !== "simple") return undefined;
+    this.previews.delete(token);
+    this.rescheduleExpiry();
+    if (this.now() - bound.createdAt >= this.previewTtlMs) return undefined;
+    return {
+      ...bound,
+      request: deepCloneJson(bound.request),
+      collisionSet: [...bound.collisionSet],
+      malformedSet: [...bound.malformedSet],
+    };
+  }
+
   private forgetPreview(token: IdentityPreviewToken): void {
     this.previews.delete(token);
     this.rescheduleExpiry();
+  }
+
+  private attachSimpleToken(outcome: BuildOutcome): ActionResult {
+    if (outcome.type === "payload-collision") {
+      const token = outcome.simpleBind ? this.bindSimple(outcome.simpleBind) : undefined;
+      return {
+        type: "payload-collision",
+        collisions: outcome.collisions,
+        affectedIdentities: outcome.affectedIdentities,
+        nativeHash: outcome.simpleBind?.nativeHash ?? "",
+        payloadHash: outcome.simpleBind?.payloadHash ?? "",
+        scope: outcome.scope,
+        kind: outcome.kind,
+        resolutionToken: token,
+        malformedIdentities: outcome.malformedIdentities,
+      };
+    }
+    if (outcome.type === "validation-error") {
+      const token = outcome.simpleBind ? this.bindSimple(outcome.simpleBind) : undefined;
+      return {
+        type: "validation-error",
+        issues: outcome.issues,
+        resolutionToken: token,
+        nativeHash: outcome.simpleBind?.nativeHash,
+        payloadHash: outcome.simpleBind?.payloadHash,
+        malformedIdentities: outcome.simpleBind
+          ? identitiesFromKeys(outcome.simpleBind.malformedSet)
+          : undefined,
+      };
+    }
+    if (outcome.type === "stale-target") return { type: "stale-target", path: outcome.path };
+    if (outcome.type === "native-collision") return outcome;
+    if (outcome.type === "subtree-conflict") {
+      return { type: "subtree-conflict", path: outcome.path, nativeHash: "", payloadHash: "" };
+    }
+    return { type: "stale-target" };
   }
 
   private async previewIdentity(
@@ -1290,9 +1617,168 @@ export class ModelConfigActions {
     }
   }
 
+  private inspectCreateProvider(
+    snapshot: CoordinatedSnapshot,
+    providerId: string,
+    config: ProviderConfig,
+  ): { collisionSet: string[]; malformedSet: string[]; collisions: ModelIdentity[]; malformed: ModelIdentity[]; issues: ValidationIssue[] } {
+    const malformed: ModelIdentity[] = [];
+    const issues: ValidationIssue[] = [];
+    for (const model of config.models ?? []) {
+      const legacy = readLegacyExtraPayload(model);
+      if (legacy.kind === "invalid") {
+        malformed.push([providerId, model.id]);
+        issues.push(malformedLegacyIssue(`$.providers.${providerId}.models[id=${model.id}].legacy`, legacy.reason));
+      }
+    }
+    const introduced = (config.models ?? []).map((entry) => [providerId, entry.id] as ModelIdentity);
+    const collisions = targetPayloadCollisions(snapshot.payload.document!, introduced, new Set());
+    return {
+      collisionSet: sortedIdentityKeys(collisions),
+      malformedSet: sortedIdentityKeys(malformed),
+      collisions,
+      malformed,
+      issues,
+    };
+  }
+
+  private inspectCreateModel(
+    snapshot: CoordinatedSnapshot,
+    providerId: string,
+    model: ModelConfig,
+  ): { collisionSet: string[]; malformedSet: string[]; collisions: ModelIdentity[]; malformed: ModelIdentity[]; issues: ValidationIssue[] } {
+    const malformed: ModelIdentity[] = [];
+    const issues: ValidationIssue[] = [];
+    const legacy = readLegacyExtraPayload(model);
+    if (legacy.kind === "invalid") {
+      malformed.push([providerId, model.id]);
+      issues.push(malformedLegacyIssue(`$.providers.${providerId}.models[id=${model.id}].legacy`, legacy.reason));
+    }
+    const collisions = targetPayloadCollisions(snapshot.payload.document!, [[providerId, model.id]], new Set());
+    return {
+      collisionSet: sortedIdentityKeys(collisions),
+      malformedSet: sortedIdentityKeys(malformed),
+      collisions,
+      malformed,
+      issues,
+    };
+  }
+
+  private inspectProviderModelsPatch(
+    snapshot: CoordinatedSnapshot,
+    providerId: string,
+    existing: ProviderConfig,
+    newModels: ModelConfig[],
+  ): { collisionSet: string[]; malformedSet: string[]; collisions: ModelIdentity[]; malformed: ModelIdentity[]; issues: ValidationIssue[] } {
+    const oldModels = existing.models ?? [];
+    const oldById = new Map(oldModels.map((entry) => [entry.id, entry]));
+    const malformed: ModelIdentity[] = [];
+    const issues: ValidationIssue[] = [];
+    for (const model of oldModels) {
+      const legacy = readLegacyExtraPayload(model);
+      if (legacy.kind === "invalid") {
+        malformed.push([providerId, model.id]);
+        issues.push(malformedLegacyIssue(`$.providers.${providerId}.models[id=${model.id}].legacy`, legacy.reason));
+      }
+    }
+    for (const model of newModels) {
+      const legacy = readLegacyExtraPayload(model);
+      if (legacy.kind === "invalid") {
+        const id: ModelIdentity = [providerId, model.id];
+        if (!malformed.some((m) => m[0] === id[0] && m[1] === id[1])) malformed.push(id);
+        issues.push(malformedLegacyIssue(`$.providers.${providerId}.models[id=${model.id}].legacy`, legacy.reason));
+      }
+    }
+    const collisions: ModelIdentity[] = [];
+    for (const model of newModels) {
+      if (oldById.has(model.id)) continue;
+      if (lookupModelPayload(snapshot.payload.document!, providerId, model.id) !== undefined) {
+        collisions.push([providerId, model.id]);
+      }
+    }
+    return {
+      collisionSet: sortedIdentityKeys(collisions),
+      malformedSet: sortedIdentityKeys(malformed),
+      collisions,
+      malformed,
+      issues,
+    };
+  }
+
+  private inspectPatchModel(
+    snapshot: CoordinatedSnapshot,
+    providerId: string,
+    modelId: string,
+    existing: ModelConfig,
+  ): { collisionSet: string[]; malformedSet: string[]; collisions: ModelIdentity[]; malformed: ModelIdentity[]; issues: ValidationIssue[] } {
+    const malformed: ModelIdentity[] = [];
+    const issues: ValidationIssue[] = [];
+    const legacy = readLegacyExtraPayload(existing);
+    if (legacy.kind === "invalid") {
+      malformed.push([providerId, modelId]);
+      issues.push(malformedLegacyIssue(`$.providers.${providerId}.models[id=${modelId}].legacy`, legacy.reason));
+    }
+    return {
+      collisionSet: [],
+      malformedSet: sortedIdentityKeys(malformed),
+      collisions: [],
+      malformed,
+      issues,
+    };
+  }
+
+  private simpleNeedsResolution(
+    snapshot: CoordinatedSnapshot,
+    request: SimpleBoundRequest,
+    live: { collisionSet: string[]; malformedSet: string[]; collisions: ModelIdentity[]; malformed: ModelIdentity[]; issues: ValidationIssue[] },
+    scope: "provider" | "model",
+    kind: "create" | "models-patch",
+  ): BuildOutcome {
+    const simpleBind = {
+      request,
+      nativeHash: snapshot.native.hash,
+      payloadHash: snapshot.payload.hash,
+      collisionSet: live.collisionSet,
+      malformedSet: live.malformedSet,
+    };
+    if (live.collisionSet.length > 0) {
+      return {
+        type: "payload-collision",
+        collisions: live.collisions,
+        affectedIdentities: live.collisions,
+        scope,
+        kind,
+        simpleBind,
+        malformedIdentities: live.malformed,
+      };
+    }
+    return {
+      type: "validation-error",
+      issues: live.issues,
+      simpleBind,
+    };
+  }
+
+  private simpleDriftResult(
+    snapshot: CoordinatedSnapshot,
+    request: SimpleBoundRequest,
+    live: { collisionSet: string[]; malformedSet: string[]; collisions: ModelIdentity[]; malformed: ModelIdentity[]; issues: ValidationIssue[] },
+  ): BuildOutcome {
+    const scope = request.action === "create-model" || request.action === "patch-model" ? "model" : "provider";
+    const kind = request.action === "patch-provider-models" ? "models-patch" : "create";
+    if (live.collisionSet.length > 0 || live.malformedSet.length > 0) {
+      return this.simpleNeedsResolution(snapshot, request, live, scope, kind);
+    }
+    // Drift cleared requirements — still stale so caller re-reads; rebind empty sets would allow unreviewed write.
+    return {
+      type: "stale-target",
+      path: "resolution-token",
+    };
+  }
+
   /**
    * Explicit models array patch (endpoint discovery / list replace-or-merge).
-   * Never silently attaches or destroys private payloads; migrates valid legacy; requires discard for malformed.
+   * Never silently attaches or destroys private payloads; migrates valid legacy; requires bound discard/collision resolution.
    */
   private buildProviderModelsPatch(
     snapshot: CoordinatedSnapshot,
@@ -1301,59 +1787,83 @@ export class ModelConfigActions {
     patch: ConfigPatch<ProviderConfig>,
     options?: FieldPatchOptions,
   ): BuildOutcome {
-    const rawModels = (patch as { models?: unknown }).models;
+    const bare = rejectBareSimpleResolution(options);
+    if (bare) return bare;
+
+    let effectiveProviderId = providerId;
+    let effectivePatch = patch;
+    let effectiveExisting = existing;
+    let payloadResolution = options?.payloadCollisionResolution;
+    let legacyResolution = options?.legacyDiscardResolution;
+
+    const rawModels = (effectivePatch as { models?: unknown }).models;
     if (!Array.isArray(rawModels)) {
       return {
         type: "validation-error",
         issues: [{ path: `$.providers.${providerId}.models`, message: "models must be an array" }],
       };
     }
-    const newModels = rawModels as ModelConfig[];
-    const oldModels = existing.models ?? [];
+
+    if (options?.resolutionToken) {
+      const bound = this.takeSimple(options.resolutionToken);
+      if (!bound || bound.request.action !== "patch-provider-models") {
+        return { type: "stale-target", path: "resolution-token" };
+      }
+      effectiveProviderId = bound.request.providerId;
+      effectivePatch = bound.request.patch;
+      const existingBound = getProvider(snapshot.native.document!, effectiveProviderId);
+      if (!existingBound) return { type: "stale-target", path: `providers.${effectiveProviderId}` };
+      const boundModels = (effectivePatch as { models?: unknown }).models;
+      if (!Array.isArray(boundModels)) {
+        return { type: "validation-error", issues: [{ path: `$.providers.${effectiveProviderId}.models`, message: "models must be an array" }] };
+      }
+      const live = this.inspectProviderModelsPatch(snapshot, effectiveProviderId, existingBound, boundModels as ModelConfig[]);
+      if (
+        snapshot.native.hash !== bound.nativeHash
+        || snapshot.payload.hash !== bound.payloadHash
+        || !setsEqual(live.collisionSet, bound.collisionSet)
+        || !setsEqual(live.malformedSet, bound.malformedSet)
+      ) {
+        return this.simpleDriftResult(snapshot, {
+          action: "patch-provider-models",
+          providerId: effectiveProviderId,
+          patch: effectivePatch,
+          fieldBaselines: bound.request.fieldBaselines,
+        }, live);
+      }
+      if (live.malformedSet.length > 0 && legacyResolution !== "discard-malformed-legacy") {
+        return this.simpleDriftResult(snapshot, {
+          action: "patch-provider-models",
+          providerId: effectiveProviderId,
+          patch: effectivePatch,
+        }, live);
+      }
+      if (live.collisionSet.length > 0 && payloadResolution !== "replace-target" && payloadResolution !== "reuse-target") {
+        return this.simpleDriftResult(snapshot, {
+          action: "patch-provider-models",
+          providerId: effectiveProviderId,
+          patch: effectivePatch,
+        }, live);
+      }
+      effectiveExisting = existingBound;
+    } else {
+      const live = this.inspectProviderModelsPatch(snapshot, providerId, existing, rawModels as ModelConfig[]);
+      if (live.malformedSet.length > 0 || live.collisionSet.length > 0) {
+        return this.simpleNeedsResolution(snapshot, {
+          action: "patch-provider-models",
+          providerId,
+          patch,
+          fieldBaselines: options?.fieldBaselines,
+        }, live, "provider", "models-patch");
+      }
+    }
+
+    const newModels = ((effectivePatch as { models?: unknown }).models as ModelConfig[]);
+    const oldModels = effectiveExisting.models ?? [];
     const oldById = new Map(oldModels.map((entry) => [entry.id, entry]));
     const newById = new Map(newModels.map((entry) => [entry.id, entry]));
 
-    const issues: ValidationIssue[] = [];
-    for (const model of oldModels) {
-      const issue = rejectMalformedLegacyUnlessDiscarded(
-        model,
-        `$.providers.${providerId}.models[id=${model.id}].legacy`,
-        options?.legacyDiscardResolution,
-      );
-      if (issue) issues.push(issue);
-    }
-    for (const model of newModels) {
-      const issue = rejectMalformedLegacyUnlessDiscarded(
-        model,
-        `$.providers.${providerId}.models[id=${model.id}].legacy`,
-        options?.legacyDiscardResolution,
-      );
-      if (issue) issues.push(issue);
-    }
-    if (issues.length > 0) return { type: "validation-error", issues };
-
     let payload = clonePayloadDocument(snapshot.payload.document!);
-    const introduced: ModelIdentity[] = [];
-    for (const model of newModels) {
-      if (oldById.has(model.id)) continue;
-      if (lookupModelPayload(payload, providerId, model.id) !== undefined) {
-        introduced.push([providerId, model.id]);
-      }
-    }
-    if (
-      introduced.length > 0
-      && options?.payloadCollisionResolution !== "replace-target"
-      && options?.payloadCollisionResolution !== "reuse-target"
-    ) {
-      return {
-        type: "payload-collision",
-        collisions: introduced,
-        affectedIdentities: introduced,
-        scope: "provider",
-        kind: "create",
-      };
-    }
-
     const affected: ModelIdentity[] = [];
     const stripped: ModelConfig[] = [];
     for (const model of newModels) {
@@ -1367,46 +1877,45 @@ export class ModelConfigActions {
           : undefined;
       stripped.push(stripLegacyExtraPayload(deepCloneJson(model)));
 
-      const privateExists = lookupModelPayload(payload, providerId, model.id) !== undefined;
+      const privateExists = lookupModelPayload(payload, effectiveProviderId, model.id) !== undefined;
       const isNew = !oldById.has(model.id);
       if (isNew && privateExists) {
-        if (options?.payloadCollisionResolution === "reuse-target") {
-          affected.push([providerId, model.id]);
+        if (payloadResolution === "reuse-target") {
+          affected.push([effectiveProviderId, model.id]);
           continue;
         }
-        if (options?.payloadCollisionResolution === "replace-target") {
+        if (payloadResolution === "replace-target") {
           if (migrateLegacy) {
-            payload = setPayloadDocumentValue(payload, providerId, model.id, migrateLegacy);
+            payload = setPayloadDocumentValue(payload, effectiveProviderId, model.id, migrateLegacy);
           } else {
-            payload = removePayloadDocumentValue(payload, providerId, model.id);
+            payload = removePayloadDocumentValue(payload, effectiveProviderId, model.id);
           }
-          affected.push([providerId, model.id]);
+          affected.push([effectiveProviderId, model.id]);
           continue;
         }
       }
       if (migrateLegacy && !privateExists) {
-        payload = setPayloadDocumentValue(payload, providerId, model.id, migrateLegacy);
-        affected.push([providerId, model.id]);
-      } else if (migrateLegacy || legacyNew.kind === "invalid" || legacyOld.kind === "invalid") {
-        affected.push([providerId, model.id]);
+        payload = setPayloadDocumentValue(payload, effectiveProviderId, model.id, migrateLegacy);
+        affected.push([effectiveProviderId, model.id]);
+      } else if (migrateLegacy || legacyNew.kind === "empty" || legacyOld.kind === "empty") {
+        affected.push([effectiveProviderId, model.id]);
       }
     }
 
-    // Removed models: never destroy private payloads; migrate valid legacy if private absent.
     for (const old of oldModels) {
       if (newById.has(old.id)) continue;
-      const privateExists = lookupModelPayload(payload, providerId, old.id) !== undefined;
+      const privateExists = lookupModelPayload(payload, effectiveProviderId, old.id) !== undefined;
       const legacyOld = readLegacyExtraPayload(old);
       if (legacyOld.kind === "valid" && !privateExists) {
-        payload = setPayloadDocumentValue(payload, providerId, old.id, legacyOld.payload);
-        affected.push([providerId, old.id]);
+        payload = setPayloadDocumentValue(payload, effectiveProviderId, old.id, legacyOld.payload);
+        affected.push([effectiveProviderId, old.id]);
       }
     }
 
     const next = cloneModels(snapshot.native.document!);
-    const merged = mergeProviderConfig(existing, stripModelsFromProviderPatch(patch));
+    const merged = mergeProviderConfig(effectiveExisting, stripModelsFromProviderPatch(effectivePatch));
     merged.models = stripped;
-    setProvider(next, providerId, merged);
+    setProvider(next, effectiveProviderId, merged);
     const validation = validateOrIssues(next, this.options.validation);
     if (validation.length > 0) return { type: "validation-error", issues: validation };
     return { type: "mutation", native: next, payload, affectedIdentities: affected };
@@ -1683,7 +2192,21 @@ export class ModelConfigActions {
             path: buildError.path,
           };
         }
-        if (buildError.type === "validation-error") return buildError;
+        if (buildError.type === "validation-error" || buildError.type === "payload-collision") {
+          // Prefer hashes captured at build-time in simpleBind when present.
+          if (buildError.simpleBind) return this.attachSimpleToken(buildError);
+          if (buildError.type === "validation-error") return { type: "validation-error", issues: buildError.issues };
+          return {
+            type: "payload-collision",
+            collisions: buildError.collisions,
+            affectedIdentities: buildError.affectedIdentities,
+            nativeHash: coordinated?.native.hash ?? "",
+            payloadHash: coordinated?.payload.hash ?? "",
+            scope: buildError.scope,
+            kind: buildError.kind,
+            malformedIdentities: buildError.malformedIdentities,
+          };
+        }
         if (buildError.type === "subtree-conflict") {
           return {
             type: "subtree-conflict",
@@ -1693,17 +2216,6 @@ export class ModelConfigActions {
           };
         }
         if (buildError.type === "native-collision") return buildError;
-        if (buildError.type === "payload-collision") {
-          return {
-            type: "payload-collision",
-            collisions: buildError.collisions,
-            affectedIdentities: buildError.affectedIdentities,
-            nativeHash: coordinated?.native.hash ?? "",
-            payloadHash: coordinated?.payload.hash ?? "",
-            scope: buildError.scope,
-            kind: buildError.kind,
-          };
-        }
         return { type: "stale-target" };
       }
       throw error;

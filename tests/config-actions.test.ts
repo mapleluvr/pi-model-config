@@ -932,21 +932,34 @@ test("createProvider requires explicit payload collision resolution and never at
   assert.equal(fs.readFileSync(getPayloadConfigPath(agentDir)).equals(before), true);
   assert.equal(Object.hasOwn(readNative(agentDir).providers, "newp"), false);
 
-  const reused = await actions.createProvider("newp", {
+  assert.equal(typeof (blocked as { resolutionToken?: string }).resolutionToken, "string");
+  const bare = await actions.createProvider("newp", {
     baseUrl: "http://localhost",
     api: "openai-completions",
     models: [model("m1")],
   }, { payloadCollisionResolution: "reuse-target" });
+  assert.equal(bare.type, "stale-target");
+
+  const reused = await actions.createProvider("ignored", { baseUrl: "x", api: "openai-completions", models: [] }, {
+    resolutionToken: (blocked as { resolutionToken: string }).resolutionToken,
+    payloadCollisionResolution: "reuse-target",
+  });
   assert.equal(reused.type, "success");
   assert.deepEqual(lookupModelPayload(readPayload(agentDir), "newp", "m1"), { keep: true });
 
   writeNative(agentDir, { providers: {} });
   writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "newp", "m1", { keep: true }));
-  const replaced = await actions.createProvider("newp", {
+  const blocked2 = await actions.createProvider("newp", {
     baseUrl: "http://localhost",
     api: "openai-completions",
     models: [model("m1")],
-  }, { payloadCollisionResolution: "replace-target" });
+  });
+  assert.equal(blocked2.type, "payload-collision");
+  if (blocked2.type !== "payload-collision" || !blocked2.resolutionToken) return;
+  const replaced = await actions.createProvider("ignored", { baseUrl: "x", api: "openai-completions", models: [] }, {
+    resolutionToken: blocked2.resolutionToken,
+    payloadCollisionResolution: "replace-target",
+  });
   assert.equal(replaced.type, "success");
   assert.equal(lookupModelPayload(readPayload(agentDir), "newp", "m1"), undefined);
 }));
@@ -1002,7 +1015,11 @@ test("replace-target clears absent source payload; reuse preserves absolute targ
 
   // createModel replace with no explicit payload clears target.
   writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "fresh", { keep: true }));
+  const firstCreate = await actions.createModel("local", model("fresh"));
+  assert.equal(firstCreate.type, "payload-collision");
+  if (firstCreate.type !== "payload-collision" || !firstCreate.resolutionToken) return;
   const created = await actions.createModel("local", model("fresh"), {
+    resolutionToken: firstCreate.resolutionToken,
     payloadCollisionResolution: "replace-target",
   });
   assert.equal(created.type, "success");
@@ -1230,22 +1247,31 @@ test("createProvider and createModel migrate valid legacy rows with collision re
   // Collision + reuse: preserve target, strip native.
   writeNative(agentDir, { providers: {} });
   writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "p", "m1", { keep: true }));
-  const reused = await actions.createProvider("p", {
+  const cfg = {
     baseUrl: "http://localhost",
-    api: "openai-completions",
+    api: "openai-completions" as const,
     models: [model("m1", { extraPayload: legacyRows({ temp: { type: "string", value: "hot" } }) })],
-  }, { payloadCollisionResolution: "reuse-target" });
+  };
+  const firstReuse = await actions.createProvider("p", cfg);
+  assert.equal(firstReuse.type, "payload-collision");
+  if (firstReuse.type !== "payload-collision" || !firstReuse.resolutionToken) return;
+  const reused = await actions.createProvider("p", cfg, {
+    resolutionToken: firstReuse.resolutionToken,
+    payloadCollisionResolution: "reuse-target",
+  });
   assert.equal(reused.type, "success");
   assert.deepEqual(lookupModelPayload(readPayload(agentDir), "p", "m1"), { keep: true });
 
   // Collision + replace: write legacy.
   writeNative(agentDir, { providers: {} });
   writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "p", "m1", { keep: true }));
-  const replaced = await actions.createProvider("p", {
-    baseUrl: "http://localhost",
-    api: "openai-completions",
-    models: [model("m1", { extraPayload: legacyRows({ temp: { type: "string", value: "hot" } }) })],
-  }, { payloadCollisionResolution: "replace-target" });
+  const firstReplace = await actions.createProvider("p", cfg);
+  assert.equal(firstReplace.type, "payload-collision");
+  if (firstReplace.type !== "payload-collision" || !firstReplace.resolutionToken) return;
+  const replaced = await actions.createProvider("p", cfg, {
+    resolutionToken: firstReplace.resolutionToken,
+    payloadCollisionResolution: "replace-target",
+  });
   assert.equal(replaced.type, "success");
   assert.deepEqual(lookupModelPayload(readPayload(agentDir), "p", "m1"), { temp: "hot" });
 
@@ -1256,10 +1282,16 @@ test("createProvider and createModel migrate valid legacy rows with collision re
     },
   });
   writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "local", "n", { keep: true }));
+  const modelFirst = await actions.createModel(
+    "local",
+    model("n", { extraPayload: legacyRows({ a: { type: "bool", value: "true" } }) }),
+  );
+  assert.equal(modelFirst.type, "payload-collision");
+  if (modelFirst.type !== "payload-collision" || !modelFirst.resolutionToken) return;
   const modelCreated = await actions.createModel(
     "local",
     model("n", { extraPayload: legacyRows({ a: { type: "bool", value: "true" } }) }),
-    { payloadCollisionResolution: "replace-target" },
+    { resolutionToken: modelFirst.resolutionToken, payloadCollisionResolution: "replace-target" },
   );
   assert.equal(modelCreated.type, "success");
   assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "n"), { a: true });
@@ -1372,16 +1404,25 @@ test("patchProvider models migrates valid legacy, preserves removed payloads, an
   ));
 
   const collision = await actions.patchProvider("local", {
-    models: [model("keep"), model("fresh")],
-  });
-  assert.equal(collision.type, "payload-collision");
-
-  const replaced = await actions.patchProvider("local", {
     models: [
       model("keep", { extraPayload: legacyRows({ k: { type: "string", value: "v" } }) }),
       model("fresh"),
     ],
+  });
+  assert.equal(collision.type, "payload-collision");
+  if (collision.type !== "payload-collision" || !collision.resolutionToken) return;
+
+  const bareRetry = await actions.patchProvider("local", {
+    models: [model("keep"), model("fresh")],
   }, { payloadCollisionResolution: "reuse-target" });
+  assert.equal(bareRetry.type, "stale-target");
+
+  const replaced = await actions.patchProvider("local", {
+    models: [model("mutated-should-be-ignored")],
+  }, {
+    resolutionToken: collision.resolutionToken,
+    payloadCollisionResolution: "reuse-target",
+  });
   assert.equal(replaced.type, "success");
   assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models!.find((m) => m.id === "keep")!, "extraPayload"), false);
   assert.deepEqual(lookupModelPayload(readPayload(agentDir), "local", "keep"), { k: "v" });
@@ -1504,4 +1545,77 @@ test("provider delete requires explicit discard for malformed legacy", async () 
   if (ok.type !== "preview") return;
   assert.equal((await actions.commitProviderIdentityAction(ok.token)).type, "success");
   assert.equal(Object.hasOwn(readNative(agentDir).providers, "local"), false);
+}));
+
+
+test("simple-action resolution tokens reject drift and forged bare resolutions", async () => withAgentDir(async (agentDir, actions) => {
+  writeNative(agentDir, { providers: {} });
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "p", "m1", { a: 1 }));
+  const first = await actions.createProvider("p", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m1")],
+  });
+  assert.equal(first.type, "payload-collision");
+  if (first.type !== "payload-collision" || !first.resolutionToken) return;
+  assertDiagnosticSecretFree(first);
+
+  // External second collision added after first review => hash drift, zero write.
+  writePayload(agentDir, setPayloadDocumentValue(
+    setPayloadDocumentValue(emptyPayloadDocument(), "p", "m1", { a: 1 }),
+    "p",
+    "m2",
+    { b: 2 },
+  ));
+  const drifted = await actions.createProvider("p", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m1"), model("m2")],
+  }, {
+    resolutionToken: first.resolutionToken,
+    payloadCollisionResolution: "replace-target",
+  });
+  assert.ok(drifted.type === "stale-target" || drifted.type === "payload-collision");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers, "p"), false);
+
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "p", "m1", { a: 1 }));
+  const again = await actions.createProvider("p", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m1")],
+  });
+  assert.equal(again.type, "payload-collision");
+  if (again.type !== "payload-collision" || !again.resolutionToken) return;
+  writePayload(agentDir, setPayloadDocumentValue(emptyPayloadDocument(), "p", "m1", { a: 99 }));
+  const hashDrift = await actions.createProvider("ignored", { baseUrl: "x", api: "openai-completions", models: [] }, {
+    resolutionToken: again.resolutionToken,
+    payloadCollisionResolution: "reuse-target",
+  });
+  assert.ok(hashDrift.type === "stale-target" || hashDrift.type === "payload-collision");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers, "p"), false);
+  assert.equal(Object.hasOwn(readNative(agentDir).providers, "ignored"), false);
+
+  const forged = await actions.createProvider("p", {
+    baseUrl: "http://localhost",
+    api: "openai-completions",
+    models: [model("m1")],
+  }, { resolutionToken: "not-a-token", payloadCollisionResolution: "reuse-target" });
+  assert.equal(forged.type, "stale-target");
+
+  // Empty legacy row array strips without creating private identity.
+  writeNative(agentDir, {
+    providers: {
+      local: {
+        baseUrl: "http://localhost",
+        api: "openai-completions",
+        models: [model("e", { extraPayload: [] })],
+      },
+    },
+  });
+  writePayload(agentDir, emptyPayloadDocument());
+  const emptyLegacy = await actions.patchModel("local", "e", { name: "E" }, { fieldBaselines: { name: undefined } });
+  assert.equal(emptyLegacy.type, "success");
+  assert.equal(Object.hasOwn(readNative(agentDir).providers.local!.models![0]!, "extraPayload"), false);
+  assert.equal(lookupModelPayload(readPayload(agentDir), "local", "e"), undefined);
+  assert.equal(Object.keys(readPayload(agentDir).extraPayloads).length, 0);
 }));
