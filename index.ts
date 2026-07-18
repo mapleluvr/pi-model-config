@@ -12,6 +12,7 @@ import {
   copyModelPayload, copyProviderPayloads, getModelPayload, mergePayloadIntoRequest,
   moveProviderPayloads, removeModelPayload, removeProviderPayloads, setModelPayload,
 } from "./payload-config.ts";
+import { resolveRequestPayload } from "./payload-coordinator.ts";
 import {
   applyCompatBooleanChoice, applyCompatObjectChoice, COMPAT_BOOLEAN_FIELDS,
   COMPAT_JSON_OBJECT_FIELDS, THINKING_FORMATS, type CompatBooleanChoice,
@@ -1445,7 +1446,9 @@ export default async function (pi: ExtensionAPI) {
   pi.on("before_provider_request", (event, ctx) => {
     const model = ctx.model;
     if (!model) return undefined;
-    const extraPayload = getModelPayload(model.provider, model.id);
+    const extraPayload = resolveRequestPayload(model.provider, model.id, {
+      onDiagnostic: () => console.warn("Model Config request payload unavailable"),
+    });
     if (!extraPayload) return undefined;
     return mergePayloadIntoRequest(event.payload, extraPayload);
   });

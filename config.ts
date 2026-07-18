@@ -23,9 +23,10 @@ export function getModelsPath(): string {
   return path.join(agentDir, "models.json");
 }
 
-function parseModelsDocument(filePath: string, raw: string): ModelsConfig {
+export function parseModelsDocument(filePath: string, raw: string | Uint8Array): ModelsConfig {
+  const document = Buffer.from(raw).toString("utf8");
   const errors: ParseError[] = [];
-  const parsed = parse(raw, errors, { allowTrailingComma: true, disallowComments: false });
+  const parsed = parse(document, errors, { allowTrailingComma: true, disallowComments: false });
   if (errors.length > 0) {
     throw new ModelsConfigError(filePath, errors.map((error) => `offset ${error.offset}: ${error.error}`).join("; "));
   }
@@ -47,6 +48,11 @@ export function readModelsConfig(filePath = getModelsPath()): ModelsConfig {
   return parseModelsDocument(filePath, raw);
 }
 
+export function serializeModelsDocument(config: ModelsConfig): Buffer {
+  assertValidModelsCandidate(config);
+  return Buffer.from(`${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
 /** 写入 models.json */
 export function writeModelsConfig(config: ModelsConfig, filePath = getModelsPath()): void {
   const snapshot = readArtifact(filePath);
@@ -55,9 +61,7 @@ export function writeModelsConfig(config: ModelsConfig, filePath = getModelsPath
     : { providers: {} };
   const merged = { ...existing, ...config, providers: config.providers };
   assertValidModelsCandidate(merged);
-  atomicReplace(filePath, Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"), {
-    expectedHash: snapshot.hash,
-  });
+  atomicReplace(filePath, serializeModelsDocument(merged), { expectedHash: snapshot.hash });
 }
 
 /** 添加或更新一个 provider */
