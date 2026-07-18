@@ -7,11 +7,9 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { getModelsPath, readModelsConfig, writeModelsConfig } from "./config.ts";
-import {
-  copyModelPayload, copyProviderPayloads, getModelPayload, mergePayloadIntoRequest,
-  moveProviderPayloads, removeModelPayload, removeProviderPayloads, setModelPayload,
-} from "./payload-config.ts";
+import { ModelConfigActions, type ActionResult } from "./config-actions.ts";
+import { getModelsPath, readModelsConfig } from "./config.ts";
+import { lookupModelPayload, mergePayloadIntoRequest } from "./payload-config.ts";
 import { resolveRequestPayload } from "./payload-coordinator.ts";
 import {
   applyCompatBooleanChoice, applyCompatObjectChoice, COMPAT_BOOLEAN_FIELDS,
@@ -227,6 +225,84 @@ function notifyError(ctx: ExtensionCommandContext, error: unknown): void {
   ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 }
 
+function modelConfigActions(): ModelConfigActions {
+  return new ModelConfigActions();
+}
+
+function notifyActionFailure(ctx: ExtensionCommandContext, result: ActionResult): void {
+  switch (result.type) {
+    case "lock-busy":
+      ctx.ui.notify("配置操作进行中，请稍后重试", "error");
+      return;
+    case "lock-collision":
+      ctx.ui.notify("无法获取配置锁（冲突）", "error");
+      return;
+    case "lock-unsupported":
+      ctx.ui.notify("当前环境不支持配置锁", "error");
+      return;
+    case "recovery-required":
+      ctx.ui.notify("配置事务需要恢复后才能继续修改", "error");
+      return;
+    case "stale-target":
+      ctx.ui.notify("目标已被外部修改，请刷新后重试", "error");
+      return;
+    case "subtree-conflict":
+      ctx.ui.notify("子树已被外部修改，请重新加载后再保存", "error");
+      return;
+    case "native-collision":
+      ctx.ui.notify(`目标 "${result.target}" 已存在`, "error");
+      return;
+    case "payload-collision":
+      ctx.ui.notify("目标已存在私有 Payload，需要显式确认冲突处理", "error");
+      return;
+    case "validation-error":
+      ctx.ui.notify(result.issues.map((issue) => `${issue.path} ${issue.message}`).join("; "), "error");
+      return;
+    default:
+      return;
+  }
+}
+
+function notifySaved(ctx: ExtensionCommandContext | undefined, config: ModelsConfig): void {
+  const pCount = Object.keys(config.providers).length;
+  let mCount = 0;
+  for (const provider of Object.values(config.providers)) mCount += (provider.models || []).length;
+  ctx?.ui.notify(
+    `已保存 ${pCount} Providers / ${mCount} Models → ${getModelsPath()}\n` +
+    `请关闭并重新打开 /model (Ctrl+L) 查看新模型`,
+    "success",
+  );
+}
+
+function applyActionResult(ctx: ExtensionCommandContext, result: ActionResult): ModelsConfig | undefined {
+  if (result.type === "success") {
+    notifySaved(ctx, result.snapshot.native);
+    return cloneModelsConfig(result.snapshot.native);
+  }
+  notifyActionFailure(ctx, result);
+  return undefined;
+}
+
+async function commitProviderIdentity(
+  ctx: ExtensionCommandContext,
+  request: Parameters<ModelConfigActions["previewProviderIdentityAction"]>[0],
+): Promise<ModelsConfig | undefined> {
+  const actions = modelConfigActions();
+  const preview = await actions.previewProviderIdentityAction(request);
+  if (preview.type !== "preview") return applyActionResult(ctx, preview);
+  return applyActionResult(ctx, await actions.commitProviderIdentityAction(preview.token));
+}
+
+async function commitModelIdentity(
+  ctx: ExtensionCommandContext,
+  request: Parameters<ModelConfigActions["previewModelIdentityAction"]>[0],
+): Promise<ModelsConfig | undefined> {
+  const actions = modelConfigActions();
+  const preview = await actions.previewModelIdentityAction(request);
+  if (preview.type !== "preview") return applyActionResult(ctx, preview);
+  return applyActionResult(ctx, await actions.commitModelIdentityAction(preview.token));
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -236,27 +312,6 @@ function payloadLabel(key: string, value: unknown): string {
   const serialized = typeof value === "string" ? value : JSON.stringify(value);
   const preview = serialized.length > 40 ? `${serialized.slice(0, 37)}...` : serialized;
   return `[${type}] ${key} = ${preview}`;
-}
-
-// ═══════════════════════════════════════════════════════
-// 核心：保存到 models.json + 通知用户
-// ═══════════════════════════════════════════════════════
-
-/**
- * 保存 config 到 models.json。
- * Pi 会在用户下一次打开 /model 时自动重新加载该文件。
- */
-function persistConfig(config: ModelsConfig, ctx?: ExtensionCommandContext): void {
-  writeModelsConfig(config);
-  const pCount = Object.keys(config.providers).length;
-  let mCount = 0;
-  for (const p of Object.values(config.providers)) mCount += (p.models || []).length;
-
-  ctx?.ui.notify(
-    `已保存 ${pCount} Providers / ${mCount} Models → ${getModelsPath()}\n` +
-    `请关闭并重新打开 /model (Ctrl+L) 查看新模型`,
-    "success",
-  );
 }
 
 // ═══════════════════════════════════════════════════════
@@ -346,6 +401,8 @@ async function editProvider(
 interface ModelEditResult {
   model: ModelConfig;
   payload?: Record<string, unknown>;
+  /** Present only when payload was loaded from native legacy extraPayload and should migrate on successful save. */
+  migrateLegacy?: Record<string, unknown>;
 }
 
 function parseLegacyPayload(value: unknown): Record<string, unknown> | undefined {
@@ -372,9 +429,12 @@ function loadModelPayload(
   ctx: ExtensionCommandContext,
   providerId: string,
   existing?: ModelConfig,
-): { payload?: Record<string, unknown> } {
+): { payload?: Record<string, unknown>; migrateLegacy?: Record<string, unknown> } {
   if (!existing) return {};
-  const privatePayload = getModelPayload(providerId, existing.id);
+  const snapshot = modelConfigActions().readEditorSnapshot();
+  const privatePayload = snapshot.type === "snapshot"
+    ? lookupModelPayload(snapshot.payload, providerId, existing.id)
+    : undefined;
   const legacy = (existing as Record<string, unknown>)["extraPayload"];
   if (privatePayload) return { payload: privatePayload };
   if (!Object.hasOwn(existing, "extraPayload")) return {};
@@ -383,7 +443,7 @@ function loadModelPayload(
     ctx.ui.notify("Legacy extraPayload could not be migrated; it will be removed after a successful save", "error");
     return {};
   }
-  return { payload: migrated };
+  return { payload: migrated, migrateLegacy: migrated };
 }
 
 function finiteNumberOr(value: string, fallback: number): number {
@@ -471,6 +531,7 @@ async function editModel(
   };
   const payloadState = loadModelPayload(ctx, providerId, existing);
   let payload = payloadState.payload;
+  const migrateLegacy = payloadState.migrateLegacy;
   const name = await promptText(ctx, `Model: ${modelId}`, "显示名称（留空使用 ID）", base.name);
   if (name === undefined) return null;
   const reasoningChoice = await ctx.ui.select(`Model: ${modelId} - Extended Thinking`, [
@@ -554,7 +615,7 @@ async function editModel(
     if (editedPayload !== undefined) payload = editedPayload;
   }
 
-  return { model, payload };
+  return { model, payload, migrateLegacy };
 }
 
 // ═══════════════════════════════════════════════════════
@@ -738,37 +799,12 @@ async function editCompat(
 // Provider Management
 // ═══════════════════════════════════════════════════════
 
-function persistNextConfig(ctx: ExtensionCommandContext, nextConfig: ModelsConfig): boolean {
-  try {
-    persistConfig(nextConfig, ctx);
-    return true;
-  } catch (error) {
-    notifyError(ctx, error);
-    return false;
-  }
-}
-
-function updateModelPayloadAfterSave(
-  ctx: ExtensionCommandContext,
-  providerId: string,
-  updated: ModelConfig,
-  payload: Record<string, unknown> | undefined,
-  existing?: ModelConfig,
-): void {
-  try {
-    if (payload && Object.keys(payload).length > 0) setModelPayload(providerId, updated.id, payload);
-    else removeModelPayload(providerId, updated.id);
-    if (existing && existing.id !== updated.id) removeModelPayload(providerId, existing.id);
-  } catch (error) {
-    notifyError(ctx, error);
-  }
-}
-
 async function manageProviders(
   ctx: ExtensionCommandContext,
   initialConfig: ModelsConfig,
 ): Promise<ModelsConfig> {
   let config = initialConfig;
+  const actions = modelConfigActions();
   while (true) {
     const pids = Object.keys(config.providers);
     const items = pids.map((pid) => `编辑 [${pid}] ${providerSummary(config.providers[pid]!)}`);
@@ -779,9 +815,8 @@ async function manageProviders(
     if (choice.startsWith("添加")) {
       const result = await editProvider(ctx);
       if (!result) continue;
-      const nextConfig = cloneModelsConfig(config);
-      nextConfig.providers[result.providerId] = structuredClone(result.config);
-      if (persistNextConfig(ctx, nextConfig)) config = nextConfig;
+      const saved = applyActionResult(ctx, await actions.createProvider(result.providerId, result.config));
+      if (saved) config = saved;
       continue;
     }
 
@@ -797,16 +832,8 @@ async function manageProviders(
 
     if (action.startsWith("删除")) {
       if (!await ctx.ui.confirm("确认删除", `删除 Provider "${providerId}" 及其所有 Models？`)) continue;
-      const nextConfig = cloneModelsConfig(config);
-      delete nextConfig.providers[providerId];
-      if (persistNextConfig(ctx, nextConfig)) {
-        config = nextConfig;
-        try {
-          removeProviderPayloads(providerId);
-        } catch (error) {
-          notifyError(ctx, error);
-        }
-      }
+      const saved = await commitProviderIdentity(ctx, { kind: "delete", providerId });
+      if (saved) config = saved;
       continue;
     }
     if (action.startsWith("复制")) {
@@ -817,16 +844,12 @@ async function manageProviders(
         ctx.ui.notify(`Provider "${copyId}" 已存在`, "error");
         continue;
       }
-      const nextConfig = cloneModelsConfig(config);
-      nextConfig.providers[copyId] = structuredClone(existing);
-      if (persistNextConfig(ctx, nextConfig)) {
-        config = nextConfig;
-        try {
-          copyProviderPayloads(providerId, copyId, (existing.models ?? []).map((model) => model.id));
-        } catch (error) {
-          notifyError(ctx, error);
-        }
-      }
+      const saved = await commitProviderIdentity(ctx, {
+        kind: "copy",
+        providerId,
+        targetProviderId: copyId,
+      });
+      if (saved) config = saved;
       continue;
     }
     if (action.startsWith("管理")) {
@@ -842,15 +865,13 @@ async function manageProviders(
         `当前已有 ${(existing.models || []).length} 个模型。\n` +
         "是 = 替换现有模型\n否 = 合并到现有列表（去重）",
       );
-      const nextConfig = cloneModelsConfig(config);
-      const nextProvider = nextConfig.providers[providerId]!;
-      if (replace) nextProvider.models = fetched;
-      else {
-        const currentModels = nextProvider.models ?? [];
-        const existingIds = new Set(currentModels.map((model) => model.id));
-        nextProvider.models = [...currentModels, ...fetched.filter((model) => !existingIds.has(model.id))];
-      }
-      if (persistNextConfig(ctx, nextConfig)) config = nextConfig;
+      const currentModels = existing.models ?? [];
+      const existingIds = new Set(currentModels.map((model) => model.id));
+      const models = replace
+        ? fetched
+        : [...currentModels, ...fetched.filter((model) => !existingIds.has(model.id))];
+      const saved = applyActionResult(ctx, await actions.patchProvider(providerId, { models }));
+      if (saved) config = saved;
       continue;
     }
     if (action.startsWith("编辑")) {
@@ -860,18 +881,27 @@ async function manageProviders(
         ctx.ui.notify(`Provider "${result.providerId}" 已存在`, "error");
         continue;
       }
-      const nextConfig = cloneModelsConfig(config);
-      delete nextConfig.providers[providerId];
-      nextConfig.providers[result.providerId] = structuredClone(result.config);
-      if (persistNextConfig(ctx, nextConfig)) {
-        config = nextConfig;
-        if (result.providerId !== providerId) {
-          try {
-            moveProviderPayloads(providerId, result.providerId, (existing.models ?? []).map((model) => model.id));
-          } catch (error) {
-            notifyError(ctx, error);
-          }
-        }
+      if (result.providerId !== providerId) {
+        const saved = await commitProviderIdentity(ctx, {
+          kind: "rename",
+          providerId,
+          targetProviderId: result.providerId,
+          provider: result.config,
+        });
+        if (saved) config = saved;
+      } else {
+        const saved = applyActionResult(ctx, await actions.patchProvider(providerId, {
+          name: result.config.name ?? null,
+          baseUrl: result.config.baseUrl ?? null,
+          api: result.config.api ?? null,
+          apiKey: result.config.apiKey ?? null,
+          authHeader: result.config.authHeader ?? null,
+          compat: result.config.compat ?? null,
+          models: result.config.models,
+          headers: result.config.headers ?? null,
+          modelOverrides: result.config.modelOverrides ?? null,
+        }));
+        if (saved) config = saved;
       }
     }
   }
@@ -887,6 +917,7 @@ async function manageModels(
   initialConfig: ModelsConfig,
 ): Promise<ModelsConfig> {
   let config = initialConfig;
+  const actions = modelConfigActions();
   while (true) {
     const provider = config.providers[providerId];
     if (!provider) return config;
@@ -908,12 +939,9 @@ async function manageModels(
       if (!result) continue;
       const modelToSave = structuredClone(result.model);
       delete (modelToSave as Record<string, unknown>)["extraPayload"];
-      const nextConfig = cloneModelsConfig(config);
-      (nextConfig.providers[providerId]!.models ??= []).push(modelToSave);
-      if (persistNextConfig(ctx, nextConfig)) {
-        config = nextConfig;
-        updateModelPayloadAfterSave(ctx, providerId, modelToSave, result.payload);
-      }
+      const payload = result.payload && Object.keys(result.payload).length > 0 ? result.payload : undefined;
+      const saved = applyActionResult(ctx, await actions.createModel(providerId, modelToSave, payload ? { payload } : undefined));
+      if (saved) config = saved;
       continue;
     }
 
@@ -927,16 +955,8 @@ async function manageModels(
 
     if (action.startsWith("删除")) {
       if (!await ctx.ui.confirm("确认删除", `删除 Model "${existing.id}"？`)) continue;
-      const nextConfig = cloneModelsConfig(config);
-      nextConfig.providers[providerId]!.models!.splice(index, 1);
-      if (persistNextConfig(ctx, nextConfig)) {
-        config = nextConfig;
-        try {
-          removeModelPayload(providerId, existing.id);
-        } catch (error) {
-          notifyError(ctx, error);
-        }
-      }
+      const saved = await commitModelIdentity(ctx, { kind: "delete", providerId, modelId: existing.id });
+      if (saved) config = saved;
       continue;
     }
     if (action.startsWith("复制")) {
@@ -944,16 +964,14 @@ async function manageModels(
       delete (modelCopy as Record<string, unknown>)["extraPayload"];
       modelCopy.id = `${existing.id}-copy`;
       modelCopy.name = `${existing.name || existing.id} (Copy)`;
-      const nextConfig = cloneModelsConfig(config);
-      (nextConfig.providers[providerId]!.models ??= []).push(modelCopy);
-      if (persistNextConfig(ctx, nextConfig)) {
-        config = nextConfig;
-        try {
-          copyModelPayload(providerId, existing.id, providerId, modelCopy.id);
-        } catch (error) {
-          notifyError(ctx, error);
-        }
-      }
+      const saved = await commitModelIdentity(ctx, {
+        kind: "copy",
+        providerId,
+        modelId: existing.id,
+        targetModelId: modelCopy.id,
+        model: modelCopy,
+      });
+      if (saved) config = saved;
       continue;
     }
     if (action.startsWith("编辑")) {
@@ -961,11 +979,39 @@ async function manageModels(
       if (!result) continue;
       const modelToSave = structuredClone(result.model);
       delete (modelToSave as Record<string, unknown>)["extraPayload"];
-      const nextConfig = cloneModelsConfig(config);
-      nextConfig.providers[providerId]!.models![index] = modelToSave;
-      if (persistNextConfig(ctx, nextConfig)) {
-        config = nextConfig;
-        updateModelPayloadAfterSave(ctx, providerId, modelToSave, result.payload, existing);
+      const payloadOption = result.payload && Object.keys(result.payload).length > 0
+        ? result.payload
+        : null;
+      if (modelToSave.id !== existing.id) {
+        const saved = await commitModelIdentity(ctx, {
+          kind: "rename",
+          providerId,
+          modelId: existing.id,
+          targetModelId: modelToSave.id,
+          model: modelToSave,
+          payload: payloadOption,
+          migrateLegacyExtraPayload: payloadOption === null ? undefined : result.migrateLegacy,
+        });
+        if (saved) config = saved;
+      } else {
+        const patch = {
+          id: modelToSave.id,
+          name: modelToSave.name ?? null,
+          reasoning: modelToSave.reasoning,
+          input: modelToSave.input,
+          contextWindow: modelToSave.contextWindow ?? null,
+          maxTokens: modelToSave.maxTokens ?? null,
+          cost: modelToSave.cost,
+          thinkingLevelMap: modelToSave.thinkingLevelMap ?? null,
+          compat: modelToSave.compat ?? null,
+          headers: modelToSave.headers ?? null,
+          api: modelToSave.api ?? null,
+          baseUrl: modelToSave.baseUrl ?? null,
+        };
+        const saved = applyActionResult(ctx, await actions.patchModel(providerId, existing.id, patch, {
+          payload: payloadOption,
+        }));
+        if (saved) config = saved;
       }
     }
   }

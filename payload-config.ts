@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { atomicReplace } from "./atomic-file.ts";
 
 export interface PayloadConfig {
   version: 1;
@@ -105,10 +104,6 @@ export function readPayloadConfig(filePath = getPayloadConfigPath()): PayloadCon
   }
 }
 
-function writePayloadConfig(config: PayloadConfig, filePath = getPayloadConfigPath()): void {
-  atomicReplace(filePath, serializePayloadDocument(config), { mode: 0o600 });
-}
-
 export function lookupModelPayload(
   config: PayloadConfig,
   provider: string,
@@ -180,43 +175,28 @@ export function removeProviderPayloadDocumentValues(config: PayloadConfig, provi
   return next;
 }
 
-// Temporary compatibility shims. Task 4 routes UI mutations through the coordinator.
-export function getModelPayload(provider: string, modelId: string): Record<string, unknown> | undefined {
-  return lookupModelPayload(readPayloadConfig(), provider, modelId);
-}
-
-export function setModelPayload(provider: string, modelId: string, payload: Record<string, unknown>): void {
-  writePayloadConfig(setPayloadDocumentValue(readPayloadConfigForWrite(), provider, modelId, payload));
-}
-
-export function removeModelPayload(provider: string, modelId: string): void {
-  writePayloadConfig(removePayloadDocumentValue(readPayloadConfigForWrite(), provider, modelId));
-}
-
-export function removeProviderPayloads(provider: string): void {
-  writePayloadConfig(removeProviderPayloadDocumentValues(readPayloadConfigForWrite(), provider));
-}
-
-export function copyModelPayload(fromProvider: string, fromModelId: string, toProvider: string, toModelId: string): void {
-  writePayloadConfig(copyPayloadDocumentValue(readPayloadConfigForWrite(), fromProvider, fromModelId, toProvider, toModelId));
-}
-
-export function moveModelPayload(fromProvider: string, fromModelId: string, toProvider: string, toModelId: string): void {
-  writePayloadConfig(movePayloadDocumentValue(readPayloadConfigForWrite(), fromProvider, fromModelId, toProvider, toModelId));
-}
-
-export function copyProviderPayloads(fromProvider: string, toProvider: string, modelIds: readonly string[]): void {
-  if (fromProvider === toProvider) return;
-  let next = readPayloadConfigForWrite();
+export function copyProviderPayloadDocumentValues(
+  config: PayloadConfig,
+  fromProvider: string,
+  toProvider: string,
+  modelIds: readonly string[],
+): PayloadConfig {
+  if (fromProvider === toProvider) return clonePayloadDocument(config);
+  let next = clonePayloadDocument(config);
   for (const modelId of modelIds) next = copyPayloadDocumentValue(next, fromProvider, modelId, toProvider, modelId);
-  writePayloadConfig(next);
+  return next;
 }
 
-export function moveProviderPayloads(fromProvider: string, toProvider: string, modelIds: readonly string[]): void {
-  if (fromProvider === toProvider) return;
-  let next = readPayloadConfigForWrite();
+export function moveProviderPayloadDocumentValues(
+  config: PayloadConfig,
+  fromProvider: string,
+  toProvider: string,
+  modelIds: readonly string[],
+): PayloadConfig {
+  if (fromProvider === toProvider) return clonePayloadDocument(config);
+  let next = clonePayloadDocument(config);
   for (const modelId of modelIds) next = movePayloadDocumentValue(next, fromProvider, modelId, toProvider, modelId);
-  writePayloadConfig(next);
+  return next;
 }
 
 export function mergePayloadIntoRequest(payload: unknown, extraPayload: unknown): Record<string, unknown> | undefined {

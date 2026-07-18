@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeModelConfig, mergeProviderConfig, replaceCostTiers, validateCostTier } from "../model-fields.ts";
+import {
+  deepCloneJson,
+  deepEqualJson,
+  mergeModelConfig,
+  mergeProviderConfig,
+  readModelSubtree,
+  readProviderSubtree,
+  replaceCostTiers,
+  validateCostTier,
+  writeModelSubtree,
+  writeProviderSubtree,
+} from "../model-fields.ts";
 
 test("provider merge changes managed values while retaining headers, modelOverrides, and unknown values", () => {
   const result = mergeProviderConfig({
@@ -70,4 +81,30 @@ test("clears existing cost tiers when replacement is empty", () => {
   }, []), {
     input: 1, output: 2, cacheRead: 3, cacheWrite: 4,
   });
+});
+
+test("deep clone and equality helpers preserve false/zero and isolate mutations", () => {
+  const original = { enabled: false, count: 0, nested: { keep: true } };
+  const clone = deepCloneJson(original);
+  clone.nested.keep = false;
+  assert.equal(original.nested.keep, true);
+  assert.equal(deepEqualJson({ a: false, b: 0 }, { a: false, b: 0 }), true);
+  assert.equal(deepEqualJson({ a: false }, { a: true }), false);
+});
+
+test("provider and model subtree helpers clone exact objects", () => {
+  const provider = { headers: { "X-Keep": "1" }, compat: { supportsTemperature: false } };
+  const headers = readProviderSubtree(provider, "headers");
+  assert.deepEqual(headers, { "X-Keep": "1" });
+  (headers as Record<string, string>)["X-Keep"] = "mutated";
+  assert.equal(provider.headers["X-Keep"], "1");
+  const nextProvider = writeProviderSubtree(provider, "headers", { "X-New": "2" });
+  assert.deepEqual(nextProvider.headers, { "X-New": "2" });
+  assert.deepEqual(provider.headers, { "X-Keep": "1" });
+
+  const model = { id: "m", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  const cost = readModelSubtree(model, "cost");
+  assert.deepEqual(cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  const nextModel = writeModelSubtree(model, "cost", { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
+  assert.deepEqual(nextModel.cost, { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
 });

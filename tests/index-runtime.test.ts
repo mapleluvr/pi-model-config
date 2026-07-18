@@ -5,7 +5,22 @@ import * as os from "node:os";
 import * as path from "node:path";
 import extension from "../index.ts";
 import { readModelsConfig, writeModelsConfig } from "../config.ts";
-import { getModelPayload, setModelPayload } from "../payload-config.ts";
+import {
+  getPayloadConfigPath,
+  lookupModelPayload,
+  readPayloadConfig,
+  serializePayloadDocument,
+  setPayloadDocumentValue,
+} from "../payload-config.ts";
+
+function seedModelPayload(provider: string, modelId: string, payload: Record<string, unknown>): void {
+  const next = setPayloadDocumentValue(readPayloadConfig(), provider, modelId, payload);
+  fs.writeFileSync(getPayloadConfigPath(), serializePayloadDocument(next), { mode: 0o600 });
+}
+
+function readModelPayload(provider: string, modelId: string): Record<string, unknown> | undefined {
+  return lookupModelPayload(readPayloadConfig(), provider, modelId);
+}
 
 interface ScriptedUi {
   selects: string[];
@@ -96,7 +111,7 @@ test("activation does not dynamically register native providers and injects only
   const handlers = new Map<string, Function>();
   try {
     process.env.PI_CODING_AGENT_DIR = agentDir;
-    setModelPayload("local", "one", { temperature: 0.4 });
+    seedModelPayload("local", "one", { temperature: 0.4 });
     const fakePi = {
       registerCommand: () => {},
       registerProvider: () => { throw new Error("native providers must not be re-registered"); },
@@ -121,15 +136,15 @@ test("successful model rename keeps an explicitly edited destination payload and
         local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] },
       },
     });
-    setModelPayload("local", "old", { inherited: true });
+    seedModelPayload("local", "old", { inherited: true });
 
     await runModelConfigCommand(modelEditScript("new", "edit"));
 
     const saved = readModelsConfig().providers.local!.models![0]!;
     assert.equal(saved.id, "new");
     assert.equal(Object.hasOwn(saved, "extraPayload"), false);
-    assert.deepEqual(getModelPayload("local", "new"), { inherited: false });
-    assert.equal(getModelPayload("local", "old"), undefined);
+    assert.deepEqual(readModelPayload("local", "new"), { inherited: false });
+    assert.equal(readModelPayload("local", "old"), undefined);
   });
 });
 
@@ -140,14 +155,14 @@ test("successful model rename keeps an explicitly cleared destination payload cl
         local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "old", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] },
       },
     });
-    setModelPayload("local", "old", { inherited: true });
+    seedModelPayload("local", "old", { inherited: true });
 
     await runModelConfigCommand(modelEditScript("new", "clear"));
 
     const saved = readModelsConfig().providers.local!.models![0]!;
     assert.equal(saved.id, "new");
-    assert.equal(getModelPayload("local", "new"), undefined);
-    assert.equal(getModelPayload("local", "old"), undefined);
+    assert.equal(readModelPayload("local", "new"), undefined);
+    assert.equal(readModelPayload("local", "old"), undefined);
   });
 });
 
@@ -171,7 +186,7 @@ test("successful model edit removes an invalid legacy extraPayload instead of pe
 
     const saved = readModelsConfig().providers.local!.models![0]!;
     assert.equal(Object.hasOwn(saved, "extraPayload"), false);
-    assert.equal(getModelPayload("local", "old"), undefined);
+    assert.equal(readModelPayload("local", "old"), undefined);
   });
 });
 
@@ -190,7 +205,7 @@ test("successful model copy removes legacy extraPayload and copies the private p
         },
       },
     });
-    setModelPayload("local", "old", { seed: 7 });
+    seedModelPayload("local", "old", { seed: 7 });
 
     await runModelConfigCommand({
       selects: ["管理 Providers", "编辑 [local]", "管理 Models", "复制", "返回主菜单", "退出"],
@@ -202,8 +217,8 @@ test("successful model copy removes legacy extraPayload and copies the private p
     const copied = readModelsConfig().providers.local!.models![1]!;
     assert.equal(copied.id, "old-copy");
     assert.equal(Object.hasOwn(copied, "extraPayload"), false);
-    assert.deepEqual(getModelPayload("local", "old"), { seed: 7 });
-    assert.deepEqual(getModelPayload("local", "old-copy"), { seed: 7 });
+    assert.deepEqual(readModelPayload("local", "old"), { seed: 7 });
+    assert.deepEqual(readModelPayload("local", "old-copy"), { seed: 7 });
   });
 });
 
@@ -226,8 +241,8 @@ test("provider rename collision preserves both native providers and private payl
       },
     };
     writeModelsConfig(initial);
-    setModelPayload("source", "source/model", { owner: "source" });
-    setModelPayload("target", "target/model", { owner: "target" });
+    seedModelPayload("source", "source/model", { owner: "source" });
+    seedModelPayload("target", "target/model", { owner: "target" });
     const notifications: Array<{ message: string; level: string }> = [];
 
     await runModelConfigCommand({
@@ -242,8 +257,8 @@ test("provider rename collision preserves both native providers and private payl
     }, { notifications });
 
     assert.deepEqual(readModelsConfig(), initial);
-    assert.deepEqual(getModelPayload("source", "source/model"), { owner: "source" });
-    assert.deepEqual(getModelPayload("target", "target/model"), { owner: "target" });
+    assert.deepEqual(readModelPayload("source", "source/model"), { owner: "source" });
+    assert.deepEqual(readModelPayload("target", "target/model"), { owner: "target" });
     assert.ok(notifications.some(({ message, level }) => level === "error" && message.includes("target") && message.includes("已存在")));
   });
 });
@@ -257,8 +272,8 @@ test("provider copy collision preserves both native providers and private payloa
       },
     };
     writeModelsConfig(initial);
-    setModelPayload("source", "source/model", { owner: "source" });
-    setModelPayload("target", "target/model", { owner: "target" });
+    seedModelPayload("source", "source/model", { owner: "source" });
+    seedModelPayload("target", "target/model", { owner: "target" });
     const notifications: Array<{ message: string; level: string }> = [];
 
     await runModelConfigCommand({
@@ -269,8 +284,8 @@ test("provider copy collision preserves both native providers and private payloa
     }, { notifications });
 
     assert.deepEqual(readModelsConfig(), initial);
-    assert.deepEqual(getModelPayload("source", "source/model"), { owner: "source" });
-    assert.deepEqual(getModelPayload("target", "target/model"), { owner: "target" });
+    assert.deepEqual(readModelPayload("source", "source/model"), { owner: "source" });
+    assert.deepEqual(readModelPayload("target", "target/model"), { owner: "target" });
     assert.ok(notifications.some(({ message, level }) => level === "error" && message.includes("target") && message.includes("已存在")));
   });
 });
@@ -286,8 +301,8 @@ test("successful provider copy copies payloads for every copied model", async ()
         },
       },
     });
-    setModelPayload("source/provider", "model/one", { seed: 7 });
-    setModelPayload("source/provider", "model/two", { temperature: 0.2 });
+    seedModelPayload("source/provider", "model/one", { seed: 7 });
+    seedModelPayload("source/provider", "model/two", { temperature: 0.2 });
 
     await runModelConfigCommand({
       selects: ["管理 Providers", "编辑 [source/provider]", "复制 Provider", "返回主菜单", "退出"],
@@ -297,15 +312,15 @@ test("successful provider copy copies payloads for every copied model", async ()
     });
 
     assert.deepEqual(readModelsConfig().providers["target/provider"], readModelsConfig().providers["source/provider"]);
-    assert.deepEqual(getModelPayload("target/provider", "model/one"), { seed: 7 });
-    assert.deepEqual(getModelPayload("target/provider", "model/two"), { temperature: 0.2 });
+    assert.deepEqual(readModelPayload("target/provider", "model/one"), { seed: 7 });
+    assert.deepEqual(readModelPayload("target/provider", "model/two"), { temperature: 0.2 });
   });
 });
 
 test("provider copy does not write payloads when blank native persistence fails", async () => {
   await withRuntimeAgentDir(async (agentDir) => {
     writeModelsConfig({ providers: { source: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "model" }] } } });
-    setModelPayload("source", "model", { seed: 7 });
+    seedModelPayload("source", "model", { seed: 7 });
     const modelsPath = path.join(agentDir, "models.json");
     const blank = " \r\n\t";
     let corrupted = false;
@@ -324,15 +339,15 @@ test("provider copy does not write payloads when blank native persistence fails"
     });
 
     assert.equal(fs.readFileSync(modelsPath, "utf8"), blank);
-    assert.deepEqual(getModelPayload("source", "model"), { seed: 7 });
-    assert.equal(getModelPayload("target", "model"), undefined);
+    assert.deepEqual(readModelPayload("source", "model"), { seed: 7 });
+    assert.equal(readModelPayload("target", "model"), undefined);
   });
 });
 
 test("model copy does not write payloads when blank native persistence fails", async () => {
   await withRuntimeAgentDir(async (agentDir) => {
     writeModelsConfig({ providers: { local: { baseUrl: "http://localhost:11434", api: "openai-completions", models: [{ id: "model" }] } } });
-    setModelPayload("local", "model", { seed: 7 });
+    seedModelPayload("local", "model", { seed: 7 });
     const modelsPath = path.join(agentDir, "models.json");
     const blank = " \r\n\t";
     let corrupted = false;
@@ -351,8 +366,8 @@ test("model copy does not write payloads when blank native persistence fails", a
     });
 
     assert.equal(fs.readFileSync(modelsPath, "utf8"), blank);
-    assert.deepEqual(getModelPayload("local", "model"), { seed: 7 });
-    assert.equal(getModelPayload("local", "model-copy"), undefined);
+    assert.deepEqual(readModelPayload("local", "model"), { seed: 7 });
+    assert.equal(readModelPayload("local", "model-copy"), undefined);
   });
 });
 

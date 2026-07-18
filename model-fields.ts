@@ -1,8 +1,11 @@
 import type { ModelConfig, ModelCostTier, ProviderConfig } from "./types.ts";
 
-type ConfigPatch<T extends Record<string, unknown>> = {
+export type ConfigPatch<T extends Record<string, unknown>> = {
   [Key in keyof T]?: T[Key] | null;
 } & Record<string, unknown>;
+
+export type ProviderSubtreeKey = "headers" | "compat" | "modelOverrides";
+export type ModelSubtreeKey = "headers" | "compat" | "thinkingLevelMap" | "cost";
 
 function mergeDefined<T extends Record<string, unknown>>(existing: T | undefined, changes: ConfigPatch<T>): T {
   const next: Record<string, unknown> = { ...(existing ?? {}) };
@@ -14,12 +17,49 @@ function mergeDefined<T extends Record<string, unknown>>(existing: T | undefined
   return next as T;
 }
 
+export function deepCloneJson<T>(value: T): T {
+  if (value === undefined) return value;
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+export function deepEqualJson(left: unknown, right: unknown): boolean {
+  if (left === undefined && right === undefined) return true;
+  if (left === undefined || right === undefined) return false;
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function normalizeSubtreeBaseline(value: unknown): unknown {
+  return value === undefined ? null : value;
+}
+
 export function mergeProviderConfig(existing: ProviderConfig | undefined, changes: ConfigPatch<ProviderConfig>): ProviderConfig {
   return mergeDefined(existing, changes);
 }
 
 export function mergeModelConfig(existing: ModelConfig | undefined, changes: ConfigPatch<ModelConfig>): ModelConfig {
   return mergeDefined(existing, changes);
+}
+
+export function readProviderSubtree(provider: ProviderConfig, key: ProviderSubtreeKey): unknown {
+  return deepCloneJson((provider as Record<string, unknown>)[key]);
+}
+
+export function writeProviderSubtree(provider: ProviderConfig, key: ProviderSubtreeKey, value: unknown): ProviderConfig {
+  const next = deepCloneJson(provider);
+  if (value === undefined || value === null) delete (next as Record<string, unknown>)[key];
+  else (next as Record<string, unknown>)[key] = deepCloneJson(value);
+  return next;
+}
+
+export function readModelSubtree(model: ModelConfig, key: ModelSubtreeKey): unknown {
+  return deepCloneJson((model as Record<string, unknown>)[key]);
+}
+
+export function writeModelSubtree(model: ModelConfig, key: ModelSubtreeKey, value: unknown): ModelConfig {
+  const next = deepCloneJson(model);
+  if (value === undefined || value === null) delete (next as Record<string, unknown>)[key];
+  else (next as Record<string, unknown>)[key] = deepCloneJson(value);
+  return next;
 }
 
 function finiteNonNegative(value: unknown): value is number {
