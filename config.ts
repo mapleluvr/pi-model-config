@@ -1,77 +1,168 @@
 // ── models.json 配置读写 ──
 import * as fs from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { parseTree, type Node, type ParseError } from "jsonc-parser";
+import { atomicReplace, readArtifact } from "./atomic-file.ts";
+import { assertValidModelsCandidate } from "./config-validation.ts";
+import {
+  cloneOwnJsonData,
+  deleteOwnKey,
+  getOwnValue,
+  hasOwnKey,
+  setOwnValue,
+  stringifyOwnJsonData,
+} from "./own-keys.ts";
 import type { ModelsConfig, ProviderConfig } from "./types.ts";
 
+export class ModelsConfigError extends Error {
+  public readonly filePath: string;
+
+  constructor(filePath: string, message: string) {
+    super(`Failed to read models.json at ${filePath}: ${message}`);
+    this.name = "ModelsConfigError";
+    this.filePath = filePath;
+  }
+}
+
 /** 获取 models.json 的完整路径 */
-export function getModelsPath(): string {
-  const agentDir = process.env.PI_CODING_AGENT_DIR
-    || path.join(os.homedir(), ".pi", "agent");
+export function getModelsPath(agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent")): string {
   return path.join(agentDir, "models.json");
 }
 
-/** 读取 models.json */
-export function readModelsConfig(): ModelsConfig {
-  const filePath = getModelsPath();
-  try {
-    if (fs.existsSync(filePath)) {
-      const raw = fs.readFileSync(filePath, "utf-8");
-      const parsed = JSON.parse(raw);
-      return {
-        providers: parsed.providers || {},
-      };
+/**
+ * Structural JSONC materialization: build values from the parse tree with own-key-safe
+ * property insertion. Never uses parse()/getNodeValue() assignment (which collapses `__proto__`).
+ */
+function materializeJsoncNode(node: Node): unknown {
+  switch (node.type) {
+    case "null":
+      return null;
+    case "boolean":
+    case "number":
+    case "string":
+      return node.value;
+    case "array": {
+      const items: unknown[] = [];
+      for (const child of node.children ?? []) items.push(materializeJsoncNode(child));
+      return items;
     }
-  } catch (err) {
-    console.error(`[model-config] Failed to read models.json: ${err}`);
+    case "object": {
+      const out: Record<string, unknown> = {};
+      for (const prop of node.children ?? []) {
+        if (prop.type !== "property" || !prop.children || prop.children.length < 2) continue;
+        const keyNode = prop.children[0]!;
+        const valueNode = prop.children[1]!;
+        if (keyNode.type !== "string" || typeof keyNode.value !== "string") continue;
+        setOwnValue(out, keyNode.value, materializeJsoncNode(valueNode));
+      }
+      return out;
+    }
+    default:
+      return undefined;
   }
-  return { providers: {} };
 }
 
-/** 写入 models.json (合并已有配置) */
-export function writeModelsConfig(config: ModelsConfig): void {
-  const filePath = getModelsPath();
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+export function parseModelsDocument(filePath: string, raw: string | Uint8Array): ModelsConfig {
+  const document = Buffer.from(raw).toString("utf8");
+  const errors: ParseError[] = [];
+  const tree = parseTree(document, errors, { allowTrailingComma: true, disallowComments: false });
+  if (errors.length > 0) {
+    throw new ModelsConfigError(filePath, errors.map((error) => `offset ${error.offset}: ${error.error}`).join("; "));
   }
-  // 先读取已有文件，保留未知字段
-  let existing: any = {};
+  if (!tree || tree.type !== "object") {
+    throw new ModelsConfigError(filePath, "root must be a JSON object");
+  }
+  const root = materializeJsoncNode(tree) as Record<string, unknown>;
+  // Own-key only: never read inherited `providers` from Object.prototype pollution.
+  const providersRaw = hasOwnKey(root, "providers") ? getOwnValue(root, "providers") : undefined;
+  if (providersRaw !== undefined && (!providersRaw || typeof providersRaw !== "object" || Array.isArray(providersRaw))) {
+    throw new ModelsConfigError(filePath, "providers must be a JSON object when present");
+  }
+  const providersSource = (providersRaw as Record<string, ProviderConfig> | undefined) ?? {};
+  const ownProviders: Record<string, ProviderConfig> = {};
+  for (const key of Object.keys(providersSource)) {
+    if (!hasOwnKey(providersSource, key)) continue;
+    setOwnValue(ownProviders, key, getOwnValue(providersSource, key)!);
+  }
+  // Rebuild root with only own keys so inherited prototypes never materialize into config.
+  const ownRoot: Record<string, unknown> = {};
+  for (const key of Object.keys(root)) {
+    if (!hasOwnKey(root, key)) continue;
+    if (key === "providers") continue;
+    setOwnValue(ownRoot, key, getOwnValue(root, key));
+  }
+  setOwnValue(ownRoot, "providers", ownProviders);
+  const config = ownRoot as unknown as ModelsConfig;
   try {
-    if (fs.existsSync(filePath)) {
-      existing = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-    }
+    assertValidModelsCandidate(config);
   } catch {
-    // 忽略
+    throw new ModelsConfigError(filePath, "document does not satisfy the Pi models schema");
   }
+  return config;
+}
 
-  // 合并：保留 existing 中除 providers 之外的字段
-  const merged: any = { ...existing, providers: config.providers };
-  fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), "utf-8");
+/** 读取 models.json */
+export function readModelsConfig(filePath = getModelsPath()): ModelsConfig {
+  if (!fs.existsSync(filePath)) return { providers: {} };
+  const raw = fs.readFileSync(filePath, "utf8");
+  if (!raw.trim()) throw new ModelsConfigError(filePath, "file is blank");
+  return parseModelsDocument(filePath, raw);
+}
+
+export function serializeModelsDocument(config: ModelsConfig): Buffer {
+  const normalized = cloneOwnJsonData(config);
+  assertValidModelsCandidate(normalized);
+  return Buffer.from(`${stringifyOwnJsonData(normalized, 2)}\n`, "utf8");
+}
+
+/** 写入 models.json */
+export function writeModelsConfig(config: ModelsConfig, filePath = getModelsPath()): void {
+  let normalized: ModelsConfig;
+  try {
+    normalized = cloneOwnJsonData(config);
+  } catch {
+    throw new ModelsConfigError(filePath, "input must contain only own JSON data properties");
+  }
+  // Reject inputs without an own providers map before merge/validation (never read inherited prototypes).
+  if (!normalized || typeof normalized !== "object" || Array.isArray(normalized) || !hasOwnKey(normalized as object, "providers")) {
+    throw new ModelsConfigError(filePath, "input must include an own providers map");
+  }
+  const inputProviders = getOwnValue(normalized as Record<string, unknown>, "providers");
+  if (!inputProviders || typeof inputProviders !== "object" || Array.isArray(inputProviders)) {
+    throw new ModelsConfigError(filePath, "input must include an own providers map");
+  }
+  const snapshot = readArtifact(filePath);
+  const existing = snapshot.exists
+    ? parseModelsDocument(filePath, snapshot.bytes!.toString("utf8"))
+    : { providers: {} };
+  const merged = { ...existing, ...normalized, providers: inputProviders as ModelsConfig["providers"] };
+  assertValidModelsCandidate(merged);
+  atomicReplace(filePath, serializeModelsDocument(merged), { expectedHash: snapshot.hash });
 }
 
 /** 添加或更新一个 provider */
 export function upsertProvider(providerId: string, config: ProviderConfig): void {
   const modelsConfig = readModelsConfig();
-  modelsConfig.providers[providerId] = config;
+  setOwnValue(modelsConfig.providers as Record<string, ProviderConfig>, providerId, config);
   writeModelsConfig(modelsConfig);
 }
 
 /** 删除一个 provider */
 export function deleteProvider(providerId: string): void {
   const modelsConfig = readModelsConfig();
-  delete modelsConfig.providers[providerId];
+  if (!hasOwnKey(modelsConfig.providers, providerId)) return;
+  deleteOwnKey(modelsConfig.providers, providerId);
   writeModelsConfig(modelsConfig);
 }
 
 /** 列出所有 provider id */
 export function listProviderIds(): string[] {
-  const config = readModelsConfig();
-  return Object.keys(config.providers);
+  const providers = readModelsConfig().providers;
+  return Object.keys(providers).filter((id) => hasOwnKey(providers, id));
 }
 
 /** 获取指定 provider 配置 */
 export function getProvider(providerId: string): ProviderConfig | undefined {
-  const config = readModelsConfig();
-  return config.providers[providerId];
+  return getOwnValue(readModelsConfig().providers as Record<string, ProviderConfig>, providerId);
 }

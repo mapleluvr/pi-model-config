@@ -1,41 +1,13 @@
 # Pi Model Config
 
-> 面向原生 Pi 模型系统和 `nicobailon/pi-subagents` 的交互式配置插件。
+> 面向 Pi 原生模型系统和 `nicobailon/pi-subagents` 的交互式配置插件。
 
 [![pi-package](https://img.shields.io/badge/pi-package-blue)](https://pi.dev/packages)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![author](https://img.shields.io/badge/developed%20with-DeepSeek%20V4%20Pro-orange)](https://deepseek.com)
 
-Pi Model Config 提供 `/model-config` 命令，用交互式终端 UI 管理模型 Provider、Model 定义、Payload 参数、兼容性设置，以及 Subagent overrides。
+Pi Model Config 1.2.0 提供 `/model-config`，用于按字段管理原生 Provider、Model、私有请求 Payload 和 Subagent overrides。插件不会动态注册 Provider；`models.json` 加载和 ModelRegistry 刷新仍由 Pi 负责。
 
 English documentation: [README.md](README.md)
-
-## 功能
-
-### Pi 模型配置
-
-- 管理 Provider：创建、编辑、复制、删除自定义模型 Provider。
-- 自动发现模型：从 OpenAI-compatible `/models` 端点导入模型 ID。
-- 管理 Model：编辑 model ID、显示名称、输入模式、reasoning 支持、context window、max output tokens 和价格字段。
-- 管理兼容性设置：为 Provider 或 Model 设置 Pi 兼容性选项，支持 default、true、false 三态。
-- 管理 payload 参数：为单个模型添加 string、bool、JSON 类型的额外请求体字段。
-- 启动时从 `models.json` 注册已配置的 Providers。
-
-### Subagent 配置
-
-- 在同一个 `/model-config` UI 中配置内置 `pi-subagents` agents。
-- 设置 `model`、`thinking`、`fallbackModels` overrides。
-- 使用可搜索 allowlist 编辑器配置 `tools` overrides。
-- 从母 Agent 当前 active tools 中选择可授权工具。
-- 使用 Pi 工具元数据展示可用工具描述。
-- 通过手动输入添加 `mcp:server/tool` 形式的 MCP direct tools 和 path-like extension tools。
-- 在项目 settings 和用户 settings 之间同步 Subagent overrides。
-
-### 终端交互体验
-
-- 使用 bounded selector 搜索长模型列表。
-- 使用 bounded multi-select 搜索和勾选长工具列表。
-- 长菜单保持在插件 UI 内部滚动，减少对 terminal scrollback 的依赖。
 
 ## 安装
 
@@ -45,151 +17,167 @@ English documentation: [README.md](README.md)
 pi install -l /path/to/pi-model-config
 ```
 
-也可以手动安装：
+也可以手动安装到用户或项目 extension 目录：
 
 ```bash
-# 用户级 extension
 mkdir -p ~/.pi/agent/extensions
 cp -r pi-model-config ~/.pi/agent/extensions/model-config
 
-# 项目级 extension
 mkdir -p .pi/extensions
 cp -r pi-model-config .pi/extensions/model-config
 ```
 
-安装后重新加载 Pi，让 extension 生效。
+安装后重新加载 Pi。配置命令只支持交互式 TUI；在非 TUI 模式调用 `/model-config` 会在读取或修改模型配置之前停止。
 
 ## 使用
 
-在 Pi 中运行：
+运行：
 
 ```text
 /model-config
 ```
 
-主菜单包含这些区域：
+主菜单包含 Provider 和 Model 配置、行为保持不变的 Subagent 配置、事务诊断与恢复，以及使用提示。修改模型后关闭并重新打开 Pi 的 `/model` selector，让 Pi 重新读取 `models.json`。
 
-1. `管理 Providers`：管理 Pi 模型 Provider 和 Model 定义。
-2. `Subagent 配置`：管理 `pi-subagents` overrides。
-3. 诊断当前 `models.json` 文件。
+## 按字段双栏编辑器
 
-## Pi 模型工作流
+已有 Provider 和 Model 会直接打开按字段组织的 two-pane 双栏面板。终端宽度达到 88 列时，左侧显示分类，右侧显示字段；低于 88 列的窄屏 narrow 模式使用前后两个全宽页面显示相同分类和字段。
 
-1. 创建 Provider，填写 provider ID、base URL、API 类型和 API key 设置。
-2. 从 OpenAI-compatible `/models` 端点导入 model IDs，或手动添加 models。
-3. 编辑每个 Model 的 context window、max output tokens、reasoning flag、input modes 和价格字段。
-4. 在模型需要额外 API 请求体字段时添加 payload 参数。
-5. 保存后重新打开 Pi 的 `/model` selector，让 Pi 重新读取更新后的 `models.json`。
+操作方式：
 
-### Payload 参数类型
+- 宽屏：`Tab`、`Left`、`Right` 切换双栏焦点；配置的上下移动绑定选择条目；`Enter` 打开分类或字段。
+- 窄屏：`Enter` 打开分类；`Left` 或配置的 cancel 绑定返回分类；在分类页 cancel 关闭面板。
+- 两种模式：`/` 搜索全部已暴露字段；取消搜索会恢复原分类、字段、焦点和滚动位置。
 
-| 类型 | 输入 | 验证 |
-|------|------|------|
-| `string` | 文本 | 以字符串值保存 |
-| `bool` | `true` 或 `false` 选择 | 以布尔值保存 |
-| `json` | JSON 文本 | 保存前使用 `JSON.parse()` 解析 |
+创建流程仍是最小向导。Provider 只询问 Provider ID、Base URL、API type；Model 只询问 Model ID 并使用 Pi-compatible 默认值。创建完成后会在 General 分类打开面板。
+
+对于自定义非内置 Provider，添加 Model 或启动端点发现之前，必须先在 Provider 面板设置 Provider 级 `api`。内置 Provider 不受此限制。
+
+### 保存语义
+
+简单字段在确认有效值后立即保存。取消不会修改存储；必填字段拒绝空值；可选字段提供明确的清除或 inherited/default 操作。
+
+嵌套值使用单一本地草稿 draft，并提供 `Save and return` 与 `Discard changes`。Headers、Model Overrides、Thinking Level Map、包含 tiers 的 Cost、Compat 和私有 Payload 都遵循此规则。保存嵌套草稿时会比较打开时的完整子树 baseline；若并发修改了同一子树，保存会被阻止，不会覆盖外部更改。
+
+每次原生配置写入都会重新读取当前文档，只更新受管理字段，验证完整候选，并保留未编辑字段和未知字段。
+
+## Provider 字段
+
+| 分类 | 字段与操作 |
+|------|------------|
+| General | Provider ID、显示名称、API Base URL、API type |
+| HTTP and authentication | API Key、Auth Header、Headers |
+| Models | Manage Models、Fetch Models from endpoint、Model Overrides |
+| Compatibility | Compat |
+| Actions | Copy Provider、Delete Provider |
+
+修改 Provider ID 会执行带事务日志的 rename。Model Overrides 只允许文档化的 override 子集：作为 map key 的 Model ID、`name`、`reasoning`、`thinkingLevelMap`、`input`、含可选价格和 `tiers` 的部分 `cost`、`contextWindow`、`maxTokens`、`headers`、`compat`。它不会引入 `id`、`api`、`baseUrl` 或私有 Payload 字段。已存储的不支持路径会保留，只有在预览并明确确认清理后才会删除。
+
+## Model 字段
+
+| 分类 | 字段与操作 |
+|------|------------|
+| General | Model ID、显示名称 |
+| Endpoint overrides | API type、API Base URL、Headers |
+| Capabilities and limits | Reasoning、input types、Context Window、Maximum Output Tokens |
+| Thinking | `thinkingLevelMap`，覆盖 `off`、`minimal`、`low`、`medium`、`high`、`xhigh` 和映射值 `max` |
+| Cost | Input、Output、Cache Read、Cache Write、完整 `cost.tiers` |
+| Compatibility | Compat |
+| Request parameters | 私有 Payload |
+| Actions | Copy Model、Delete Model |
+
+`false` 和 `0` 会按字面显示。缺失值根据字段语义显示 inherited 或 not set。API 密钥字面值会被遮罩，也不会预填到输入框。替换密钥时会先提示 Pi 原生输入在输入期间可见，然后打开空输入框。
+
+## 端点发现
+
+每个 Provider 都会始终显示 `Fetch Models from endpoint`，创建时不会自动执行。发现流程尝试受支持的 `{baseUrl}/models` 和 `{baseUrl}/v1/models`，规范化有效 ID，按端点顺序去重，并在选择模式前显示经过清理的来源和数量摘要。
+
+预览提供：
+
+- `Merge`：保留全部现有 Model 对象，只追加新的 ID。
+- `Replace`：要求第二次确认，替换列表，并删除已移除 Model 对应的私有 identity。
+- `Cancel`：不写入任何文件。
+
+Merge 和 Replace 都会预览新增 identity 与私有 identity 冲突。复用或替换冲突数据需要明确确认；提交前会在共享 coordinator 下重新验证当前文件。
+
+## 原生与私有数据
+
+Pi Model Config 按 Pi 0.80.6 读取 JSONC `models.json`，支持注释和尾逗号。成功保存原生配置时写出规范 JSON。空白、损坏或不满足 schema 的原生配置不会被替换。
+
+私有请求值保存在 `~/.pi/agent/model-config-payloads.json`，或 `<PI_CODING_AGENT_DIR>/model-config-payloads.json`。每个 key 是精确 `[provider, model-id]` 二元 tuple 的 JSON 编码，因此 ID 中的斜杠不会产生歧义。`before_provider_request` 只把当前所选 Model 的对象浅合并到请求中，其他 Model 不受影响。
+
+Payload 与 API 密钥属于敏感数据。诊断、恢复预览、action result、错误、日志和测试输出都不包含这些值。私有存储和事务快照使用私有文件权限。有效旧 `extraPayload` rows 可通过确认后的编辑操作迁移；损坏 rows 必须经过明确的丢弃预览。
+
+## IPC 锁与事务恢复
+
+全部模型和私有 Payload 修改都使用 OS-owned IPC 锁：Windows named pipe、Linux abstract Unix socket，或 macOS loopback identity handshake。owner 退出或崩溃后 endpoint 由操作系统自动释放。系统没有 lock file、stale-owner 删除、force unlock，也不会在持有锁时等待人工输入。
+
+跨文件修改使用 `model-config-transaction.json` 事务日志 journal。Coordinator 在每次写入前确认同一 live endpoint，并通过 atomic replacement 依次处理 journal、原生候选、私有候选和 journal 删除。请求期 Payload 解析使用稳定快照；无法获得一致视图时会 fail closed，不会混合事务两侧。
+
+诊断可以自动完成无歧义恢复。需要选择时采用 two-phase 两阶段流程：在新 IPC 锁下检查并记录快照，释放锁后显示只有非敏感信息以及 `Cancel`、`Retry` 的预览，再重新获取锁；只有 exact hash 和 parse state 仍一致时才应用。Busy、endpoint collision、unsupported adapter、malformed journal 和 blocked native state 都只显示通用非敏感诊断。处理 mismatched journal 时恢复不会覆盖原生配置。
 
 ## Subagent 配置
 
-Subagent 配置写入 Pi settings 的 `subagents.agentOverrides`。
-`model-config` 写入这些 overrides，`pi-subagents` 在运行 subagents 时应用它们。
+1.2.0 不改变 Subagent UI 和行为。插件继续编辑 builtin `context-builder`、`delegate`、`oracle`、`planner`、`researcher`、`reviewer`、`scout`、`worker` 对应的 `subagents.agentOverrides`。
 
-示例：
+每个 override 可配置 `model`、`thinking`、有序 `fallbackModels` 和 `tools`。Tools 支持 agent 默认策略、可搜索 allowlist、母 Agent 当前 active tools、手动 MCP 或 path-like tool ID，以及用 `false` 禁用全部工具。选择 `subagent` 工具仍会要求确认，因为它允许 nested fanout。
 
-```json
-{
-  "subagents": {
-    "agentOverrides": {
-      "reviewer": {
-        "model": "Mapleluv/gpt-5.5",
-        "thinking": "high",
-        "fallbackModels": ["openai/gpt-5-mini"],
-        "tools": ["read", "bash"]
-      }
-    }
-  }
-}
-```
-
-### Settings 作用域
-
-| 菜单入口 | Settings 文件 | 作用域 |
-|----------|---------------|--------|
-| 编辑本项目配置 | `<project>/.pi/settings.json` | 当前项目 |
-| 编辑公共配置 | `~/.pi/agent/settings.json` | 用户默认配置 |
-
-菜单会写入用户选择的 settings 文件。同步操作会在项目文件和用户文件之间复制整个 `subagents.agentOverrides` 子树，并保留 settings 中的其他字段。
-
-### Subagent models 和 thinking
-
-每个内置 Subagent 可以配置：
-
-- `model`：该 Subagent 使用的模型 ID。
-- `thinking`：`off`、`minimal`、`low`、`medium`、`high`、`xhigh` 之一。
-- `fallbackModels`：有序 fallback 列表。UI 可以从可搜索模型选择器追加，也可以接受逗号或换行分隔的手动输入。
-
-内置 agent 名称：
-
-```text
-context-builder, delegate, oracle, planner, researcher, reviewer, scout, worker
-```
-
-### Subagent tools
-
-Tools 设置用于控制 Subagent 运行时可使用的工具集合。
-
-| 模式 | Settings 值 | 运行效果 |
-|------|-------------|----------|
-| Agent 默认工具 | 省略 `tools` 字段 | 使用 agent 配置的工具策略 |
-| Tools allowlist | `"tools": ["read", "bash"]` | 将列表中的工具授权给该 Subagent |
-| 禁用工具 | `"tools": false` | 使用空的显式工具集合运行该 Subagent |
-
-Tools 编辑器从母 Agent 当前 active tools 开始构造候选列表，并使用 Pi 已配置工具元数据补充描述。手动输入路径支持普通工具名、带 `mcp:` 前缀的 MCP direct tools，以及 path-like extension tools。选择 `subagent` 工具时会要求确认，因为它会授予 nested fanout 能力。
+项目设置位于 `<project>/.pi/settings.json`，用户设置位于 `~/.pi/agent/settings.json`。同步操作只复制完整 `subagents.agentOverrides` 子树，并保留其他 settings 字段。
 
 ## 数据文件
 
 | 数据 | 路径 |
 |------|------|
-| 模型 Providers 和 Models | `~/.pi/agent/models.json` |
+| 原生 Providers 和 Models | `~/.pi/agent/models.json` |
+| 私有 Model Payload | `~/.pi/agent/model-config-payloads.json` |
+| 需要恢复时存在的事务日志 | `~/.pi/agent/model-config-transaction.json` |
 | 用户 Subagent overrides | `~/.pi/agent/settings.json` |
 | 项目 Subagent overrides | `<project>/.pi/settings.json` |
 
-API key 可以直接保存在 Provider 配置中，也可以使用 `$OPENAI_API_KEY` 这类环境变量引用。
+设置 `PI_CODING_AGENT_DIR` 后，前三个路径使用该目录。
 
-## 项目结构
+## Package tree
 
 ```text
 pi-model-config/
-├── README.md                     # 英文文档
-├── README-CN.md                  # 中文文档
-├── index.ts                      # Extension 入口和 TUI 流程
-├── config.ts                     # models.json 读写 helper
-├── compat-settings.ts            # 三态兼容性设置
-├── searchable-multi-select.ts    # 可搜索 bounded 多选组件
-├── searchable-select.ts          # 可搜索 bounded 单选组件
-├── subagent-settings.ts          # subagents.agentOverrides 读写 helper
-├── subagent-ui.ts                # Subagent 展示 helper
-├── tool-options.ts               # 母 Agent 工具候选构造和工具列表解析
-├── types.ts                      # 模型配置类型
-├── tests/                        # Node 测试套件
-├── package.json                  # package 元数据
-└── package-lock.json             # 锁定依赖
+|-- index.ts
+|-- atomic-file.ts
+|-- process-lock.ts
+|-- config.ts
+|-- config-validation.ts
+|-- config-actions.ts
+|-- payload-config.ts
+|-- payload-coordinator.ts
+|-- endpoint-models.ts
+|-- settings-panel.ts
+|-- provider-editor.ts
+|-- model-editor.ts
+|-- field-editors.ts
+|-- model-fields.ts
+|-- compat-settings.ts
+|-- own-keys.ts
+|-- searchable-select.ts
+|-- searchable-multi-select.ts
+|-- subagent-settings.ts
+|-- subagent-ui.ts
+|-- tool-options.ts
+|-- types.ts
+|-- README.md
+|-- README-CN.md
+|-- LICENSE
+`-- package.json
 ```
+
+发布包只包含根目录 runtime TypeScript、双语文档、LICENSE 和 package metadata。测试、`.pi-subagents`、journal、临时 agent data 和生成的 archive 都被排除。
 
 ## 开发
 
-运行测试：
-
 ```bash
 npm test
-```
-
-运行语法检查：
-
-```bash
 npm run check
+npm pack --dry-run --json | node --experimental-strip-types tests/fixtures/assert-package.ts
 ```
 
 ## 许可
 
-MIT
+MIT，详见 [LICENSE](LICENSE)。

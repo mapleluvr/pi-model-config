@@ -1,6 +1,6 @@
 {
   "name": "pi-model-config",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Pi 可视化模型配置插件 — 管理自定义 Providers、Models、Payload 参数，支持自动拉取模型列表",
   "type": "module",
   "keywords": [
@@ -11,16 +11,23 @@
   ],
   "author": "使用 DeepSeek V4 Pro 开发",
   "license": "MIT",
+  "files": [
+    "*.ts",
+    "README.md",
+    "README-CN.md",
+    "LICENSE"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/mapleluvr/pi-model-config"
   },
   "scripts": {
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "check": "node --experimental-strip-types --check index.ts && node --experimental-strip-types --check subagent-settings.ts && node --experimental-strip-types --check compat-settings.ts && node --experimental-strip-types --check searchable-select.ts && node --experimental-strip-types --check searchable-multi-select.ts && node --experimental-strip-types --check tool-options.ts && node --experimental-strip-types --check subagent-ui.ts"
+    "check": "node --experimental-strip-types --check index.ts && node --experimental-strip-types --check atomic-file.ts && node --experimental-strip-types --check process-lock.ts && node --experimental-strip-types --check config-validation.ts && node --experimental-strip-types --check config.ts && node --experimental-strip-types --check types.ts && node --experimental-strip-types --check payload-config.ts && node --experimental-strip-types --check payload-coordinator.ts && node --experimental-strip-types --check config-actions.ts && node --experimental-strip-types --check endpoint-models.ts && node --experimental-strip-types --check settings-panel.ts && node --experimental-strip-types --check field-editors.ts && node --experimental-strip-types --check own-keys.ts && node --experimental-strip-types --check model-fields.ts && node --experimental-strip-types --check subagent-settings.ts && node --experimental-strip-types --check compat-settings.ts && node --experimental-strip-types --check searchable-select.ts && node --experimental-strip-types --check searchable-multi-select.ts && node --experimental-strip-types --check tool-options.ts && node --experimental-strip-types --check subagent-ui.ts && node --experimental-strip-types --check model-editor.ts && node --experimental-strip-types --check provider-editor.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-tui": "0.79.1"
+    "@earendil-works/pi-tui": "0.79.1",
+    "jsonc-parser": "^3.3.1"
   },
   "pi": {
     "extensions": [
