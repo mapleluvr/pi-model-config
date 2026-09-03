@@ -120,7 +120,7 @@ Diagnostics can complete unambiguous recovery automatically. Recovery requiring 
 
 The Subagent UI and behavior are unchanged in 1.2.0. It edits `subagents.agentOverrides` for the builtin `context-builder`, `delegate`, `oracle`, `planner`, `researcher`, `reviewer`, `scout`, and `worker` agents.
 
-Each override can set `model`, `thinking`, ordered `fallbackModels`, and `tools`. Tools support the agent default, a searchable allowlist, the parent Agent's current active tools, manual MCP or path-like tool IDs, and `false` to disable all tools. Selecting `subagent` asks for confirmation because it permits nested fanout.
+Each override can set `model`, `thinking` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), ordered `fallbackModels`, and `tools`. Tools support the agent default, a searchable allowlist, the parent Agent's current active tools, manual MCP or path-like tool IDs, and `false` to disable all tools. Selecting `subagent` asks for confirmation because it permits nested fanout.
 
 Project settings live at `<project>/.pi/settings.json`; user settings live at `~/.pi/agent/settings.json`. Sync actions copy only the complete `subagents.agentOverrides` subtree and preserve other settings fields.
 
