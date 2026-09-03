@@ -13,7 +13,7 @@ export const BUILTIN_SUBAGENT_NAMES = [
   "worker",
 ] as const;
 
-export const SUBAGENT_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const SUBAGENT_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export type SubagentSettingsScope = "project" | "user";
 

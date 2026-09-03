@@ -120,7 +120,7 @@ Payload 与 API 密钥属于敏感数据。诊断、恢复预览、action result
 
 1.2.0 不改变 Subagent UI 和行为。插件继续编辑 builtin `context-builder`、`delegate`、`oracle`、`planner`、`researcher`、`reviewer`、`scout`、`worker` 对应的 `subagents.agentOverrides`。
 
-每个 override 可配置 `model`、`thinking`、有序 `fallbackModels` 和 `tools`。Tools 支持 agent 默认策略、可搜索 allowlist、母 Agent 当前 active tools、手动 MCP 或 path-like tool ID，以及用 `false` 禁用全部工具。选择 `subagent` 工具仍会要求确认，因为它允许 nested fanout。
+每个 override 可配置 `model`、`thinking`（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）、有序 `fallbackModels` 和 `tools`。Tools 支持 agent 默认策略、可搜索 allowlist、母 Agent 当前 active tools、手动 MCP 或 path-like tool ID，以及用 `false` 禁用全部工具。选择 `subagent` 工具仍会要求确认，因为它允许 nested fanout。
 
 项目设置位于 `<project>/.pi/settings.json`，用户设置位于 `~/.pi/agent/settings.json`。同步操作只复制完整 `subagents.agentOverrides` 子树，并保留其他 settings 字段。
 
