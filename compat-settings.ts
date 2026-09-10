@@ -1,4 +1,5 @@
 import { cloneOwnJsonData, deleteOwnKey, getOwnValue, setOwnValue } from "./own-keys.ts";
+import { API_TYPE_IDS } from "./types.ts";
 
 export type CompatBooleanChoice = "default" | "false" | "true";
 
@@ -124,6 +125,9 @@ export interface LegacySessionAffinityPlan {
 
 export const LEGACY_SESSION_AFFINITY_KEY = "sendSessionIdHeader";
 
+/** Only these two APIs read session affinity; the other Responses variants and pi-messages do not. */
+const OPENAI_AFFINITY_APIS = new Set(["openai-completions", "openai-responses"]);
+
 export function planLegacySessionAffinityMigration(
   compat: Record<string, unknown>,
   api?: string,
@@ -136,11 +140,17 @@ export function planLegacySessionAffinityMigration(
       reason: `Pi 0.80.7 起 models.json 已移除 ${LEGACY_SESSION_AFFINITY_KEY}；当前值等同默认行为，可安全删除。`,
     };
   }
-  if (api === "openai-completions" || api === "openai-responses") {
+  if (api !== undefined && OPENAI_AFFINITY_APIS.has(api)) {
     return {
       legacyValue,
       setSessionAffinityFormat: "openai-nosession",
       reason: `${LEGACY_SESSION_AFFINITY_KEY}: false 原本用于省略 session_id 头部，等价于 sessionAffinityFormat = "openai-nosession"。`,
+    };
+  }
+  if (api !== undefined && API_TYPE_IDS.includes(api)) {
+    return {
+      legacyValue,
+      reason: `该 Provider/Model 的 API（${api}）不读取 ${LEGACY_SESSION_AFFINITY_KEY}；直接删除旧字段。`,
     };
   }
   return {

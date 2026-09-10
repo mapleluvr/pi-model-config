@@ -40,13 +40,23 @@ test("external CLI agents offer cleanup only, with every Pi-native row marked ig
       [],
       `no Pi-native override editor may be offered: ${labels.join(" | ")}`,
     );
-    for (const row of ["当前 model:", "当前 thinking:", "当前 fallbackModels:", "当前 tools:"]) {
+    for (const row of ["当前 thinking:", "当前 fallbackModels:", "当前 tools:"]) {
       assert.ok(
         labels.some((label) => label.startsWith(row) && label.includes("（外部 CLI runner 忽略）")),
         `${row} must be shown as ignored`,
       );
     }
-    assert.ok(labels.includes("清除 model/thinking/fallbackModels"), "stale keys must stay clearable");
+    assert.ok(
+      labels.some(
+        (label) => label.startsWith("当前 model:")
+          && label.includes("（外部 CLI runner 不支持；残留会使运行被拒绝）"),
+      ),
+      "a stale model must be flagged as run-blocking, not merely ignored",
+    );
+    assert.ok(
+      labels.some((label) => label.startsWith("清除 model/thinking/fallbackModels（残留会被拒绝）")),
+      "the cleanup action must point at the run-blocking key",
+    );
     assert.ok(labels.includes("删除整个 agent override"));
   } finally {
     fs.rmSync(path.dirname(settingsPath), { recursive: true, force: true });

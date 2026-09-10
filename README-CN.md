@@ -120,7 +120,7 @@ Payload 与 API 密钥属于敏感数据。诊断、恢复预览、action result
 
 ## Subagent 配置
 
-Subagent 编辑器写入 `subagents.agentOverrides`，覆盖 pi-subagents 0.63.0 的内置 agent（`advisor`、`delegate`、`oracle`、`researcher`、`reviewer`、`scout`、`worker`，以及外部 CLI runner `claude-code`、`claude-code-writer`、`codex-exec`、`codex-exec-writer`、`cursor-agent`、`cursor-agent-writer`），并额外列出当前文件中已存储的 agent 名，保证历史 override 仍可编辑。外部 CLI runner 会忽略全部 Pi 原生子 agent 选项——pi-subagents 的 CLI 适配器完全不读取 `model`，其 agent 管理也直接拒绝这些键——因此这些 agent 只显示带“忽略”标记的只读行与清理动作，编辑器不再提供 `model`、`thinking`、`fallbackModels`、`tools`。
+Subagent 编辑器写入 `subagents.agentOverrides`，覆盖 pi-subagents 0.63.0 的内置 agent（`advisor`、`delegate`、`oracle`、`researcher`、`reviewer`、`scout`、`worker`，以及外部 CLI runner `claude-code`、`claude-code-writer`、`codex-exec`、`codex-exec-writer`、`cursor-agent`、`cursor-agent-writer`），并额外列出当前文件中已存储的 agent 名，保证历史 override 仍可编辑。外部 CLI runner 不接受任何 Pi 原生子 agent 选项：pi-subagents 的 CLI 适配器完全不读取 `model`，残留的 `model` override 会让单 agent 运行直接失败（`does not support: model override`），而 `thinking`/`fallbackModels`/`tools` 会被丢弃。因此这些 agent 只显示带明确标注的只读行（`model` 行标注“残留会使运行被拒绝”），编辑器不再提供 `model`/`thinking`/`fallbackModels`/`tools` 编辑入口，并用 `清除 model/thinking/fallbackModels（残留会被拒绝）` 移除残留键。
 
 每个 override 可配置 `model`、`thinking`（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）、有序 `fallbackModels` 和 `tools`。Tools 支持 agent 默认策略、可搜索 allowlist、母 Agent 当前 active tools、手动 MCP 或 path-like tool ID，以及用 `false` 禁用全部工具。选择 `subagent` 工具仍会要求确认，因为它允许 nested fanout。
 

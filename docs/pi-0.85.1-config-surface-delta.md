@@ -261,7 +261,7 @@ pi 0.85.1 用 `proper-lockfile` 加锁并"读-改-写"合并（`settings-manager
 - `thinkingTokenBudgetField`、`supportsThinkingTokenBudget`：引擎会读取但 models.json schema 未声明（靠额外属性透传）。本次**未**加入 UI，避免超出报告范围；需要时可作为后续增量。
   （`zaiToolStream` 也属此类，但它在改动前就已存在于 UI，不是本次新增。）
 - 版本号仍为 **1.2.0**（本次不是发布动作；`release-docs.test.ts` 对版本与 README 锚点的断言保持通过）。
-- Subagent 外部 CLI runner 字段策略（已根据 §9.1 修正并验证）：pi-subagents 对这类 runner 不提供任何 Pi 原生子代理选项，因此只保留只读展示 + 清理动作，不再提供 `设置 model`。
+- Subagent 外部 CLI runner 字段策略（round 2 已修正，见 §9.3）：pi-subagents 不接受任何 Pi 原生子代理选项——`model` 残留会使单 agent 运行被拒绝，`thinking`/`fallbackModels`/`tools` 被丢弃；插件只提供标注过的只读行 + 清理动作，不再提供 `设置 model`。
 
 ---
 
@@ -273,7 +273,7 @@ pi 0.85.1 用 `proper-lockfile` 加锁并"读-改-写"合并（`settings-manager
 
 | # | 评审项 | 复核证据 | 处置 |
 | --- | ------- | --------- | ------ |
-| 1 | 外部 CLI runner 仍提供 `设置 model`，而 pi-subagents 忽略该键 | `src/runs/shared/external-cli-runner.ts` / `codex-exec-adapter.ts` 全文无 `model` 引用；`agents/agent-management.ts:643` 直接拒绝（`does not support Pi-only fields: model`）；`runs/background/async-execution.ts:826-832` 对 step 级 model 抛错 | `index.ts`：外部 runner 菜单删除 `设置 model`，四条只读行统一加“（外部 CLI runner 忽略）”标注；README/README-CN 同步 |
+| 1 | 外部 CLI runner 仍提供 `设置 model`，而 pi-subagents 忽略该键 | `src/runs/shared/external-cli-runner.ts` / `codex-exec-adapter.ts` 全文无 `model` 引用；`agents/agent-management.ts:643` 直接拒绝（`does not support Pi-only fields: model`）；`runs/background/async-execution.ts:826-832` 对 step 级 model 抛错；`async-execution.ts:1569` 在单 agent 路径直接拒绝（已由 pi-subagents 自身测试钉住：`test/integration/single-execution.test.ts:1744/1767/1788`） | `index.ts`：外部 runner 菜单删除 `设置 model`，四条只读行改为按行标注：`model` 行“（外部 CLI runner 不支持；残留会使运行被拒绝）”，`thinking`/`fallbackModels`/`tools` 行“（外部 CLI runner 忽略）”；清理动作改为 `清除 model/thinking/fallbackModels（残留会被拒绝）`；README/README-CN 同步 |
 | 2 | 新增的 settings.json 安全路径与 external-CLI 裁剪无测试 | `tests/` 中无 BOM/CAS 相关断言 | 新增 `tests/subagent-settings-write.test.ts`（BOM 读写、并发写重放、超限抛出且不落盘）、`tests/subagent-menu.test.ts`（外部 runner 无编辑动作 + 忽略标注；原生 agent 菜单完整）、`tests/config.test.ts` 增 models.json BOM 往返；为此在 `subagent-settings.ts` 增加 `SettingsWriteHooks` 测试缝（与 `atomic-file.ts` 既有测试缝同风格） |
 | 3 | 注释夸大了 CAS 保证 | `atomicReplace` 的哈希检查与 `renameSync` 之间存在窗口 | 注释与 §5.2 改为精确表述（检测-重试），并记明未引入 proper-lockfile 的原因 |
 | 4 | 漏了 `supportsExplicitPromptCacheMode`（Responses 读取、schema 未声明） | `pi-ai/dist/api/openai-responses.js:60/65/70` 有读取；`dist/core/model-config.js` 无声明 | 加入 `COMPAT_BOOLEAN_FIELDS`/`BOOLEAN_COMPAT_FIELDS` 并补正/负例 |
@@ -289,3 +289,31 @@ pi 0.85.1 用 `proper-lockfile` 加锁并"读-改-写"合并（`settings-manager
 - 用 `process-lock.ts` 包裹 settings.json 读改写：pi 的 settings-manager 不识别该 IPC 锁，无法消除与 pi 的竞态，只会增加持锁复杂度（并违反“不在持锁时等待输入”的既有不变量）。
 - 将 `dispatchCompatFieldEdit` 改为表驱动：纯风格收益，改动面大于收益；本次只消除顺序重复（§9.1-5）。
 - 评审期间外部 auto-format（80 列折行 + 补尾逗号）重写了 17 个文件（+4970/−1523，纯格式）：已整体 `git checkout` 丢弃，不让与仓库风格不符的无关变更进入提交。
+
+---
+
+## 10. 独立评审（round 2，对象 `304c3bd`）与处置
+
+结论：must-fix 2（测试空缺）**确认为已解决**；must-fix 1 **重新打开**——我 round 1 的“外部 runner 忽略 model”结论不完整，实际是**运行被拒绝**。另发现 1 个 P2（迁移提示措辞）。
+
+### 10.1 重新打开的 must-fix 1（已修正）
+
+完整调用链（已逐行复核）：
+
+1. `agents/agents.ts:1383-1386`：settings 里的 `agentOverrides.<name>.model` 会被应用，并 **删除 `modelSource`**。
+2. `runs/foreground/subagent-executor.ts:3212-3226`：`externalRunnerWithoutExplicitModel` 因 `modelSource` 被删而变为 false → `modelOverride = a.model`。
+3. `runs/background/async-execution.ts:1569`：单 agent 路径在 `params.modelOverride !== undefined` 时直接返回错误 `Agent '<name>' uses runner.type='external-cli' and does not support: model override.`
+4. pi-subagents 自身测试钉住该行为：`test/integration/single-execution.test.ts:1744`（调用级）、`:1767`（与继承默认值不同）、`:1788`（无 provenance）、`test/unit/async-execution.test.ts:191-198`（step 级）。
+
+区别对待（同源复核）：`thinking`（`async-execution.ts:1571` 只检查 `params.thinkingOverride`，agent 级 thinking 不进入该参数）、`fallbackModels`（`preflight.ts:336` 直接置空）、`tools`（外部 CLI runner 不执行 Pi 工具）均是被**丢弃**，不会导致拒绝。
+
+处置：`index.ts` 把 `model` 行标注为“（外部 CLI runner 不支持；残留会使运行被拒绝）”，其余三行保留“（外部 CLI runner 忽略）”；外部 runner 的清理动作改为 `清除 model/thinking/fallbackModels（残留会被拒绝）`（handler 仍按前缀匹配，行为不变）；README/README-CN、`tests/subagent-menu.test.ts` 同步钉住新措辞。
+
+### 10.2 P2：已知非 OpenAI API 的迁移提示自相矛盾（已修正）
+
+`compat-settings.ts` 原实现对“已知但非 OpenAI 系”的 API（如 `anthropic-messages`）也输出“无法确定该 Provider/Model 的 API（anthropic-messages）”。现拆为三支：OpenAI 两族 → 映射为 `openai-nosession`；**已知** API（`API_TYPE_IDS`）→ “该 API（X）不读取该字段；直接删除旧字段”；未设置/未知 → 保留“无法确定…”并说明会丢失 `openai-nosession` 意图。另已用 `rg` 复核：`azure-openai-responses.js`、`openai-codex-responses.js`、`pi-messages.js` 均无 `sessionAffinity` 引用，故“只有 `openai-completions`/`openai-responses` 读取该字段”的判定成立。测试：`tests/compat-settings.test.ts` 新增已知 API 与未知 API 的措辞断言，并验证区分不会误判。
+
+### 10.3 round 2 其余结论（无需动作）
+
+- 测试空缺项：评审确认新测试驱动的是生产函数（`updateSubagentAgentOverride`/`editSubagentAgentOverride`/`readModelsConfig`），断言可失败，`SettingsWriteHooks` 为可选参数（生产调用方均传 3 参），不会影响生产行为。
+- CAS 注释、`supportsExplicitPromptCacheMode`、compat label 前置条件、`COMPAT_STRING_FIELD_ORDER`、`thinkingFormat` 断言五项均被确认。

@@ -93,6 +93,13 @@ test("plans the removed sendSessionIdHeader migration per API family", () => {
   const anthropic = planLegacySessionAffinityMigration({ sendSessionIdHeader: false }, "anthropic-messages");
   assert.ok(anthropic, "a stored false value must stay removable on other APIs");
   assert.equal(anthropic.setSessionAffinityFormat, undefined);
+  assert.match(anthropic.reason, /该 Provider\/Model 的 API（anthropic-messages）不读取/, "a known API must be named as known");
+  assert.doesNotMatch(anthropic.reason, /无法确定/, "a known API must not read as undetermined");
+
+  const unknown = planLegacySessionAffinityMigration({ sendSessionIdHeader: false }, undefined);
+  assert.ok(unknown);
+  assert.match(unknown.reason, /无法确定该 Provider\/Model 的 API/, "only an absent/unknown API is undetermined");
+  assert.equal(unknown.setSessionAffinityFormat, undefined);
 });
 
 test("sets, replaces, and clears compat object fields", () => {

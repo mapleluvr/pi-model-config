@@ -412,22 +412,24 @@ export async function editSubagentAgentOverride(
     const overrides = readSubagentAgentOverrides(settingsPath);
     const current = overrides[agentName] ?? {};
     const ignoredNote = externalCli ? "（外部 CLI runner 忽略）" : "";
-    const currentModel = `当前 model: ${current.model || "(默认 Pi 当前模型)"}${ignoredNote}`;
+    const rejectedNote = "（外部 CLI runner 不支持；残留会使运行被拒绝）";
+    const currentModel = `当前 model: ${current.model || "(默认 Pi 当前模型)"}${externalCli ? rejectedNote : ""}`;
     const currentThinking = `当前 thinking: ${current.thinking || "(未设置)"}${ignoredNote}`;
     const currentFallback = `当前 fallbackModels: ${formatFallbackModels(current.fallbackModels)}${ignoredNote}`;
     const currentTools = `当前 tools: ${formatToolsOverride(current.tools)}${ignoredNote}`;
+    const cleanupModelFields = "清除 model/thinking/fallbackModels";
     const cleanupActions = [
-      "清除 model/thinking/fallbackModels",
+      cleanupModelFields,
       "清除 tools override",
       "删除整个 agent override",
       "返回",
     ];
-    // pi-subagents ignores every Pi-native child option for external CLI runners: the CLI adapters
-    // never read a model (runs/shared/external-cli-runner.ts), and its agent management rejects
-    // these keys outright (agents/agent-management.ts: "does not support Pi-only fields"). Writing
-    // them would be a silent no-op, so only cleanup stays available.
+    // pi-subagents' CLI adapters never read a model, and its single-agent path rejects a run whose
+    // external agent still carries one ("does not support: model override",
+    // runs/background/async-execution.ts:1569); thinking/fallbackModels/tools are silently dropped.
+    // Writing them would be a no-op at best, so only cleanup stays available.
     const actions = externalCli
-      ? [currentModel, currentThinking, currentFallback, currentTools, ...cleanupActions]
+      ? [currentModel, currentThinking, currentFallback, currentTools, `${cleanupModelFields}（残留会被拒绝）`, "清除 tools override", "删除整个 agent override", "返回"]
       : [
         currentModel,
         currentThinking,
