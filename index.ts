@@ -401,7 +401,7 @@ async function editSubagentToolsOverride(
   }
 }
 
-async function editSubagentAgentOverride(
+export async function editSubagentAgentOverride(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   settingsPath: string,
@@ -411,19 +411,23 @@ async function editSubagentAgentOverride(
   while (true) {
     const overrides = readSubagentAgentOverrides(settingsPath);
     const current = overrides[agentName] ?? {};
-    const currentModel = `当前 model: ${current.model || "(默认 Pi 当前模型)"}`;
-    const currentThinking = `当前 thinking: ${current.thinking || "(未设置)"}${externalCli ? "（外部 CLI runner 忽略）" : ""}`;
-    const currentFallback = `当前 fallbackModels: ${formatFallbackModels(current.fallbackModels)}`;
-    const currentTools = `当前 tools: ${formatToolsOverride(current.tools)}`;
+    const ignoredNote = externalCli ? "（外部 CLI runner 忽略）" : "";
+    const currentModel = `当前 model: ${current.model || "(默认 Pi 当前模型)"}${ignoredNote}`;
+    const currentThinking = `当前 thinking: ${current.thinking || "(未设置)"}${ignoredNote}`;
+    const currentFallback = `当前 fallbackModels: ${formatFallbackModels(current.fallbackModels)}${ignoredNote}`;
+    const currentTools = `当前 tools: ${formatToolsOverride(current.tools)}${ignoredNote}`;
     const cleanupActions = [
       "清除 model/thinking/fallbackModels",
       "清除 tools override",
       "删除整个 agent override",
       "返回",
     ];
-    // External CLI runners drop Pi-native child options, so only model plus cleanup is offered.
+    // pi-subagents ignores every Pi-native child option for external CLI runners: the CLI adapters
+    // never read a model (runs/shared/external-cli-runner.ts), and its agent management rejects
+    // these keys outright (agents/agent-management.ts: "does not support Pi-only fields"). Writing
+    // them would be a silent no-op, so only cleanup stays available.
     const actions = externalCli
-      ? [currentModel, currentThinking, currentFallback, currentTools, "设置 model", ...cleanupActions]
+      ? [currentModel, currentThinking, currentFallback, currentTools, ...cleanupActions]
       : [
         currentModel,
         currentThinking,

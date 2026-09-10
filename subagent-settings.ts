@@ -142,12 +142,26 @@ function readJsonObject(filePath: string): Record<string, unknown> {
 
 class SettingsFileChangedError extends Error {}
 
+export interface SettingsWriteHooks {
+  /**
+   * Test seam: runs after the baseline hash is captured and before the content check, so a test
+   * can land a concurrent write deterministically. `atomic-file.ts` uses the same pattern.
+   */
+  beforeHashCheck?: () => void;
+}
+
 /**
- * Read-modify-write with the guarantees Pi itself applies to settings.json: the file is
- * replaced atomically, and a concurrent writer is detected by content hash, then retried.
- * Pi holds its own lock, so an interleaved write must never be silently overwritten.
+ * Read-modify-write with settings.json hygiene: atomic replacement, a parse of the current bytes
+ * on every attempt, and a content-hash check that turns a concurrent writer into a retry instead
+ * of an overwrite. The check runs immediately before the rename, so a writer landing inside that
+ * window can still be replaced; closing it needs Pi's own proper-lockfile lock, which this
+ * extension does not hold.
  */
-function updateSettingsFile(filePath: string, mutate: (settings: Record<string, unknown>) => void): void {
+function updateSettingsFile(
+  filePath: string,
+  mutate: (settings: Record<string, unknown>) => void,
+  hooks: SettingsWriteHooks = {},
+): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   for (let attempt = 0; attempt < SETTINGS_WRITE_ATTEMPTS; attempt += 1) {
     const snapshot = readArtifact(filePath);
@@ -155,6 +169,7 @@ function updateSettingsFile(filePath: string, mutate: (settings: Record<string, 
     const before = JSON.stringify(settings);
     mutate(settings);
     if (JSON.stringify(settings) === before) return;
+    hooks.beforeHashCheck?.();
     try {
       atomicReplace(filePath, Buffer.from(JSON.stringify(settings, null, 2), "utf-8"), {
         beforeRename: () => {
@@ -249,6 +264,7 @@ export function updateSubagentAgentOverride(
   settingsPath: string,
   agentName: string,
   changes: SubagentOverrideChanges,
+  hooks: SettingsWriteHooks = {},
 ): void {
   updateSettingsFile(settingsPath, (settings) => {
     const overrides = ensureSettingsOverrides(settings);
@@ -270,7 +286,7 @@ export function updateSubagentAgentOverride(
       overrides[agentName] = existing;
     }
     removeEmptyAgentOverride(overrides, agentName);
-  });
+  }, hooks);
 }
 
 export function deleteSubagentAgentOverride(settingsPath: string, agentName: string): void {

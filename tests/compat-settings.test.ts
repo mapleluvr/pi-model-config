@@ -46,6 +46,7 @@ test("declares every Pi 0.85.1 boolean, object, string, number, and thinking-for
     "supportsAdditionalTools",
     "supportsToolSearch",
     "supportsMaxOutputTokens",
+    "supportsExplicitPromptCacheMode",
     "supportsStrictTools",
     "supportsMidConvoEffort",
     "supportsToolReferences",
@@ -62,7 +63,11 @@ test("declares every Pi 0.85.1 boolean, object, string, number, and thinking-for
     COMPAT_STRING_FIELDS.map((field) => field.key),
     ["maxTokensField", "cacheControlFormat", "deferredToolsMode", "sessionAffinityFormat"],
   );
-  assert.deepEqual(COMPAT_THINKING_FORMAT_FIELD.values, [...THINKING_FORMATS]);
+  // Engine-read but schema-undeclared, so the literal list is pinned here rather than derived.
+  assert.deepEqual(COMPAT_THINKING_FORMAT_FIELD.values, [
+    "openai", "openrouter", "deepseek", "together", "baseten", "zai", "qwen",
+    "chat-template", "qwen-chat-template", "string-thinking", "ant-ling",
+  ]);
   assert.deepEqual(COMPAT_NUMBER_FIELDS.map((field) => field.key), ["vllmPriority"]);
   for (const format of ["zai", "chat-template", "string-thinking", "ant-ling", "baseten"]) {
     assert.ok(THINKING_FORMATS.includes(format as (typeof THINKING_FORMATS)[number]), `${format} must be offered`);

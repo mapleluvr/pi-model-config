@@ -235,6 +235,9 @@ export async function editStringMapDraft(
   }
 }
 
+/** `thinkingFormat` carries its own enum list, so the editable string fields are ordered once here. */
+const COMPAT_STRING_FIELD_ORDER = [COMPAT_THINKING_FORMAT_FIELD, ...COMPAT_STRING_FIELDS];
+
 function compatBooleanLabel(draft: Record<string, unknown>, key: string, label: string): string {
   const value = getOwnValue(draft, key);
   const state = value === true ? "true" : value === false ? "false" : "默认";
@@ -346,7 +349,7 @@ export async function editCompatDraft(
   api?: string,
 ): Promise<DraftEditorResult<Record<string, unknown>>> {
   let draft = cloneRecord(existing);
-  const stringFields = [COMPAT_THINKING_FORMAT_FIELD, ...COMPAT_STRING_FIELDS];
+  const stringFields = COMPAT_STRING_FIELD_ORDER;
   while (true) {
     const booleanLabels = COMPAT_BOOLEAN_FIELDS.map((field) => compatBooleanLabel(draft, field.key, field.label));
     const stringLabels = stringFields.map((field) => `${field.label} = ${formatSettingValue(getOwnValue(draft, field.key))}`);
@@ -398,7 +401,7 @@ async function dispatchCompatFieldEdit(
   draft: Record<string, unknown>,
   dispatch: CompatFieldDispatch,
 ): Promise<CompatFieldEdit> {
-  const stringFields = [COMPAT_THINKING_FORMAT_FIELD, ...COMPAT_STRING_FIELDS];
+  const stringFields = COMPAT_STRING_FIELD_ORDER;
   const booleanIndex = dispatch.booleanLabels.indexOf(dispatch.choice);
   if (booleanIndex >= 0) {
     return await editCompatBooleanField(ctx, title, draft, COMPAT_BOOLEAN_FIELDS[booleanIndex]!);

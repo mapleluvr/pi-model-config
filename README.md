@@ -120,7 +120,7 @@ Diagnostics can complete unambiguous recovery automatically. Recovery requiring 
 
 ## Subagent configuration
 
-The Subagent editor writes `subagents.agentOverrides` for the pi-subagents 0.63.0 builtin agents (`advisor`, `delegate`, `oracle`, `researcher`, `reviewer`, `scout`, `worker`, and the external CLI runners `claude-code`, `claude-code-writer`, `codex-exec`, `codex-exec-writer`, `cursor-agent`, `cursor-agent-writer`), plus every agent name already stored in the current file so earlier overrides stay reachable. External CLI runners ignore Pi-native child options, so those agents offer `model` and the cleanup actions only.
+The Subagent editor writes `subagents.agentOverrides` for the pi-subagents 0.63.0 builtin agents (`advisor`, `delegate`, `oracle`, `researcher`, `reviewer`, `scout`, `worker`, and the external CLI runners `claude-code`, `claude-code-writer`, `codex-exec`, `codex-exec-writer`, `cursor-agent`, `cursor-agent-writer`), plus every agent name already stored in the current file so earlier overrides stay reachable. External CLI runners ignore every Pi-native child option — pi-subagents' CLI adapters never read a `model`, and its agent management rejects these keys outright — so those agents show read-only rows marked as ignored plus the cleanup actions, and the editor does not offer `model`, `thinking`, `fallbackModels`, or `tools` for them.
 
 Each override can set `model`, `thinking` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), ordered `fallbackModels`, and `tools`. Tools support the agent default, a searchable allowlist, the parent Agent's current active tools, manual MCP or path-like tool IDs, and `false` to disable all tools. Selecting `subagent` asks for confirmation because it permits nested fanout.
 

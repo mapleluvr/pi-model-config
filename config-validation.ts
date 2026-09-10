@@ -78,6 +78,9 @@ const BOOLEAN_COMPAT_FIELDS = [
   "supportsAdditionalTools",
   "supportsToolSearch",
   "supportsMaxOutputTokens",
+  // Read by pi-ai's OpenAI Responses builder, but not declared in the models.json schema,
+  // so the value only reaches the request through extra-property pass-through.
+  "supportsExplicitPromptCacheMode",
   "supportsEagerToolInputStreaming",
   "sendSessionAffinityHeaders",
   "supportsCacheControlOnTools",

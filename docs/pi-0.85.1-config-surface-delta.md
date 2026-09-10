@@ -188,7 +188,11 @@ pi 解析 `models.json`/`settings.json` 前都 `stripBom`（`dist/core/model-con
 
 ### 5.2 settings.json 并发写
 
-pi 0.85.1 用 `proper-lockfile` 加锁并"读-改-写"合并（`settings-manager.js:376-391`）；插件 `subagent-settings.ts:writeJsonObject` 是裸 `fs.writeFileSync`。用户按 `/model` `Ctrl+S` 保存默认模型与插件保存 subagent override 并发时会丢更新。建议复用插件已有 `atomic-file.ts`/`process-lock.ts` 能力（与 `models.json` 同级的安全级别）。
+pi 0.85.1 用 `proper-lockfile` 加锁并"读-改-写"合并（`settings-manager.js:376-391`）；插件 `subagent-settings.ts` 原为裸 `fs.writeFileSync`。用户按 `/model` `Ctrl+S` 保存默认模型与插件保存 subagent override 并发时会丢更新。
+
+**已实施**：settings.json 改为「每次重读 + 原子替换 + 内容哈希 CAS 重试」，上限 `SETTINGS_WRITE_ATTEMPTS` 次，超限抛出 `concurrent modifications detected` 并保留并发写入者的字节（测试见 §9.2）。
+
+**未实施（已知残差）**：哈希检查在 `beforeRename` 内、紧邻 `renameSync`，因此“检查通过后、rename 前”落地的并发写仍会被覆盖；要彻底关闭它必须持有 pi 自己的 `proper-lockfile` 锁（本插件不持有），引入 `process-lock.ts` 对 pi 的 settings-manager 无效（它不识别该 IPC 锁），故不引入。代码注释已按此精确表述，不再声称“绝不覆盖”。
 
 ### 5.3 pi-tui 版本错位（见 §3.8）
 
@@ -232,27 +236,56 @@ pi 0.85.1 用 `proper-lockfile` 加锁并"读-改-写"合并（`settings-manager
 | ------ | ------ |
 | `package.json` / `package-lock.json` | `@earendil-works/pi-tui` 从 `dependencies@0.79.1` 改为 `peerDependencies:"*"` + `devDependencies@0.85.1`；新增 `@earendil-works/pi-coding-agent` peer；本地测试运行时已对齐 0.85.1 |
 | `types.ts` | `ProviderConfig.oauth`；`ModelConfig/ModelOverrideConfig.samplingParams`；`CompatConfig` 补 §2.3 全部新字段；`API_TYPES` +3 并新增 `API_TYPE_IDS` 单一来源；新增 `JsonValue`、`OAUTH_PROVIDER_TYPES` |
-| `config-validation.ts` | `BUILT_IN_PROVIDERS_PI_0_85_1`（+5 内置 Provider）；`baseten`；新增布尔/枚举/数值/对象校验；`oauth`、`samplingParams` 校验；放开 `$var: thinking.budget` |
-| `compat-settings.ts` | 布尔字段按 API 家族重排并标注；新增 `COMPAT_STRING_FIELDS`、`COMPAT_NUMBER_FIELDS`、`chatTemplateArgs`；`sendSessionIdHeader` 迁移计划与执行函数 |
+| `config-validation.ts` | `BUILT_IN_PROVIDERS_PI_0_85_1`（+5 内置 Provider）；`baseten`；新增布尔/枚举/数值/对象校验（含 `supportsExplicitPromptCacheMode`）；`oauth`、`samplingParams` 校验；放开 `$var: thinking.budget` |
+| `compat-settings.ts` | 布尔字段按 API 家族重排并标注；新增 `COMPAT_STRING_FIELDS`、`COMPAT_NUMBER_FIELDS`、`chatTemplateArgs`；`sendSessionIdHeader` 迁移计划与执行函数；补 `supportsExplicitPromptCacheMode`（引擎读取、schema 未声明）；为 `sessionAffinityFormat`/`chatTemplateArgs` 标注生效前置条件 |
 | `field-editors.ts` | compat 编辑器支持数值字段、`sessionAffinityFormat`/`deferredToolsMode`/`chatTemplateArgs`，并在检测到遗留键时提供预览迁移；拆分为按组小函数 |
 | `model-editor.ts` | API 列表改为 `API_TYPE_IDS`；override 白名单加 `samplingParams`；Model/Override 新增 `samplingParams` 编辑入口；兼容性编辑器传入有效 API |
 | `provider-editor.ts` | API 列表单一来源；新增 `oauth` 字段与处理；compat/override 编辑器传入 Provider API |
 | `model-fields.ts` | `ModelSubtreeKey` 加 `samplingParams`（复用 `saveModelSubtree` 的乐观基线机制） |
-| `subagent-settings.ts` | thinking 补 `max`；内置 agent 名单对齐 pi-subagents 0.63.0；新增 `listSubagentAgentNames`/`isExternalCliSubagent`；BOM 剥离；settings.json 改为原子写 + 哈希 CAS 重试 |
-| `index.ts` | Subagent 列表用“内置 + 已存储 override 名”并集；外部 CLI runner agent 只提供 `model` 与清理动作 |
+| `subagent-settings.ts` | thinking 补 `max`；内置 agent 名单对齐 pi-subagents 0.63.0；新增 `listSubagentAgentNames`/`isExternalCliSubagent`；BOM 剥离；settings.json 改为原子写 + 哈希 CAS 重试（含 `SettingsWriteHooks` 测试缝） |
+| `index.ts` | Subagent 列表用“内置 + 已存储 override 名”并集；外部 CLI runner agent 只保留带“忽略”标记的只读行 + 清理动作（不再提供 `设置 model`，见 §9.1） |
 | `config.ts` | `parseModelsDocument` 剥离 BOM（与 pi 一致） |
 | `README.md` / `README-CN.md` | 基线改 Pi 0.85.1，补 `oauth`/`samplingParams`/新 compat 分组与迁移说明 |
-| 测试 | 更新内置 Provider 名单与新旧目录断言、LICENSE 断言改为 CRLF 无关；新增 compat 迁移与新字段正/负例 |
+| 测试 | 更新内置 Provider 名单与新旧目录断言、LICENSE 断言改为 CRLF 无关；新增 compat 迁移与新字段正/负例；新增 settings.json BOM/CAS 重试/超限、external-CLI 菜单裁剪、models.json BOM、subagent agent 名单用例 |
 
 ### 8.2 验证证据
 
-- `npm test`：**292 tests / 292 pass / 0 fail**（改动前基线为 289 tests / 288 pass / 1 fail，唯一失败是 `release-docs.test.ts` 对 LICENSE 的 CRLF 断言，已改为先归一化换行）。
+- `npm test`：**307 tests / 307 pass / 0 fail**（改动前基线为 289 tests / 288 pass / 1 fail，唯一失败是 `release-docs.test.ts` 对 LICENSE 的 CRLF 断言，已改为先归一化换行）。
 - `npm run check`：全部根模块 `node --experimental-strip-types --check` 通过。
 - 真机探针（`ModelConfig.load()`）：用插件自己的 `serializeModelsDocument` 写出包含 `oauth: "radius"`、`samplingParams`、全部新 compat 字段、`thinkingFormat: "baseten"`、`chatTemplateArgs.$var = thinking.budget` 以及遗留 `sendSessionIdHeader` 的 models.json，pi 0.85.1 返回 `getError() === undefined`，且插件的 JSONC 读取器往返字节一致。
 - 本地测试运行时：`node_modules/@earendil-works/pi-tui` 已由 `npm install` 升级到 **0.85.1**，与宿主相同。
+- 独立 reviewer（`Mapleluv/deepseek-flash:max`）审查 `7750e95`：结论 `needs-fix`、无 blocker；其结论逐条复核结果见 §9。
 
 ### 8.3 有意不做（保留现状，供确认）
 
-- `zaiToolStream`、`thinkingTokenBudgetField`、`supportsThinkingTokenBudget`：引擎会读取但 models.json schema 未声明（靠额外属性透传）。本次**未**加入 UI，避免超出报告范围；需要时可作为后续增量。
+- `thinkingTokenBudgetField`、`supportsThinkingTokenBudget`：引擎会读取但 models.json schema 未声明（靠额外属性透传）。本次**未**加入 UI，避免超出报告范围；需要时可作为后续增量。
+  （`zaiToolStream` 也属此类，但它在改动前就已存在于 UI，不是本次新增。）
 - 版本号仍为 **1.2.0**（本次不是发布动作；`release-docs.test.ts` 对版本与 README 锚点的断言保持通过）。
-- Subagent 外部 CLI runner 字段策略采用“标注 + 只提供 model 与清理动作”，未按 pi-subagents 版本号硬编码 runner 能力表。
+- Subagent 外部 CLI runner 字段策略（已根据 §9.1 修正并验证）：pi-subagents 对这类 runner 不提供任何 Pi 原生子代理选项，因此只保留只读展示 + 清理动作，不再提供 `设置 model`。
+
+---
+
+## 9. 独立评审（round 1）与处置
+
+评审对象：`7750e95`（reviewer 子代理，模型 `Mapleluv/deepseek-flash:max`）。结论 `needs-fix`、无 blocker。
+
+### 9.1 已修正
+
+| # | 评审项 | 复核证据 | 处置 |
+| --- | ------- | --------- | ------ |
+| 1 | 外部 CLI runner 仍提供 `设置 model`，而 pi-subagents 忽略该键 | `src/runs/shared/external-cli-runner.ts` / `codex-exec-adapter.ts` 全文无 `model` 引用；`agents/agent-management.ts:643` 直接拒绝（`does not support Pi-only fields: model`）；`runs/background/async-execution.ts:826-832` 对 step 级 model 抛错 | `index.ts`：外部 runner 菜单删除 `设置 model`，四条只读行统一加“（外部 CLI runner 忽略）”标注；README/README-CN 同步 |
+| 2 | 新增的 settings.json 安全路径与 external-CLI 裁剪无测试 | `tests/` 中无 BOM/CAS 相关断言 | 新增 `tests/subagent-settings-write.test.ts`（BOM 读写、并发写重放、超限抛出且不落盘）、`tests/subagent-menu.test.ts`（外部 runner 无编辑动作 + 忽略标注；原生 agent 菜单完整）、`tests/config.test.ts` 增 models.json BOM 往返；为此在 `subagent-settings.ts` 增加 `SettingsWriteHooks` 测试缝（与 `atomic-file.ts` 既有测试缝同风格） |
+| 3 | 注释夸大了 CAS 保证 | `atomicReplace` 的哈希检查与 `renameSync` 之间存在窗口 | 注释与 §5.2 改为精确表述（检测-重试），并记明未引入 proper-lockfile 的原因 |
+| 4 | 漏了 `supportsExplicitPromptCacheMode`（Responses 读取、schema 未声明） | `pi-ai/dist/api/openai-responses.js:60/65/70` 有读取；`dist/core/model-config.js` 无声明 | 加入 `COMPAT_BOOLEAN_FIELDS`/`BOOLEAN_COMPAT_FIELDS` 并补正/负例 |
+| 5 | compat 字符串字段顺序在两处重复构造 | `field-editors.ts` 两处 `[COMPAT_THINKING_FORMAT_FIELD, ...COMPAT_STRING_FIELDS]` | 提取 `COMPAT_STRING_FIELD_ORDER` 单一来源 |
+| 6 | 无 API 时的迁移提示不准确 | 原提示断言“该 API 不读取旧字段”，但未知 API ≠ 不读取 | 改为“无法确定 API；该键自 0.80.7 起不再被任何 API 读取，删除会丢失 `openai-nosession` 意图” |
+| 7 | 两个 compat 字段的生效前置条件未在 UI 暴露 | `openai-completions.js:557`（需 `sendSessionAffinityHeaders: true`）、`:666-670`（需 `thinkingFormat: baseten`） | 两项 label 补前置条件 |
+| 8 | `tests/compat-settings.test.ts` 对 `thinkingFormat` 的断言是同义反复 | 常量即由 `[...THINKING_FORMATS]` 构造 | 改为与字面量列表比对（含 `baseten`） |
+
+### 9.2 未采纳（附理由）
+
+- `thinkingTokenBudgetField`、`supportsThinkingTokenBudget`：超出本次范围，已在 §8.3 记录为后续增量。
+- 为内置 Provider 增加 `api` 目录回退表（评审第 6 项的完整版）：会让插件维护一份随 pi 版本漂移的 provider→api 映射；当前行为（删除已失效键 + 明确提示）不会写出错误配置，故不做。
+- 用 `process-lock.ts` 包裹 settings.json 读改写：pi 的 settings-manager 不识别该 IPC 锁，无法消除与 pi 的竞态，只会增加持锁复杂度（并违反“不在持锁时等待输入”的既有不变量）。
+- 将 `dispatchCompatFieldEdit` 改为表驱动：纯风格收益，改动面大于收益；本次只消除顺序重复（§9.1-5）。
+- 评审期间外部 auto-format（80 列折行 + 补尾逗号）重写了 17 个文件（+4970/−1523，纯格式）：已整体 `git checkout` 丢弃，不让与仓库风格不符的无关变更进入提交。

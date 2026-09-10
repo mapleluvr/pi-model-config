@@ -17,6 +17,19 @@ test("reads Pi models.json JSONC and preserves unknown root fields", () => withA
   });
 }));
 
+test("accepts a UTF-8 BOM in models.json like Pi does and rewrites it canonically", () => withAgentDir((agentDir) => {
+  const filePath = path.join(agentDir, "models.json");
+  fs.writeFileSync(filePath, `\uFEFF{ "providers": { "local": { "headers": { "X-Test": "yes" }, "models": [] } } }`, "utf-8");
+
+  const config = readModelsConfig();
+  assert.deepEqual(config.providers.local!.headers, { "X-Test": "yes" });
+
+  writeModelsConfig(config);
+  const written = fs.readFileSync(filePath, "utf-8");
+  assert.notEqual(written.charCodeAt(0), 0xfeff, "a rewrite must emit canonical JSON without the BOM");
+  assert.deepEqual(JSON.parse(written).providers.local.headers, { "X-Test": "yes" });
+}));
+
 test("uses an explicit agent directory for models paths and rejects schema-invalid documents", () => withAgentDir((ambientDir) => {
   const explicitDir = fs.mkdtempSync(path.join(path.dirname(ambientDir), "pi-model-config-explicit-"));
   try {

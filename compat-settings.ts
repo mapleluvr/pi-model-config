@@ -25,6 +25,8 @@ export const COMPAT_BOOLEAN_FIELDS = [
   { key: "supportsAdditionalTools", label: "supportsAdditionalTools (Responses)" },
   { key: "supportsToolSearch", label: "supportsToolSearch (Responses)" },
   { key: "supportsMaxOutputTokens", label: "supportsMaxOutputTokens (Responses)" },
+  // Engine-read, but absent from the models.json schema: the value only travels as an extra property.
+  { key: "supportsExplicitPromptCacheMode", label: "supportsExplicitPromptCacheMode (Responses)" },
   // Anthropic Messages
   { key: "supportsEagerToolInputStreaming", label: "supportsEagerToolInputStreaming (Anthropic)" },
   { key: "sendSessionAffinityHeaders", label: "sendSessionAffinityHeaders (OpenAI+Anthropic)" },
@@ -41,13 +43,13 @@ export const COMPAT_STRING_FIELDS = [
   { key: "maxTokensField", label: "maxTokensField (OpenAI)", values: ["max_completion_tokens", "max_tokens"] },
   { key: "cacheControlFormat", label: "cacheControlFormat (OpenAI)", values: ["anthropic"] },
   { key: "deferredToolsMode", label: "deferredToolsMode (OpenAI)", values: ["kimi"] },
-  { key: "sessionAffinityFormat", label: "sessionAffinityFormat (OpenAI+Responses)", values: ["openai", "openai-nosession", "openrouter"] },
+  { key: "sessionAffinityFormat", label: "sessionAffinityFormat (OpenAI+Responses；OpenAI 系需 sendSessionAffinityHeaders=true 才生效)", values: ["openai", "openai-nosession", "openrouter"] },
 ] as const;
 
 /** Free-form JSON object compat fields. */
 export const COMPAT_JSON_OBJECT_FIELDS = [
   { key: "chatTemplateKwargs", label: "chatTemplateKwargs" },
-  { key: "chatTemplateArgs", label: "chatTemplateArgs" },
+  { key: "chatTemplateArgs", label: "chatTemplateArgs (仅 thinkingFormat=baseten 时被读取)" },
   { key: "openRouterRouting", label: "openRouterRouting" },
   { key: "vercelGatewayRouting", label: "vercelGatewayRouting" },
 ] as const;
@@ -143,7 +145,7 @@ export function planLegacySessionAffinityMigration(
   }
   return {
     legacyValue,
-    reason: `该 Provider/Model 的 API（${api ?? "未设置"}）不读取 ${LEGACY_SESSION_AFFINITY_KEY}；直接删除旧字段。`,
+    reason: `无法确定该 Provider/Model 的 API（${api ?? "未设置"}）：该字段自 Pi 0.80.7 起已不再被任何 API 读取，可直接删除；若它原本是 openai-completions/openai-responses 上的 false，删除会丢失“省略 session_id 头部”的意图。`,
   };
 }
 
