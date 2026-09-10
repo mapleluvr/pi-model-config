@@ -56,7 +56,7 @@ test("release metadata, runtime checks, package allowlist, and license are exact
   const checkedModules = [...packageJson.scripts.check.matchAll(/--check\s+([^\s&]+\.ts)/g)].map((match) => match[1]).sort();
   assert.deepEqual(checkedModules, RUNTIME_MODULES);
 
-  const license = fs.readFileSync(path.join(PROJECT_ROOT, "LICENSE"), "utf8");
+  const license = fs.readFileSync(path.join(PROJECT_ROOT, "LICENSE"), "utf8").replace(/\r\n/g, "\n");
   assert.match(license, /^MIT License\n/);
   assert.match(license, new RegExp(`Copyright \\(c\\) 2026 ${packageJson.author.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   assert.match(license, /Permission is hereby granted, free of charge/);

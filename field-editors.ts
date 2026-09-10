@@ -3,10 +3,15 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
   COMPAT_BOOLEAN_FIELDS,
   COMPAT_JSON_OBJECT_FIELDS,
-  THINKING_FORMATS,
+  COMPAT_NUMBER_FIELDS,
+  COMPAT_STRING_FIELDS,
+  COMPAT_THINKING_FORMAT_FIELD,
+  LEGACY_SESSION_AFFINITY_KEY,
   applyCompatBooleanChoice,
   applyCompatObjectChoice,
   applyCompatObjectPatch,
+  applyLegacySessionAffinityMigration,
+  planLegacySessionAffinityMigration,
 } from "./compat-settings.ts";
 import { deepCloneJson, getThinkingMapWarning } from "./model-fields.ts";
 import {
@@ -132,6 +137,23 @@ export async function collectNonNegativeRate(
   }
 }
 
+async function collectFiniteNumber(
+  ctx: FieldEditorUiContext,
+  title: string,
+  placeholder?: string,
+): Promise<RequiredCollectionResult<number>> {
+  while (true) {
+    const raw = await ctx.ui.input(title, placeholder);
+    if (raw === undefined) return { status: "cancel" };
+    const normalized = raw.trim();
+    if (normalized.length > 0) {
+      const value = Number(normalized);
+      if (Number.isFinite(value)) return { status: "value", value };
+    }
+    ctx.ui.notify("请输入有限数值", "error");
+  }
+}
+
 export async function collectApiKeyAction(
   ctx: FieldEditorUiContext,
   _storedValue?: string,
@@ -213,83 +235,190 @@ export async function editStringMapDraft(
   }
 }
 
-const COMPAT_STRING_FIELDS = [
-  { key: "maxTokensField", values: ["max_completion_tokens", "max_tokens"] },
-  { key: "thinkingFormat", values: [...THINKING_FORMATS] },
-  { key: "cacheControlFormat", values: ["anthropic"] },
-] as const;
-
 function compatBooleanLabel(draft: Record<string, unknown>, key: string, label: string): string {
   const value = getOwnValue(draft, key);
   const state = value === true ? "true" : value === false ? "false" : "默认";
   return `[${state}] ${label}`;
 }
 
+type CompatFieldEdit =
+  | { status: "cancel" }
+  | { status: "unchanged" }
+  | { status: "value"; value: Record<string, unknown> };
+
+const UNCHANGED: CompatFieldEdit = { status: "unchanged" };
+
+async function editCompatBooleanField(
+  ctx: FieldEditorUiContext,
+  title: string,
+  draft: Record<string, unknown>,
+  field: (typeof COMPAT_BOOLEAN_FIELDS)[number],
+): Promise<CompatFieldEdit> {
+  const selected = await ctx.ui.select(`${title} - ${field.label}`, ["使用默认值", "false", "true", "返回"]);
+  if (selected === undefined) return { status: "cancel" };
+  if (selected === "返回") return UNCHANGED;
+  const compatChoice = selected === "true" ? "true" : selected === "false" ? "false" : "default";
+  return { status: "value", value: applyCompatBooleanChoice(draft, field.key, compatChoice) };
+}
+
+async function editCompatStringField(
+  ctx: FieldEditorUiContext,
+  title: string,
+  draft: Record<string, unknown>,
+  field: { key: string; label: string; values: readonly string[] },
+): Promise<CompatFieldEdit> {
+  const selected = await ctx.ui.select(`${title} - ${field.label}`, [...field.values, "清除", "返回"]);
+  if (selected === undefined) return { status: "cancel" };
+  if (selected === "返回") return UNCHANGED;
+  if (selected === "清除") {
+    const next = { ...draft };
+    deleteOwnKey(next, field.key);
+    return { status: "value", value: next };
+  }
+  const next = { ...draft };
+  setOwnValue(next, field.key, selected);
+  return { status: "value", value: next };
+}
+
+async function editCompatNumberField(
+  ctx: FieldEditorUiContext,
+  title: string,
+  draft: Record<string, unknown>,
+  field: (typeof COMPAT_NUMBER_FIELDS)[number],
+): Promise<CompatFieldEdit> {
+  const selected = await ctx.ui.select(`${title} - ${field.label}`, ["输入数值", "清除", "返回"]);
+  if (selected === undefined) return { status: "cancel" };
+  if (selected === "返回") return UNCHANGED;
+  if (selected === "清除") {
+    const cleared = { ...draft };
+    deleteOwnKey(cleared, field.key);
+    return { status: "value", value: cleared };
+  }
+  const value = await collectFiniteNumber(ctx, `${title} - ${field.label}`, String(getOwnValue(draft, field.key) ?? ""));
+  if (value.status === "cancel") return { status: "cancel" };
+  const next = { ...draft };
+  setOwnValue(next, field.key, value.value);
+  return { status: "value", value: next };
+}
+
+async function editCompatObjectField(
+  ctx: FieldEditorUiContext,
+  title: string,
+  draft: Record<string, unknown>,
+  field: (typeof COMPAT_JSON_OBJECT_FIELDS)[number],
+): Promise<CompatFieldEdit> {
+  const action = await ctx.ui.select(`${title} - ${field.label}`, ["编辑 JSON 对象", "清除", "返回"]);
+  if (action === undefined) return { status: "cancel" };
+  if (action === "返回") return UNCHANGED;
+  if (action === "清除") return { status: "value", value: applyCompatObjectChoice(draft, field.key, undefined) };
+  const raw = await ctx.ui.editor(
+    `${title} - ${field.label}`,
+    getOwnValue(draft, field.key) === undefined ? "{}" : stringifyOwnJsonData(getOwnValue(draft, field.key), 2),
+  );
+  if (raw === undefined) return { status: "cancel" };
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isPlainObject(parsed)) throw new Error();
+    return { status: "value", value: applyCompatObjectPatch(draft, field.key, parsed) };
+  } catch {
+    ctx.ui.notify("请输入有效的 JSON 对象", "error");
+    return UNCHANGED;
+  }
+}
+
+async function migrateLegacySessionAffinityField(
+  ctx: FieldEditorUiContext,
+  title: string,
+  draft: Record<string, unknown>,
+  plan: NonNullable<ReturnType<typeof planLegacySessionAffinityMigration>>,
+): Promise<CompatFieldEdit> {
+  const action = await ctx.ui.select(`${title} - ${LEGACY_SESSION_AFFINITY_KEY}`, ["应用迁移", "返回"]);
+  if (action === undefined) return { status: "cancel" };
+  if (action !== "应用迁移") return UNCHANGED;
+  ctx.ui.notify(plan.reason, "info");
+  return { status: "value", value: applyLegacySessionAffinityMigration(draft, plan) };
+}
+
 export async function editCompatDraft(
   ctx: FieldEditorUiContext,
   title: string,
   existing: Record<string, unknown> | undefined,
+  api?: string,
 ): Promise<DraftEditorResult<Record<string, unknown>>> {
   let draft = cloneRecord(existing);
+  const stringFields = [COMPAT_THINKING_FORMAT_FIELD, ...COMPAT_STRING_FIELDS];
   while (true) {
     const booleanLabels = COMPAT_BOOLEAN_FIELDS.map((field) => compatBooleanLabel(draft, field.key, field.label));
-    const stringLabels = COMPAT_STRING_FIELDS.map((field) => `${field.key} = ${formatSettingValue(getOwnValue(draft, field.key))}`);
+    const stringLabels = stringFields.map((field) => `${field.label} = ${formatSettingValue(getOwnValue(draft, field.key))}`);
+    const numberLabels = COMPAT_NUMBER_FIELDS.map((field) => `${field.label} = ${formatSettingValue(getOwnValue(draft, field.key))}`);
     const objectLabels = COMPAT_JSON_OBJECT_FIELDS.map((field) => `[对象] ${field.label}`);
+    const legacyPlan = planLegacySessionAffinityMigration(draft, api);
+    const legacyLabel = legacyPlan
+      ? `[迁移] 旧字段 ${LEGACY_SESSION_AFFINITY_KEY} = ${formatSettingValue(legacyPlan.legacyValue)}`
+      : undefined;
     const choice = await ctx.ui.select(title, [
       ...booleanLabels,
       ...stringLabels,
+      ...numberLabels,
       ...objectLabels,
+      ...(legacyLabel ? [legacyLabel] : []),
       "保存并返回",
       "放弃更改",
     ]);
     if (choice === undefined || choice === "放弃更改") return { status: "discard" };
     if (choice === "保存并返回") return { status: "save", value: draft };
 
-    const booleanIndex = booleanLabels.indexOf(choice);
-    if (booleanIndex >= 0) {
-      const field = COMPAT_BOOLEAN_FIELDS[booleanIndex]!;
-      const selected = await ctx.ui.select(`${title} - ${field.label}`, ["使用默认值", "false", "true", "返回"]);
-      if (selected === undefined) return { status: "discard" };
-      if (selected === "返回") continue;
-      const compatChoice = selected === "true" ? "true" : selected === "false" ? "false" : "default";
-      draft = applyCompatBooleanChoice(draft, field.key, compatChoice);
-      continue;
-    }
-
-    const stringIndex = stringLabels.indexOf(choice);
-    if (stringIndex >= 0) {
-      const field = COMPAT_STRING_FIELDS[stringIndex]!;
-      const selected = await ctx.ui.select(`${title} - ${field.key}`, [...field.values, "清除", "返回"]);
-      if (selected === undefined) return { status: "discard" };
-      if (selected === "返回") continue;
-      if (selected === "清除") deleteOwnKey(draft, field.key);
-      else setOwnValue(draft, field.key, selected);
-      continue;
-    }
-
-    const objectIndex = objectLabels.indexOf(choice);
-    if (objectIndex < 0) continue;
-    const field = COMPAT_JSON_OBJECT_FIELDS[objectIndex]!;
-    const action = await ctx.ui.select(`${title} - ${field.label}`, ["编辑 JSON 对象", "清除", "返回"]);
-    if (action === undefined) return { status: "discard" };
-    if (action === "返回") continue;
-    if (action === "清除") {
-      draft = applyCompatObjectChoice(draft, field.key, undefined);
-      continue;
-    }
-    const raw = await ctx.ui.editor(
-      `${title} - ${field.label}`,
-      getOwnValue(draft, field.key) === undefined ? "{}" : stringifyOwnJsonData(getOwnValue(draft, field.key), 2),
-    );
-    if (raw === undefined) return { status: "discard" };
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (!isPlainObject(parsed)) throw new Error();
-      draft = applyCompatObjectPatch(draft, field.key, parsed);
-    } catch {
-      ctx.ui.notify("请输入有效的 JSON 对象", "error");
-    }
+    const edit = await dispatchCompatFieldEdit(ctx, title, draft, {
+      choice,
+      booleanLabels,
+      stringLabels,
+      numberLabels,
+      objectLabels,
+      legacyLabel,
+      legacyPlan,
+    });
+    if (edit.status === "cancel") return { status: "discard" };
+    if (edit.status === "value") draft = edit.value;
   }
+}
+
+interface CompatFieldDispatch {
+  choice: string;
+  booleanLabels: string[];
+  stringLabels: string[];
+  numberLabels: string[];
+  objectLabels: string[];
+  legacyLabel?: string;
+  legacyPlan?: NonNullable<ReturnType<typeof planLegacySessionAffinityMigration>>;
+}
+
+async function dispatchCompatFieldEdit(
+  ctx: FieldEditorUiContext,
+  title: string,
+  draft: Record<string, unknown>,
+  dispatch: CompatFieldDispatch,
+): Promise<CompatFieldEdit> {
+  const stringFields = [COMPAT_THINKING_FORMAT_FIELD, ...COMPAT_STRING_FIELDS];
+  const booleanIndex = dispatch.booleanLabels.indexOf(dispatch.choice);
+  if (booleanIndex >= 0) {
+    return await editCompatBooleanField(ctx, title, draft, COMPAT_BOOLEAN_FIELDS[booleanIndex]!);
+  }
+  const stringIndex = dispatch.stringLabels.indexOf(dispatch.choice);
+  if (stringIndex >= 0) {
+    return await editCompatStringField(ctx, title, draft, stringFields[stringIndex]!);
+  }
+  const numberIndex = dispatch.numberLabels.indexOf(dispatch.choice);
+  if (numberIndex >= 0) {
+    return await editCompatNumberField(ctx, title, draft, COMPAT_NUMBER_FIELDS[numberIndex]!);
+  }
+  const objectIndex = dispatch.objectLabels.indexOf(dispatch.choice);
+  if (objectIndex >= 0) {
+    return await editCompatObjectField(ctx, title, draft, COMPAT_JSON_OBJECT_FIELDS[objectIndex]!);
+  }
+  if (dispatch.legacyPlan && dispatch.choice === dispatch.legacyLabel) {
+    return await migrateLegacySessionAffinityField(ctx, title, draft, dispatch.legacyPlan);
+  }
+  return UNCHANGED;
 }
 
 function thinkingValueLabel(value: unknown): string {

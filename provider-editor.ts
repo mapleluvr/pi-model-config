@@ -36,17 +36,10 @@ import {
   type SettingsCategoryDescriptor,
   type SettingsPanelState,
 } from "./settings-panel.ts";
-import type { ModelOverrideConfig, ModelsConfig, ProviderConfig } from "./types.ts";
+import type { JsonValue, ModelOverrideConfig, ModelsConfig, ProviderConfig } from "./types.ts";
+import { API_TYPE_IDS, OAUTH_PROVIDER_TYPES } from "./types.ts";
 
-const API_OPTIONS = [
-  "openai-completions",
-  "anthropic-messages",
-  "openai-responses",
-  "google-generative-ai",
-  "google-vertex",
-  "bedrock-converse-stream",
-  "mistral-conversations",
-];
+const API_OPTIONS = [...API_TYPE_IDS];
 const ACTION_BACK = "__pi_model_config_action:back";
 const ACTION_ADD_PROVIDER = "__pi_model_config_action:add_provider";
 
@@ -59,8 +52,8 @@ export interface ProviderEditorDependencies {
   fetchModels?: (provider: ProviderConfig) => Promise<EndpointDiscoverySuccess | null>;
 }
 
-function ownValue(record: Record<string, unknown>, key: string): unknown {
-  return getOwnValue(record, key);
+function ownValue(record: Record<string, unknown>, key: string): JsonValue | undefined {
+  return getOwnValue(record, key) as JsonValue | undefined;
 }
 
 export function buildProviderCategories(providerId: string, provider: ProviderConfig): SettingsCategoryDescriptor[] {
@@ -81,6 +74,7 @@ export function buildProviderCategories(providerId: string, provider: ProviderCo
       fields: [
         { id: "apiKey", label: "API Key", displayValue: formatApiKeyReference(typeof ownValue(provider, "apiKey") === "string" ? String(ownValue(provider, "apiKey")) : undefined), action: "edit-field" },
         { id: "authHeader", label: "Auth Header", displayValue: ownValue(provider, "authHeader") === undefined ? "(默认)" : String(ownValue(provider, "authHeader")), action: "edit-field" },
+        { id: "oauth", label: "OAuth 提供方", displayValue: ownValue(provider, "oauth") === undefined ? "(未设置)" : String(ownValue(provider, "oauth")), action: "edit-field" },
         { id: "headers", label: "Headers", displayValue: formatNestedCount(ownValue(provider, "headers"), "项"), action: "open-section" },
       ],
     },
@@ -294,7 +288,7 @@ async function fetchAndCommit(
   ctx.ui.notify(endpointDiscoveryMessage(discovery), "info");
   const modeChoice = await ctx.ui.select("端点 Model 列表", ["合并并保留现有 Models", "替换为端点 Models", "取消"]);
   if (!modeChoice || modeChoice === "取消") return;
-  let mode: "merge" | "replace" = modeChoice.startsWith("替换") ? "replace" : "merge";
+  const mode: "merge" | "replace" = modeChoice.startsWith("替换") ? "replace" : "merge";
   let preview = await actions.previewEndpointChange({ providerId, mode, discovery });
   while (preview.type === "endpoint-preview") {
     const confirmed = await ctx.ui.confirm("确认端点 Model 变更", endpointMessage(preview.descriptor));
@@ -403,6 +397,7 @@ async function editOverridesDraft(
   providerId: string,
   existing: Record<string, ModelOverrideConfig> | undefined,
   editOverride: typeof editModelOverrideEntryDraft,
+  api?: string,
 ): Promise<{ status: "save"; value: Record<string, ModelOverrideConfig> } | { status: "discard" }> {
   const draft = deepCloneJson(existing ?? {}) as Record<string, ModelOverrideConfig>;
   while (true) {
@@ -426,7 +421,7 @@ async function editOverridesDraft(
         ctx.ui.notify("该 Override ID 已存在", "error");
         continue;
       }
-      const edited = await editOverride(ctx, key.value, {}, {});
+      const edited = await editOverride(ctx, key.value, {}, { api });
       if (edited.status === "save") setOwnValue(draft, key.value, edited.value);
       continue;
     }
@@ -435,7 +430,7 @@ async function editOverridesDraft(
     const action = await ctx.ui.select(`Override ${key}`, ["编辑字段", "重命名", "删除", "返回"]);
     if (!action || action === "返回") continue;
     if (action === "编辑字段") {
-      const edited = await editOverride(ctx, key, draft[key]!, {});
+      const edited = await editOverride(ctx, key, draft[key]!, { api });
       if (edited.status === "save") setOwnValue(draft, key, edited.value);
       continue;
     }
@@ -536,6 +531,14 @@ export async function runProviderEditor(
       continue;
     }
 
+    if (result.categoryId === "http-auth" && fieldId === "oauth") {
+      const selected = await ctx.ui.select("Provider OAuth 提供方", [...OAUTH_PROVIDER_TYPES, "清除值", "取消"]);
+      if (selected && selected !== "取消") {
+        didSave(ctx, await actions.patchProvider(providerId, { oauth: selected === "清除值" ? null : selected as "radius" }, { fieldBaselines: { oauth: ownValue(provider, "oauth") } }));
+      }
+      continue;
+    }
+
     const draftKey = `${result.categoryId}:${fieldId}`;
     if (result.categoryId === "http-auth" && fieldId === "headers") {
       const stored = ownValue(provider, "headers") as Record<string, string> | undefined;
@@ -554,7 +557,7 @@ export async function runProviderEditor(
       const stored = ownValue(provider, "compat") as Record<string, unknown> | undefined;
       const held = retained.get(draftKey);
       const baseline = held?.baseline ?? stored;
-      const edited = await editCompatDraft(ctx, "Provider Compat", (held?.value ?? stored) as Record<string, unknown> | undefined);
+      const edited = await editCompatDraft(ctx, "Provider Compat", (held?.value ?? stored) as Record<string, unknown> | undefined, typeof ownValue(provider, "api") === "string" ? ownValue(provider, "api") as string : undefined);
       if (edited.status === "discard") retained.delete(draftKey);
       else {
         const next = Object.keys(edited.value).length > 0 ? edited.value : undefined;
@@ -579,7 +582,7 @@ export async function runProviderEditor(
       const stored = ownValue(provider, "modelOverrides") as Record<string, ModelOverrideConfig> | undefined;
       const held = retained.get(draftKey);
       const baseline = held?.baseline ?? stored;
-      const edited = await editOverridesDraft(ctx, providerId, (held?.value ?? stored) as Record<string, ModelOverrideConfig> | undefined, editOverride);
+      const edited = await editOverridesDraft(ctx, providerId, (held?.value ?? stored) as Record<string, ModelOverrideConfig> | undefined, editOverride, typeof ownValue(provider, "api") === "string" ? ownValue(provider, "api") as string : undefined);
       if (edited.status === "discard") retained.delete(draftKey);
       else {
         const saved = didSave(ctx, await actions.saveProviderSubtree(providerId, "modelOverrides", baseline, Object.keys(edited.value).length > 0 ? edited.value : undefined));

@@ -1,17 +1,52 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { atomicReplace, readArtifact } from "./atomic-file.ts";
+import { deepCloneJson } from "./model-fields.ts";
 
+/** Builtin agent names shipped by pi-subagents 0.63.0. */
 export const BUILTIN_SUBAGENT_NAMES = [
-  "context-builder",
+  "advisor",
+  "claude-code",
+  "claude-code-writer",
+  "codex-exec",
+  "codex-exec-writer",
+  "cursor-agent",
+  "cursor-agent-writer",
   "delegate",
   "oracle",
-  "planner",
   "researcher",
   "reviewer",
   "scout",
   "worker",
 ] as const;
+
+/**
+ * Builtin agents whose runner is an external CLI. pi-subagents drops Pi-native child
+ * options for them (see `externalRunner` in subagent-executor.ts:2916), so the editor
+ * must not offer thinking/fallbackModels/tools overrides.
+ */
+export const EXTERNAL_CLI_SUBAGENT_NAMES = [
+  "claude-code",
+  "claude-code-writer",
+  "codex-exec",
+  "codex-exec-writer",
+  "cursor-agent",
+  "cursor-agent-writer",
+] as const;
+
+export function isExternalCliSubagent(agentName: string): boolean {
+  return (EXTERNAL_CLI_SUBAGENT_NAMES as readonly string[]).includes(agentName);
+}
+
+/** Builtin names plus every agent name already stored in the override map. */
+export function listSubagentAgentNames(overrides: SubagentAgentOverrides): string[] {
+  const names: string[] = [...BUILTIN_SUBAGENT_NAMES];
+  for (const name of Object.keys(overrides)) {
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
 
 export const SUBAGENT_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
@@ -79,28 +114,66 @@ export function getProjectSettingsPath(cwd: string): string {
   return nearestPiDirSettings ?? path.join(start, ".pi", "settings.json");
 }
 
-function readJsonObject(filePath: string): Record<string, any> {
+const SETTINGS_WRITE_ATTEMPTS = 8;
+
+function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseSettingsBytes(filePath: string, bytes: Buffer | undefined): Record<string, unknown> {
+  if (bytes === undefined) return {};
+  const raw = stripBom(bytes.toString("utf-8")).trim();
+  if (!raw) return {};
   try {
-    if (!fs.existsSync(filePath)) return {};
-    const raw = fs.readFileSync(filePath, "utf-8").trim();
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    const parsed: unknown = JSON.parse(raw);
+    return isRecord(parsed) ? parsed : {};
   } catch (err) {
     throw new Error(`Failed to read JSON from ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
-function writeJsonObject(filePath: string, value: Record<string, any>): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf-8");
+function readJsonObject(filePath: string): Record<string, unknown> {
+  return parseSettingsBytes(filePath, readArtifact(filePath).bytes);
 }
 
-function getOverridesFromSettings(settings: Record<string, any>): SubagentAgentOverrides | undefined {
+class SettingsFileChangedError extends Error {}
+
+/**
+ * Read-modify-write with the guarantees Pi itself applies to settings.json: the file is
+ * replaced atomically, and a concurrent writer is detected by content hash, then retried.
+ * Pi holds its own lock, so an interleaved write must never be silently overwritten.
+ */
+function updateSettingsFile(filePath: string, mutate: (settings: Record<string, unknown>) => void): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  for (let attempt = 0; attempt < SETTINGS_WRITE_ATTEMPTS; attempt += 1) {
+    const snapshot = readArtifact(filePath);
+    const settings = parseSettingsBytes(filePath, snapshot.bytes);
+    const before = JSON.stringify(settings);
+    mutate(settings);
+    if (JSON.stringify(settings) === before) return;
+    try {
+      atomicReplace(filePath, Buffer.from(JSON.stringify(settings, null, 2), "utf-8"), {
+        beforeRename: () => {
+          if (readArtifact(filePath).hash !== snapshot.hash) throw new SettingsFileChangedError();
+        },
+      });
+      return;
+    } catch (error) {
+      if (!(error instanceof SettingsFileChangedError)) throw error;
+    }
+  }
+  throw new Error(`Failed to update ${filePath}: concurrent modifications detected`);
+}
+
+function getOverridesFromSettings(settings: Record<string, unknown>): SubagentAgentOverrides | undefined {
   const subagents = settings.subagents;
-  if (!subagents || typeof subagents !== "object" || Array.isArray(subagents)) return undefined;
+  if (!isRecord(subagents)) return undefined;
   const overrides = subagents.agentOverrides;
-  if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return undefined;
+  if (!isRecord(overrides)) return undefined;
   return overrides as SubagentAgentOverrides;
 }
 
@@ -129,23 +202,23 @@ export function readSubagentAgentOverrides(settingsPath: string): SubagentAgentO
 }
 
 export function ensureSubagentAgentOverrides(settingsPath: string): SubagentAgentOverrides {
-  const settings = readJsonObject(settingsPath);
-  const overrides = ensureSettingsOverrides(settings);
-  writeJsonObject(settingsPath, settings);
+  let overrides: SubagentAgentOverrides = {};
+  updateSettingsFile(settingsPath, (settings) => {
+    overrides = ensureSettingsOverrides(settings);
+  });
   return overrides;
 }
 
 function cloneOverrides(overrides: SubagentAgentOverrides): SubagentAgentOverrides {
-  return JSON.parse(JSON.stringify(overrides));
+  return deepCloneJson(overrides);
 }
 
 function writeSubagentAgentOverrides(settingsPath: string, overrides: SubagentAgentOverrides): void {
-  const settings = readJsonObject(settingsPath);
-  if (!settings.subagents || typeof settings.subagents !== "object" || Array.isArray(settings.subagents)) {
-    settings.subagents = {};
-  }
-  settings.subagents.agentOverrides = cloneOverrides(overrides);
-  writeJsonObject(settingsPath, settings);
+  updateSettingsFile(settingsPath, (settings) => {
+    const subagents = isRecord(settings.subagents) ? settings.subagents : {};
+    settings.subagents = subagents;
+    subagents.agentOverrides = cloneOverrides(overrides);
+  });
 }
 
 function requireSubagentAgentOverrides(settingsPath: string, label: string): SubagentAgentOverrides {
@@ -156,14 +229,12 @@ function requireSubagentAgentOverrides(settingsPath: string, label: string): Sub
   return overrides;
 }
 
-function ensureSettingsOverrides(settings: Record<string, any>): SubagentAgentOverrides {
-  if (!settings.subagents || typeof settings.subagents !== "object" || Array.isArray(settings.subagents)) {
-    settings.subagents = {};
-  }
-  if (!settings.subagents.agentOverrides || typeof settings.subagents.agentOverrides !== "object" || Array.isArray(settings.subagents.agentOverrides)) {
-    settings.subagents.agentOverrides = {};
-  }
-  return settings.subagents.agentOverrides as SubagentAgentOverrides;
+function ensureSettingsOverrides(settings: Record<string, unknown>): SubagentAgentOverrides {
+  const subagents = isRecord(settings.subagents) ? settings.subagents : {};
+  settings.subagents = subagents;
+  const overrides = isRecord(subagents.agentOverrides) ? subagents.agentOverrides : {};
+  subagents.agentOverrides = overrides;
+  return overrides as SubagentAgentOverrides;
 }
 
 function removeEmptyAgentOverride(overrides: SubagentAgentOverrides, agentName: string): void {
@@ -179,34 +250,34 @@ export function updateSubagentAgentOverride(
   agentName: string,
   changes: SubagentOverrideChanges,
 ): void {
-  const settings = readJsonObject(settingsPath);
-  const overrides = ensureSettingsOverrides(settings);
-  const existing: SubagentAgentOverride = { ...(overrides[agentName] ?? {}) };
+  updateSettingsFile(settingsPath, (settings) => {
+    const overrides = ensureSettingsOverrides(settings);
+    const existing: SubagentAgentOverride = { ...(overrides[agentName] ?? {}) };
 
-  for (const field of MANAGED_AGENT_OVERRIDE_FIELDS) {
-    if (!Object.prototype.hasOwnProperty.call(changes, field)) continue;
-    const value = changes[field];
-    if (value === undefined || (Array.isArray(value) && value.length === 0) || value === "") {
-      delete existing[field];
-    } else {
-      existing[field] = value;
+    for (const field of MANAGED_AGENT_OVERRIDE_FIELDS) {
+      if (!Object.hasOwn(changes, field)) continue;
+      const value = changes[field];
+      if (value === undefined || (Array.isArray(value) && value.length === 0) || value === "") {
+        delete existing[field];
+      } else {
+        existing[field] = value;
+      }
     }
-  }
 
-  if (Object.keys(existing).length === 0) {
-    delete overrides[agentName];
-  } else {
-    overrides[agentName] = existing;
-  }
-  removeEmptyAgentOverride(overrides, agentName);
-  writeJsonObject(settingsPath, settings);
+    if (Object.keys(existing).length === 0) {
+      delete overrides[agentName];
+    } else {
+      overrides[agentName] = existing;
+    }
+    removeEmptyAgentOverride(overrides, agentName);
+  });
 }
 
 export function deleteSubagentAgentOverride(settingsPath: string, agentName: string): void {
-  const settings = readJsonObject(settingsPath);
-  const overrides = ensureSettingsOverrides(settings);
-  delete overrides[agentName];
-  writeJsonObject(settingsPath, settings);
+  updateSettingsFile(settingsPath, (settings) => {
+    const overrides = ensureSettingsOverrides(settings);
+    delete overrides[agentName];
+  });
 }
 
 export function clearManagedSubagentModelFields(settingsPath: string, agentName: string): void {
@@ -235,15 +306,17 @@ export function clearAllManagedSubagentAgentFields(settingsPath: string, agentNa
 export const clearManagedSubagentAgentFields = clearManagedSubagentModelFields;
 
 export function appendSubagentFallbackModel(settingsPath: string, agentName: string, model: string): string[] {
-  const settings = readJsonObject(settingsPath);
-  const overrides = ensureSettingsOverrides(settings);
-  const existing: SubagentAgentOverride = { ...(overrides[agentName] ?? {}) };
-  const fallbackModels = Array.isArray(existing.fallbackModels) ? [...existing.fallbackModels] : [];
-  if (!fallbackModels.includes(model)) fallbackModels.push(model);
-  existing.fallbackModels = fallbackModels;
-  overrides[agentName] = existing;
-  writeJsonObject(settingsPath, settings);
-  return fallbackModels;
+  let result: string[] = [];
+  updateSettingsFile(settingsPath, (settings) => {
+    const overrides = ensureSettingsOverrides(settings);
+    const existing: SubagentAgentOverride = { ...(overrides[agentName] ?? {}) };
+    const fallbackModels = Array.isArray(existing.fallbackModels) ? [...existing.fallbackModels] : [];
+    if (!fallbackModels.includes(model)) fallbackModels.push(model);
+    existing.fallbackModels = fallbackModels;
+    overrides[agentName] = existing;
+    result = fallbackModels;
+  });
+  return result;
 }
 
 export function pushProjectSubagentOverridesToUser(projectSettingsPath: string, userSettingsPath: string): number {

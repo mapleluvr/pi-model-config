@@ -9,7 +9,7 @@ import {
   type ModelIdentityRequest,
   type PayloadCollisionResolution,
 } from "./config-actions.ts";
-import { BUILT_IN_PROVIDERS_PI_0_80_6 } from "./config-validation.ts";
+import { BUILT_IN_PROVIDERS_PI_0_85_1 } from "./config-validation.ts";
 import {
   collectNonNegativeRate,
   collectOptionalString,
@@ -36,6 +36,7 @@ import {
   type SettingsPanelState,
 } from "./settings-panel.ts";
 import type { ModelConfig, ModelOverrideConfig, ModelsConfig } from "./types.ts";
+import { API_TYPE_IDS, type JsonValue } from "./types.ts";
 
 const ACTION_ADD_MODEL = "__pi_model_config_action:add_model";
 const ACTION_BACK = "__pi_model_config_action:back";
@@ -45,15 +46,7 @@ const INPUT_OPTIONS = [
   { value: "text", label: "文本" },
   { value: "image", label: "图片" },
 ];
-const API_OPTIONS = [
-  "openai-completions",
-  "anthropic-messages",
-  "openai-responses",
-  "google-generative-ai",
-  "google-vertex",
-  "bedrock-converse-stream",
-  "mistral-conversations",
-];
+const API_OPTIONS = [...API_TYPE_IDS];
 const OVERRIDE_ALLOWED_KEYS = new Set([
   "name",
   "reasoning",
@@ -62,6 +55,7 @@ const OVERRIDE_ALLOWED_KEYS = new Set([
   "cost",
   "contextWindow",
   "maxTokens",
+  "samplingParams",
   "headers",
   "compat",
 ]);
@@ -83,8 +77,8 @@ export type ModelOverrideDraftResult =
   | { status: "save"; value: ModelOverrideConfig; unsupportedPaths: string[] }
   | { status: "discard"; value: ModelOverrideConfig; unsupportedPaths: string[] };
 
-function ownValue(record: Record<string, unknown>, key: string): unknown {
-  return getOwnValue(record, key);
+function ownValue(record: Record<string, unknown>, key: string): JsonValue | undefined {
+  return getOwnValue(record, key) as JsonValue | undefined;
 }
 
 function inputDisplay(value: unknown, inherited = false): string {
@@ -182,6 +176,7 @@ export function buildModelCategories(
       id: "payload",
       label: "请求参数",
       fields: [
+        { id: "samplingParams", label: "Sampling Params (原生)", displayValue: formatNestedCount(ownValue(model, "samplingParams"), "项"), action: "open-section" },
         { id: "payload", label: "Payload", displayValue: payloadSummary === undefined
           ? "(未设置)"
           : typeof payloadSummary === "string"
@@ -248,6 +243,13 @@ export function buildModelOverrideCategories(
       ],
     },
     {
+      id: "sampling",
+      label: "采样参数",
+      fields: [
+        { id: "samplingParams", label: "Sampling Params (按 key 合并)", displayValue: formatNestedCount(ownValue(override, "samplingParams"), "项", "inherited"), action: "open-section" },
+      ],
+    },
+    {
       id: "headers",
       label: "Headers",
       fields: [
@@ -287,6 +289,15 @@ function selectedSearchState(state: SettingsPanelState, selected: string): Setti
 function modelFrom(config: ModelsConfig, providerId: string, modelId: string): ModelConfig | undefined {
   const provider = getOwnValue(config.providers, providerId);
   return provider?.models?.find((model) => getOwnValue(model, "id") === modelId);
+}
+
+/** Model-level `api` wins; otherwise the provider default applies. */
+function effectiveModelApi(config: ModelsConfig, providerId: string, model: ModelConfig): string | undefined {
+  const modelApi = ownValue(model, "api");
+  if (typeof modelApi === "string" && modelApi.length > 0) return modelApi;
+  const provider = getOwnValue(config.providers, providerId);
+  const providerApi = provider ? ownValue(provider as Record<string, unknown>, "api") : undefined;
+  return typeof providerApi === "string" && providerApi.length > 0 ? providerApi : undefined;
 }
 
 function notifyActionFailure(ctx: ExtensionCommandContext, result: ActionResult): void {
@@ -719,11 +730,25 @@ export async function runModelEditor(
       const held = retained.get(draftKey);
       const baseline = held?.baseline ?? stored;
       const draft = (held?.value ?? stored) as Record<string, unknown> | undefined;
-      const edited = await editCompatDraft(ctx, "Model Compat", draft);
+      const edited = await editCompatDraft(ctx, "Model Compat", draft, effectiveModelApi(snapshot.native, providerId, model));
       if (edited.status === "discard") retained.delete(draftKey);
       else {
         const next = Object.keys(edited.value).length > 0 ? edited.value : undefined;
         const saved = didSave(ctx, await actions.saveModelSubtree(providerId, modelId, "compat", baseline, next));
+        if (saved) retained.delete(draftKey); else retained.set(draftKey, { baseline, value: edited.value });
+      }
+      continue;
+    }
+    if (result.categoryId === "payload" && fieldId === "samplingParams") {
+      const stored = ownValue(model, "samplingParams") as Record<string, unknown> | undefined;
+      const held = retained.get(draftKey);
+      const baseline = held?.baseline ?? stored;
+      const draft = (held?.value ?? stored) as Record<string, unknown> | undefined;
+      const edited = await editPayloadDraft(ctx, "Model Sampling Params", draft);
+      if (edited.status === "discard") retained.delete(draftKey);
+      else {
+        const next = Object.keys(edited.value).length > 0 ? edited.value : undefined;
+        const saved = didSave(ctx, await actions.saveModelSubtree(providerId, modelId, "samplingParams", baseline, next));
         if (saved) retained.delete(draftKey); else retained.set(draftKey, { baseline, value: edited.value });
       }
       continue;
@@ -759,7 +784,7 @@ export async function runModelEditor(
 }
 
 export function customProviderNeedsProviderApi(providerId: string, provider: Record<string, unknown>): boolean {
-  return !BUILT_IN_PROVIDERS_PI_0_80_6.has(providerId) && getOwnValue(provider, "api") === undefined;
+  return !BUILT_IN_PROVIDERS_PI_0_85_1.has(providerId) && getOwnValue(provider, "api") === undefined;
 }
 
 export async function createModelAndOpen(
@@ -874,7 +899,7 @@ export async function editModelOverrideEntryDraft(
   ctx: ExtensionCommandContext,
   targetId: string,
   existing: ModelOverrideConfig,
-  dependencies: Pick<ModelEditorDependencies, "openPanel" | "search" | "multiSelect"> = {},
+  dependencies: Pick<ModelEditorDependencies, "openPanel" | "search" | "multiSelect"> & { api?: string } = {},
 ): Promise<ModelOverrideDraftResult> {
   const original = deepCloneJson(existing);
   const draft = deepCloneJson(existing);
@@ -954,7 +979,7 @@ export async function editModelOverrideEntryDraft(
       continue;
     }
     let edited: DraftEditorResult<Record<string, unknown>> | DraftEditorResult<Record<string, string>> | undefined;
-    let key: "thinkingLevelMap" | "cost" | "headers" | "compat" | undefined;
+    let key: "thinkingLevelMap" | "cost" | "headers" | "compat" | "samplingParams" | undefined;
     if (result.categoryId === "thinking") {
       key = "thinkingLevelMap";
       const warning = nestedWarning(draft as ModelConfig);
@@ -972,7 +997,10 @@ export async function editModelOverrideEntryDraft(
       edited = await editStringMapDraft(ctx, "Override Headers", ownValue(draft, key) as Record<string, string> | undefined);
     } else if (result.categoryId === "compatibility") {
       key = "compat";
-      edited = await editCompatDraft(ctx, "Override Compat", ownValue(draft, key) as Record<string, unknown> | undefined);
+      edited = await editCompatDraft(ctx, "Override Compat", ownValue(draft, key) as Record<string, unknown> | undefined, dependencies.api);
+    } else if (result.categoryId === "sampling") {
+      key = "samplingParams";
+      edited = await editPayloadDraft(ctx, "Override Sampling Params", ownValue(draft, key) as Record<string, unknown> | undefined);
     }
     if (key && edited?.status === "save") setOptionalDraftValue(draft, key, Object.keys(edited.value).length > 0 ? edited.value : null);
   }

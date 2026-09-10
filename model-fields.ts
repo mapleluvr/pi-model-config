@@ -1,12 +1,12 @@
 import { cloneOwnJsonData, getOwnValue, setOwnValue } from "./own-keys.ts";
-import type { ModelConfig, ModelCostTier, ProviderConfig } from "./types.ts";
+import type { JsonValue, ModelConfig, ModelCostTier, ProviderConfig } from "./types.ts";
 
 export type ConfigPatch<T extends Record<string, unknown>> = {
   [Key in keyof T]?: T[Key] | null;
 } & Record<string, unknown>;
 
 export type ProviderSubtreeKey = "headers" | "compat" | "modelOverrides";
-export type ModelSubtreeKey = "headers" | "compat" | "thinkingLevelMap" | "cost";
+export type ModelSubtreeKey = "headers" | "compat" | "thinkingLevelMap" | "cost" | "samplingParams";
 
 export const THINKING_MAP_INACTIVE_WARNING = "reasoning 为 false 时未启用思考级别映射";
 
@@ -82,8 +82,8 @@ export function subtreePresenceEqual(left: SubtreePresence, right: SubtreePresen
 }
 
 /** @deprecated Prefer describeSubtreePresence for exact absent/null/value baselines. */
-export function normalizeSubtreeBaseline(value: unknown): unknown {
-  return value === undefined ? null : value;
+export function normalizeSubtreeBaseline(value: unknown): JsonValue | null {
+  return (value === undefined ? null : value) as JsonValue | null;
 }
 
 export function mergeProviderConfig(existing: ProviderConfig | undefined, changes: ConfigPatch<ProviderConfig>): ProviderConfig {
@@ -94,8 +94,8 @@ export function mergeModelConfig(existing: ModelConfig | undefined, changes: Con
   return mergeDefined(existing, changes);
 }
 
-export function readProviderSubtree(provider: ProviderConfig, key: ProviderSubtreeKey): unknown {
-  return deepCloneJson(getOwnValue(provider as Record<string, unknown>, key));
+export function readProviderSubtree(provider: ProviderConfig, key: ProviderSubtreeKey): JsonValue | undefined {
+  return deepCloneJson(getOwnValue(provider as Record<string, unknown>, key)) as JsonValue | undefined;
 }
 
 export function writeProviderSubtree(provider: ProviderConfig, key: ProviderSubtreeKey, value: unknown): ProviderConfig {
@@ -105,8 +105,8 @@ export function writeProviderSubtree(provider: ProviderConfig, key: ProviderSubt
   return next;
 }
 
-export function readModelSubtree(model: ModelConfig, key: ModelSubtreeKey): unknown {
-  return deepCloneJson(getOwnValue(model as Record<string, unknown>, key));
+export function readModelSubtree(model: ModelConfig, key: ModelSubtreeKey): JsonValue | undefined {
+  return deepCloneJson(getOwnValue(model as Record<string, unknown>, key)) as JsonValue | undefined;
 }
 
 export function writeModelSubtree(model: ModelConfig, key: ModelSubtreeKey, value: unknown): ModelConfig {
@@ -125,6 +125,7 @@ export function validateCostTier(candidate: unknown): ModelCostTier | undefined 
   const value = candidate as Record<string, unknown>;
   if (typeof value.inputTokensAbove !== "number" || !Number.isInteger(value.inputTokensAbove) || value.inputTokensAbove <= 0) return undefined;
   if (!finiteNonNegative(value.input) || !finiteNonNegative(value.output) || !finiteNonNegative(value.cacheRead) || !finiteNonNegative(value.cacheWrite)) return undefined;
+  // SAFETY: every rate and threshold above was verified numeric, so the clone matches ModelCostTier.
   return deepCloneJson(value) as unknown as ModelCostTier;
 }
 

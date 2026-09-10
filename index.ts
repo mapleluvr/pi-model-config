@@ -29,7 +29,8 @@ import {
   getInitialToolsSelection,
 } from "./subagent-ui.ts";
 import {
-  BUILTIN_SUBAGENT_NAMES,
+  isExternalCliSubagent,
+  listSubagentAgentNames,
   SUBAGENT_THINKING_LEVELS,
   clearManagedSubagentModelFields,
   clearManagedSubagentToolFields,
@@ -88,10 +89,10 @@ async function promptText(
   message: string,
   defaultValue?: string,
 ): Promise<string | undefined> {
-  const result = await ctx.ui.editor(
-    `${title}\n\n${message}${defaultValue != null ? `\n\nCurrent value: ${defaultValue}` : ""}`,
-    defaultValue ?? "",
-  );
+  const currentValue = defaultValue === undefined || defaultValue === null
+    ? ""
+    : `\n\nCurrent value: ${defaultValue}`;
+  const result = await ctx.ui.editor(`${title}\n\n${message}${currentValue}`, defaultValue ?? "");
   return result === undefined ? undefined : result.trim();
 }
 
@@ -203,7 +204,8 @@ function formatFallbackModels(models?: string[]): string {
 }
 
 function overrideSummary(agentName: string, override?: SubagentAgentOverride): string {
-  return formatSubagentOverrideSummary(agentName, override);
+  const suffix = isExternalCliSubagent(agentName) ? " [外部 CLI runner]" : "";
+  return `${formatSubagentOverrideSummary(agentName, override)}${suffix}`;
 }
 
 function parseFallbackInput(raw: string): string[] {
@@ -395,7 +397,6 @@ async function editSubagentToolsOverride(
       if (!ok) continue;
       updateSubagentAgentOverride(settingsPath, agentName, { tools: false });
       ctx.ui.notify(`已禁用 ${agentName} 的所有 tools`, "success");
-      continue;
     }
   }
 }
@@ -406,23 +407,35 @@ async function editSubagentAgentOverride(
   settingsPath: string,
   agentName: string,
 ): Promise<void> {
+  const externalCli = isExternalCliSubagent(agentName);
   while (true) {
     const overrides = readSubagentAgentOverrides(settingsPath);
     const current = overrides[agentName] ?? {};
-    const action = await ctx.ui.select(`Subagent: ${agentName}`, [
-      `当前 model: ${current.model || "(默认 Pi 当前模型)"}`,
-      `当前 thinking: ${current.thinking || "(未设置)"}`,
-      `当前 fallbackModels: ${formatFallbackModels(current.fallbackModels)}`,
-      `当前 tools: ${formatToolsOverride(current.tools)}`,
-      "设置 model",
-      "设置 thinking",
-      "设置 fallbackModels",
-      "设置 tools allowlist",
+    const currentModel = `当前 model: ${current.model || "(默认 Pi 当前模型)"}`;
+    const currentThinking = `当前 thinking: ${current.thinking || "(未设置)"}${externalCli ? "（外部 CLI runner 忽略）" : ""}`;
+    const currentFallback = `当前 fallbackModels: ${formatFallbackModels(current.fallbackModels)}`;
+    const currentTools = `当前 tools: ${formatToolsOverride(current.tools)}`;
+    const cleanupActions = [
       "清除 model/thinking/fallbackModels",
       "清除 tools override",
       "删除整个 agent override",
       "返回",
-    ]);
+    ];
+    // External CLI runners drop Pi-native child options, so only model plus cleanup is offered.
+    const actions = externalCli
+      ? [currentModel, currentThinking, currentFallback, currentTools, "设置 model", ...cleanupActions]
+      : [
+        currentModel,
+        currentThinking,
+        currentFallback,
+        currentTools,
+        "设置 model",
+        "设置 thinking",
+        "设置 fallbackModels",
+        "设置 tools allowlist",
+        ...cleanupActions,
+      ];
+    const action = await ctx.ui.select(`Subagent: ${agentName}${externalCli ? "（外部 CLI runner）" : ""}`, actions);
     if (!action || action.startsWith("返回")) return;
 
     if (action.startsWith("设置 model")) {
@@ -514,7 +527,6 @@ async function editSubagentAgentOverride(
       if (!ok) continue;
       deleteSubagentAgentOverride(settingsPath, agentName);
       ctx.ui.notify(`已删除 ${agentName} override`, "success");
-      continue;
     }
   }
 }
@@ -590,7 +602,7 @@ async function editSubagentSettingsFile(
     const overrides = readSubagentAgentOverrides(settingsPath);
     const items = [
       `编辑目标: ${title} (${settingsPath})`,
-      ...BUILTIN_SUBAGENT_NAMES.map((agent) => overrideSummary(agent, overrides[agent])),
+      ...listSubagentAgentNames(overrides).map((agent) => overrideSummary(agent, overrides[agent])),
       "返回 Subagent 配置菜单",
     ];
     const choice = await ctx.ui.select(title, items);
@@ -652,7 +664,6 @@ async function manageSubagentModelSettings(pi: ExtensionAPI, ctx: ExtensionComma
 
     if (choice.startsWith("公共配置")) {
       await syncUserSubagentConfigToProject(ctx, paths.userSettingsPath, paths.projectSettingsPath);
-      continue;
     }
   }
 }

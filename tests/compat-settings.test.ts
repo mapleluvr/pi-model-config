@@ -4,10 +4,15 @@ import assert from "node:assert/strict";
 import {
   COMPAT_BOOLEAN_FIELDS,
   COMPAT_JSON_OBJECT_FIELDS,
+  COMPAT_NUMBER_FIELDS,
+  COMPAT_STRING_FIELDS,
+  COMPAT_THINKING_FORMAT_FIELD,
   THINKING_FORMATS,
   applyCompatBooleanChoice,
   applyCompatObjectChoice,
   applyCompatObjectPatch,
+  applyLegacySessionAffinityMigration,
+  planLegacySessionAffinityMigration,
 } from "../compat-settings.ts";
 
 test("sets compat boolean fields to explicit true, explicit false, or default deletion", () => {
@@ -27,19 +32,62 @@ test("sets compat boolean fields to explicit true, explicit false, or default de
   );
 });
 
-test("declares every Pi 0.80.6 boolean, object, and thinking-format option", () => {
-  assert.ok(COMPAT_BOOLEAN_FIELDS.some((field) => field.key === "requiresAssistantAfterToolResult"));
-  assert.ok(COMPAT_BOOLEAN_FIELDS.some((field) => field.key === "requiresReasoningContentOnAssistantMessages"));
-  assert.ok(COMPAT_BOOLEAN_FIELDS.some((field) => field.key === "sendSessionAffinityHeaders"));
-  assert.ok(COMPAT_BOOLEAN_FIELDS.some((field) => field.key === "zaiToolStream"));
-  assert.ok(COMPAT_BOOLEAN_FIELDS.some((field) => field.key === "sendSessionIdHeader"));
-  assert.ok(COMPAT_BOOLEAN_FIELDS.some((field) => field.key === "supportsCacheControlOnTools"));
-  assert.ok(COMPAT_BOOLEAN_FIELDS.some((field) => field.key === "supportsTemperature"));
-  assert.deepEqual(COMPAT_JSON_OBJECT_FIELDS.map((field) => field.key), ["chatTemplateKwargs", "openRouterRouting", "vercelGatewayRouting"]);
-  assert.ok(THINKING_FORMATS.includes("zai"));
-  assert.ok(THINKING_FORMATS.includes("chat-template"));
-  assert.ok(THINKING_FORMATS.includes("string-thinking"));
-  assert.ok(THINKING_FORMATS.includes("ant-ling"));
+test("declares every Pi 0.85.1 boolean, object, string, number, and thinking-format option", () => {
+  const booleanKeys: string[] = COMPAT_BOOLEAN_FIELDS.map((field) => field.key);
+  for (const key of [
+    "requiresAssistantAfterToolResult",
+    "requiresReasoningContentOnAssistantMessages",
+    "sendSessionAffinityHeaders",
+    "zaiToolStream",
+    "supportsCacheControlOnTools",
+    "supportsTemperature",
+    "supportsFinishReason",
+    "supportsOpenAIGrammarTools",
+    "supportsAdditionalTools",
+    "supportsToolSearch",
+    "supportsMaxOutputTokens",
+    "supportsStrictTools",
+    "supportsMidConvoEffort",
+    "supportsToolReferences",
+  ]) {
+    assert.ok(booleanKeys.includes(key), `${key} must be offered`);
+  }
+  // Pi 0.80.7 removed sendSessionIdHeader; only the previewed migration may touch it.
+  assert.equal(booleanKeys.includes("sendSessionIdHeader"), false);
+  assert.deepEqual(
+    COMPAT_JSON_OBJECT_FIELDS.map((field) => field.key),
+    ["chatTemplateKwargs", "chatTemplateArgs", "openRouterRouting", "vercelGatewayRouting"],
+  );
+  assert.deepEqual(
+    COMPAT_STRING_FIELDS.map((field) => field.key),
+    ["maxTokensField", "cacheControlFormat", "deferredToolsMode", "sessionAffinityFormat"],
+  );
+  assert.deepEqual(COMPAT_THINKING_FORMAT_FIELD.values, [...THINKING_FORMATS]);
+  assert.deepEqual(COMPAT_NUMBER_FIELDS.map((field) => field.key), ["vllmPriority"]);
+  for (const format of ["zai", "chat-template", "string-thinking", "ant-ling", "baseten"]) {
+    assert.ok(THINKING_FORMATS.includes(format as (typeof THINKING_FORMATS)[number]), `${format} must be offered`);
+  }
+});
+
+test("plans the removed sendSessionIdHeader migration per API family", () => {
+  assert.equal(planLegacySessionAffinityMigration({}, "openai-responses"), undefined);
+
+  const deleted = planLegacySessionAffinityMigration({ sendSessionIdHeader: true }, "openai-responses");
+  assert.ok(deleted, "a stored true value must be migratable");
+  assert.equal(deleted.setSessionAffinityFormat, undefined);
+  assert.deepEqual(applyLegacySessionAffinityMigration({ sendSessionIdHeader: true, keep: 1 }, deleted), { keep: 1 });
+
+  const mapped = planLegacySessionAffinityMigration({ sendSessionIdHeader: false }, "openai-completions");
+  assert.ok(mapped, "a stored false value must be migratable");
+  assert.equal(mapped.setSessionAffinityFormat, "openai-nosession");
+  assert.deepEqual(
+    applyLegacySessionAffinityMigration({ sendSessionIdHeader: false }, mapped),
+    { sessionAffinityFormat: "openai-nosession" },
+  );
+
+  const anthropic = planLegacySessionAffinityMigration({ sendSessionIdHeader: false }, "anthropic-messages");
+  assert.ok(anthropic, "a stored false value must stay removable on other APIs");
+  assert.equal(anthropic.setSessionAffinityFormat, undefined);
 });
 
 test("sets, replaces, and clears compat object fields", () => {

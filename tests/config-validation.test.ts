@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  BUILT_IN_PROVIDERS_PI_0_80_6,
+  BUILT_IN_PROVIDERS_PI_0_85_1,
   ModelsCandidateValidationError,
   assertValidModelsCandidate,
   validateModelsCandidate,
@@ -14,15 +14,78 @@ function issuePaths(candidate: unknown): string[] {
   return validateModelsCandidate(candidate, options).map((issue) => issue.path);
 }
 
-test("exports the exact Pi 0.80.6 built-in provider catalog", () => {
-  assert.deepEqual([...BUILT_IN_PROVIDERS_PI_0_80_6], [
-    "amazon-bedrock", "ant-ling", "anthropic", "azure-openai-responses", "cerebras",
+test("exports the exact Pi 0.85.1 built-in provider catalog", () => {
+  assert.deepEqual([...BUILT_IN_PROVIDERS_PI_0_85_1], [
+    "amazon-bedrock", "ant-ling", "anthropic", "azure-openai-responses", "baseten", "cerebras",
     "cloudflare-ai-gateway", "cloudflare-workers-ai", "deepseek", "fireworks", "github-copilot",
     "google", "google-vertex", "groq", "huggingface", "kimi-coding", "minimax", "minimax-cn",
     "mistral", "moonshotai", "moonshotai-cn", "nvidia", "openai", "openai-codex", "opencode",
-    "opencode-go", "openrouter", "together", "vercel-ai-gateway", "xai", "xiaomi",
-    "xiaomi-token-plan-ams", "xiaomi-token-plan-cn", "xiaomi-token-plan-sgp", "zai", "zai-coding-cn",
+    "opencode-go", "openrouter", "qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual",
+    "radius", "together", "vercel-ai-gateway", "xai", "xiaomi", "xiaomi-token-plan-ams",
+    "xiaomi-token-plan-cn", "xiaomi-token-plan-sgp", "zai", "zai-coding-cn",
   ]);
+});
+
+test("accepts Pi 0.85.1 compat additions, samplingParams, and radius oauth", () => {
+  const paths = issuePaths({
+    providers: {
+      native: {
+        oauth: "radius",
+        baseUrl: "https://gateway.example.test/v1",
+        compat: {
+          supportsFinishReason: false,
+          supportsOpenAIGrammarTools: true,
+          supportsAdditionalTools: true,
+          supportsToolSearch: false,
+          supportsMaxOutputTokens: true,
+          supportsStrictTools: true,
+          supportsMidConvoEffort: true,
+          supportsToolReferences: false,
+          deferredToolsMode: "kimi",
+          sessionAffinityFormat: "openai-nosession",
+          vllmPriority: -1,
+          chatTemplateArgs: { thinking: { $var: "thinking.budget", omitWhenOff: true } },
+          chatTemplateKwargs: { thinking: { $var: "thinking.budget" } },
+        },
+        models: [{
+          id: "m1",
+          samplingParams: { temperature: 1, top_p: 0.95, nested: { min_p: 0 }, list: [1, "x", null, true] },
+          compat: { thinkingFormat: "baseten", sessionAffinityFormat: "openrouter" },
+        }],
+        modelOverrides: { m1: { samplingParams: { top_k: 0 } } },
+      },
+    },
+  });
+  assert.deepEqual(paths, []);
+});
+
+test("rejects malformed Pi 0.85.1 additions", () => {
+  const paths = issuePaths({
+    providers: {
+      native: {
+        oauth: "wrong",
+        compat: {
+          deferredToolsMode: "other",
+          sessionAffinityFormat: "openai_nosession",
+          vllmPriority: "high",
+          chatTemplateArgs: { thinking: { $var: "thinking.unknown" } },
+          thinkingFormat: "baseten-v2",
+        },
+        models: [{ id: "m1", samplingParams: "temperature=1" }],
+      },
+    },
+  });
+  for (const path of [
+    "$.providers.native.oauth",
+    "$.providers.native.compat.deferredToolsMode",
+    "$.providers.native.compat.sessionAffinityFormat",
+    "$.providers.native.compat.vllmPriority",
+    "$.providers.native.compat.chatTemplateArgs.thinking.$var",
+    "$.providers.native.compat.thinkingFormat",
+    "$.providers.native.models[0].samplingParams",
+  ]) {
+    assert.ok(paths.includes(path), `${path} must be rejected`);
+  }
 });
 
 test("accepts complete built-in and custom providers without changing unknown fields", () => {

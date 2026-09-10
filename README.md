@@ -64,26 +64,26 @@ Every native change re-reads the current document, patches only managed fields, 
 ## Provider fields
 
 | Category | Fields and actions |
-|----------|--------------------|
+| ---------- | -------------------- |
 | General | Provider ID, display name, API Base URL, API type |
-| HTTP and authentication | API Key, Auth Header, Headers |
+| HTTP and authentication | API Key, Auth Header, OAuth provider, Headers |
 | Models | Manage Models, Fetch Models from endpoint, Model Overrides |
 | Compatibility | Compat |
 | Actions | Copy Provider, Delete Provider |
 
-Provider ID changes are journaled rename operations. Model Overrides expose only the documented override subset: record-key Model ID, `name`, `reasoning`, `thinkingLevelMap`, `input`, partial `cost` with optional rates and `tiers`, `contextWindow`, `maxTokens`, `headers`, and `compat`. They never add `id`, `api`, `baseUrl`, or private Payload fields. Unsupported stored override paths are preserved until an explicit previewed cleanup is confirmed.
+Provider ID changes are journaled rename operations. `oauth` accepts the dynamic OAuth provider type `radius` and requires the gateway `baseUrl`. Model Overrides expose only the documented override subset: record-key Model ID, `name`, `reasoning`, `thinkingLevelMap`, `input`, partial `cost` with optional rates and `tiers`, `contextWindow`, `maxTokens`, `samplingParams` merged per key, `headers`, and `compat`. They never add `id`, `api`, `baseUrl`, or private Payload fields. Unsupported stored override paths are preserved until an explicit previewed cleanup is confirmed.
 
 ## Model fields
 
 | Category | Fields and actions |
-|----------|--------------------|
+| ---------- | -------------------- |
 | General | Model ID, display name |
 | Endpoint overrides | API type, API Base URL, Headers |
 | Capabilities and limits | Reasoning, input types, Context Window, Maximum Output Tokens |
 | Thinking | `thinkingLevelMap` for `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and mapped `max` values |
 | Cost | Input, Output, Cache Read, Cache Write, and complete `cost.tiers` |
-| Compatibility | Compat |
-| Request parameters | private Payload |
+| Compatibility | Compat field groups for the OpenAI, OpenAI Responses, and Anthropic API families |
+| Request parameters | native `samplingParams`, private Payload |
 | Actions | Copy Model, Delete Model |
 
 False and zero are displayed literally. Absent values are shown as inherited or not set according to field semantics. API key literals are masked and never pre-filled. Replacing a key opens an empty native input after warning that Pi's input is visible while typing.
@@ -102,9 +102,11 @@ Merge and Replace both preview introduced identities and private identity collis
 
 ## Native and private data
 
-Pi Model Config reads Pi 0.80.6 `models.json` as JSONC, including comments and trailing commas. A successful native save emits canonical JSON. Blank, malformed, or schema-invalid native configuration is never replaced.
+Pi Model Config reads Pi 0.85.1 `models.json` as JSONC, including comments and trailing commas. A successful native save emits canonical JSON. Blank, malformed, or schema-invalid native configuration is never replaced.
 
-Private request values are stored in `~/.pi/agent/model-config-payloads.json`, or `<PI_CODING_AGENT_DIR>/model-config-payloads.json`. Each key is the JSON encoding of the exact `[provider, model-id]` tuple, so slash characters are unambiguous. The selected Model's object is shallowly merged during `before_provider_request`; unrelated Models are unchanged.
+The Compat editor tracks the Pi 0.85.1 surface. Boolean fields are labeled with the API family that reads them (OpenAI completions, OpenAI Responses, Anthropic Messages), string fields offer `maxTokensField`, `thinkingFormat` including `baseten`, `cacheControlFormat`, `deferredToolsMode`, and `sessionAffinityFormat`, numerics cover `vllmPriority`, and `chatTemplateKwargs`, `chatTemplateArgs`, `openRouterRouting`, and `vercelGatewayRouting` are edited as JSON objects. `thinkingFormat` values and the `$var` thinking variables stay aligned with what Pi resolves at request time. `compat.sessionAffinityFormat` replaces the `sendSessionIdHeader` key that Pi removed in 0.80.7; when a stored file still carries that legacy key the editor offers a previewed migration (`true` deletes it, `false` maps to `sessionAffinityFormat: "openai-nosession"`).
+
+The native `samplingParams` object is edited per Model and per Model Override, and Pi merges it verbatim into OpenAI-compatible request bodies. Private request values are stored in `~/.pi/agent/model-config-payloads.json`, or `<PI_CODING_AGENT_DIR>/model-config-payloads.json`. Each key is the JSON encoding of the exact `[provider, model-id]` tuple, so slash characters are unambiguous. The selected Model's object is shallowly merged during `before_provider_request`; unrelated Models are unchanged.
 
 Payload and API-key values are secret-bearing data. They are not included in diagnostics, recovery previews, action results, errors, logs, or test output. Private storage and transaction snapshots use private file permissions. Valid legacy `extraPayload` rows can migrate through confirmed editor actions; malformed rows require an explicit discard preview.
 
@@ -118,7 +120,7 @@ Diagnostics can complete unambiguous recovery automatically. Recovery requiring 
 
 ## Subagent configuration
 
-The Subagent UI and behavior are unchanged in 1.2.0. It edits `subagents.agentOverrides` for the builtin `context-builder`, `delegate`, `oracle`, `planner`, `researcher`, `reviewer`, `scout`, and `worker` agents.
+The Subagent editor writes `subagents.agentOverrides` for the pi-subagents 0.63.0 builtin agents (`advisor`, `delegate`, `oracle`, `researcher`, `reviewer`, `scout`, `worker`, and the external CLI runners `claude-code`, `claude-code-writer`, `codex-exec`, `codex-exec-writer`, `cursor-agent`, `cursor-agent-writer`), plus every agent name already stored in the current file so earlier overrides stay reachable. External CLI runners ignore Pi-native child options, so those agents offer `model` and the cleanup actions only.
 
 Each override can set `model`, `thinking` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), ordered `fallbackModels`, and `tools`. Tools support the agent default, a searchable allowlist, the parent Agent's current active tools, manual MCP or path-like tool IDs, and `false` to disable all tools. Selecting `subagent` asks for confirmation because it permits nested fanout.
 
@@ -127,7 +129,7 @@ Project settings live at `<project>/.pi/settings.json`; user settings live at `~
 ## Data files
 
 | Data | Path |
-|------|------|
+| ------ | ------ |
 | Native Providers and Models | `~/.pi/agent/models.json` |
 | Private Model Payloads | `~/.pi/agent/model-config-payloads.json` |
 | Recovery journal while needed | `~/.pi/agent/model-config-transaction.json` |

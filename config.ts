@@ -13,7 +13,7 @@ import {
   setOwnValue,
   stringifyOwnJsonData,
 } from "./own-keys.ts";
-import type { ModelsConfig, ProviderConfig } from "./types.ts";
+import type { JsonValue, ModelsConfig, ProviderConfig } from "./types.ts";
 
 export class ModelsConfigError extends Error {
   public readonly filePath: string;
@@ -34,7 +34,7 @@ export function getModelsPath(agentDir = process.env.PI_CODING_AGENT_DIR || path
  * Structural JSONC materialization: build values from the parse tree with own-key-safe
  * property insertion. Never uses parse()/getNodeValue() assignment (which collapses `__proto__`).
  */
-function materializeJsoncNode(node: Node): unknown {
+function materializeJsoncNode(node: Node): JsonValue | undefined {
   switch (node.type) {
     case "null":
       return null;
@@ -45,7 +45,7 @@ function materializeJsoncNode(node: Node): unknown {
     case "array": {
       const items: unknown[] = [];
       for (const child of node.children ?? []) items.push(materializeJsoncNode(child));
-      return items;
+      return items as JsonValue;
     }
     case "object": {
       const out: Record<string, unknown> = {};
@@ -56,15 +56,20 @@ function materializeJsoncNode(node: Node): unknown {
         if (keyNode.type !== "string" || typeof keyNode.value !== "string") continue;
         setOwnValue(out, keyNode.value, materializeJsoncNode(valueNode));
       }
-      return out;
+      return out as JsonValue;
     }
     default:
       return undefined;
   }
 }
 
+/** Pi strips a leading BOM before parsing models.json; mirror that here. */
+function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
 export function parseModelsDocument(filePath: string, raw: string | Uint8Array): ModelsConfig {
-  const document = Buffer.from(raw).toString("utf8");
+  const document = stripBom(Buffer.from(raw).toString("utf8"));
   const errors: ParseError[] = [];
   const tree = parseTree(document, errors, { allowTrailingComma: true, disallowComments: false });
   if (errors.length > 0) {
@@ -93,6 +98,7 @@ export function parseModelsDocument(filePath: string, raw: string | Uint8Array):
     setOwnValue(ownRoot, key, getOwnValue(root, key));
   }
   setOwnValue(ownRoot, "providers", ownProviders);
+  // SAFETY: the JSONC tree above was materialized into plain own-key JSON data, so the cast only restores the models.json shape.
   const config = ownRoot as unknown as ModelsConfig;
   try {
     assertValidModelsCandidate(config);

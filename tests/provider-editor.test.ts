@@ -26,7 +26,7 @@ function catalog(categories: ReturnType<typeof buildProviderCategories>): Array<
 test("Provider catalog uses the exact stable category and field IDs", () => {
   assert.deepEqual(catalog(buildProviderCategories("example", { models: [] })), [
     ["general", ["id", "name", "baseUrl", "api"]],
-    ["http-auth", ["apiKey", "authHeader", "headers"]],
+    ["http-auth", ["apiKey", "authHeader", "oauth", "headers"]],
     ["models", ["manageModels", "fetchModels", "modelOverrides"]],
     ["compatibility", ["compat"]],
     ["actions", ["copy", "delete"]],
@@ -111,6 +111,29 @@ async function fakeEndpointDiscovery(provider: any, records: unknown[]): Promise
   });
   return result.type === "success" ? result : null;
 }
+
+test("Provider oauth field patches the provider through the native action", async () => {
+  const provider = {
+    baseUrl: "https://gateway.example.test/v1",
+    api: "pi-messages",
+    models: [],
+    future: { keep: true },
+  };
+  const patches: Array<{ patch: Record<string, unknown>; baselines: unknown }> = [];
+  const actions = {
+    readEditorSnapshot: () => providerSnapshot(provider),
+    patchProvider: async (_providerId: string, patch: Record<string, unknown>, options?: { fieldBaselines?: unknown }) => {
+      patches.push({ patch, baselines: options?.fieldBaselines });
+      return { type: "success" };
+    },
+  } as any;
+  const panels = [panelResult("edit-field", "http-auth", "oauth"), panelResult("back")];
+  const selects = ["radius"];
+  const ctx = { ui: { select: async () => selects.shift(), notify() {} } } as any;
+  await runProviderEditor(ctx, "local", { actions, openPanel: async () => panels.shift()! });
+  assert.deepEqual(patches, [{ patch: { oauth: "radius" }, baselines: { oauth: undefined } }]);
+  assert.deepEqual(selects, []);
+});
 
 test("Override map save scans untouched and renamed entries before top-level-only cleanup", async () => {
   const original = {

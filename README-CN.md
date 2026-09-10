@@ -64,26 +64,26 @@ cp -r pi-model-config .pi/extensions/model-config
 ## Provider 字段
 
 | 分类 | 字段与操作 |
-|------|------------|
+| ------ | ------------ |
 | General | Provider ID、显示名称、API Base URL、API type |
-| HTTP and authentication | API Key、Auth Header、Headers |
+| HTTP and authentication | API Key、Auth Header、OAuth provider、Headers |
 | Models | Manage Models、Fetch Models from endpoint、Model Overrides |
 | Compatibility | Compat |
 | Actions | Copy Provider、Delete Provider |
 
-修改 Provider ID 会执行带事务日志的 rename。Model Overrides 只允许文档化的 override 子集：作为 map key 的 Model ID、`name`、`reasoning`、`thinkingLevelMap`、`input`、含可选价格和 `tiers` 的部分 `cost`、`contextWindow`、`maxTokens`、`headers`、`compat`。它不会引入 `id`、`api`、`baseUrl` 或私有 Payload 字段。已存储的不支持路径会保留，只有在预览并明确确认清理后才会删除。
+修改 Provider ID 会执行带事务日志的 rename。`oauth` 只接受动态 OAuth 提供方类型 `radius`，并要求 gateway `baseUrl`。Model Overrides 只允许文档化的 override 子集：作为 map key 的 Model ID、`name`、`reasoning`、`thinkingLevelMap`、`input`、含可选价格和 `tiers` 的部分 `cost`、`contextWindow`、`maxTokens`、按 key 合并的 `samplingParams`、`headers`、`compat`。它不会引入 `id`、`api`、`baseUrl` 或私有 Payload 字段。已存储的不支持路径会保留，只有在预览并明确确认清理后才会删除。
 
 ## Model 字段
 
 | 分类 | 字段与操作 |
-|------|------------|
+| ------ | ------------ |
 | General | Model ID、显示名称 |
 | Endpoint overrides | API type、API Base URL、Headers |
 | Capabilities and limits | Reasoning、input types、Context Window、Maximum Output Tokens |
 | Thinking | `thinkingLevelMap`，覆盖 `off`、`minimal`、`low`、`medium`、`high`、`xhigh` 和映射值 `max` |
 | Cost | Input、Output、Cache Read、Cache Write、完整 `cost.tiers` |
-| Compatibility | Compat |
-| Request parameters | 私有 Payload |
+| Compatibility | 按 OpenAI、OpenAI Responses、Anthropic 三个 API 家族分组的 Compat 字段 |
+| Request parameters | 原生 `samplingParams`、私有 Payload |
 | Actions | Copy Model、Delete Model |
 
 `false` 和 `0` 会按字面显示。缺失值根据字段语义显示 inherited 或 not set。API 密钥字面值会被遮罩，也不会预填到输入框。替换密钥时会先提示 Pi 原生输入在输入期间可见，然后打开空输入框。
@@ -102,9 +102,11 @@ Merge 和 Replace 都会预览新增 identity 与私有 identity 冲突。复用
 
 ## 原生与私有数据
 
-Pi Model Config 按 Pi 0.80.6 读取 JSONC `models.json`，支持注释和尾逗号。成功保存原生配置时写出规范 JSON。空白、损坏或不满足 schema 的原生配置不会被替换。
+Pi Model Config 按 Pi 0.85.1 读取 JSONC `models.json`，支持注释和尾逗号。成功保存原生配置时写出规范 JSON。空白、损坏或不满足 schema 的原生配置不会被替换。
 
-私有请求值保存在 `~/.pi/agent/model-config-payloads.json`，或 `<PI_CODING_AGENT_DIR>/model-config-payloads.json`。每个 key 是精确 `[provider, model-id]` 二元 tuple 的 JSON 编码，因此 ID 中的斜杠不会产生歧义。`before_provider_request` 只把当前所选 Model 的对象浅合并到请求中，其他 Model 不受影响。
+Compat 编辑器跟随 Pi 0.85.1 的配置面。布尔字段标注读取它的 API 家族（OpenAI completions、OpenAI Responses、Anthropic Messages）；字符串字段提供 `maxTokensField`、含 `baseten` 的 `thinkingFormat`、`cacheControlFormat`、`deferredToolsMode`、`sessionAffinityFormat`；数值字段覆盖 `vllmPriority`；`chatTemplateKwargs`、`chatTemplateArgs`、`openRouterRouting`、`vercelGatewayRouting` 按 JSON 对象编辑。`thinkingFormat` 取值与 `$var` 思考变量与 Pi 实际解析保持一致。`compat.sessionAffinityFormat` 取代了 Pi 0.80.7 移除的 `sendSessionIdHeader`；当存储文件仍带该遗留键时，编辑器提供带预览的迁移（`true` 删除，`false` 映射为 `sessionAffinityFormat: "openai-nosession"`）。
+
+原生 `samplingParams` 对象可按 Model 和 Model Override 编辑，Pi 会把它原样合并进 OpenAI 兼容请求体。私有请求值保存在 `~/.pi/agent/model-config-payloads.json`，或 `<PI_CODING_AGENT_DIR>/model-config-payloads.json`。每个 key 是精确 `[provider, model-id]` 二元 tuple 的 JSON 编码，因此 ID 中的斜杠不会产生歧义。`before_provider_request` 只把当前所选 Model 的对象浅合并到请求中，其他 Model 不受影响。
 
 Payload 与 API 密钥属于敏感数据。诊断、恢复预览、action result、错误、日志和测试输出都不包含这些值。私有存储和事务快照使用私有文件权限。有效旧 `extraPayload` rows 可通过确认后的编辑操作迁移；损坏 rows 必须经过明确的丢弃预览。
 
@@ -118,7 +120,7 @@ Payload 与 API 密钥属于敏感数据。诊断、恢复预览、action result
 
 ## Subagent 配置
 
-1.2.0 不改变 Subagent UI 和行为。插件继续编辑 builtin `context-builder`、`delegate`、`oracle`、`planner`、`researcher`、`reviewer`、`scout`、`worker` 对应的 `subagents.agentOverrides`。
+Subagent 编辑器写入 `subagents.agentOverrides`，覆盖 pi-subagents 0.63.0 的内置 agent（`advisor`、`delegate`、`oracle`、`researcher`、`reviewer`、`scout`、`worker`，以及外部 CLI runner `claude-code`、`claude-code-writer`、`codex-exec`、`codex-exec-writer`、`cursor-agent`、`cursor-agent-writer`），并额外列出当前文件中已存储的 agent 名，保证历史 override 仍可编辑。外部 CLI runner 会忽略 Pi 原生子 agent 选项，因此这些 agent 只提供 `model` 与清理动作。
 
 每个 override 可配置 `model`、`thinking`（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）、有序 `fallbackModels` 和 `tools`。Tools 支持 agent 默认策略、可搜索 allowlist、母 Agent 当前 active tools、手动 MCP 或 path-like tool ID，以及用 `false` 禁用全部工具。选择 `subagent` 工具仍会要求确认，因为它允许 nested fanout。
 
@@ -127,7 +129,7 @@ Payload 与 API 密钥属于敏感数据。诊断、恢复预览、action result
 ## 数据文件
 
 | 数据 | 路径 |
-|------|------|
+| ------ | ------ |
 | 原生 Providers 和 Models | `~/.pi/agent/models.json` |
 | 私有 Model Payload | `~/.pi/agent/model-config-payloads.json` |
 | 需要恢复时存在的事务日志 | `~/.pi/agent/model-config-transaction.json` |

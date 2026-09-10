@@ -101,7 +101,7 @@ pi-ai `KnownProvider`（0.85.1）比插件 `config-validation.ts:12` 的 `BUILT_
 - `validateCompat`（:294）：新增枚举校验 `deferredToolsMode`（`"kimi"`）、`sessionAffinityFormat`（三值）、数值校验 `vllmPriority`（有限数）、对象校验 `chatTemplateArgs`（复用 `validateChatTemplateKwargs`）。
 - `validateProvider`（:412）：校验 `oauth` 只能是 `"radius"`。
 - `validateModelLikeFields`（:361）：校验 `samplingParams` 必须为对象（值不限）。
-- 现有 `chatTemplateKwargs.$var` 只允许 `thinking.enabled|thinking.effort` —— **与 0.85.1 运行时 schema 一致**（`model-config.js` 的 `ChatTemplateKwargVariableSchema`），保持不要放开 `thinking.budget`（docs/models.md 提到 `budget`，但 schema 未收录；见 §4 陷阱）。
+- 现有 `chatTemplateKwargs.$var` 只允许 `thinking.enabled|thinking.effort` —— **修正**：引擎实际支持三个变量（`openai-completions.js:798-803` 解析 `thinking.enabled`/`thinking.budget`，`thinking.effort` 走 `thinkingLevelMap`；`pi-ai` 的 `ChatTemplateKwargValue` 含 `budget`，docs/models.md 也写了三个），只有 models.json 的 TypeBox schema（`ChatTemplateKwargVariableSchema`）漏了 `budget`。因为 union 会把它当额外属性放过（实测探针 C），这类配置可以正常加载并生效，所以插件必须放开 `thinking.budget`，否则会拦住 Pi 能用的配置。
 
 ### 3.3 `compat-settings.ts`
 
@@ -137,7 +137,7 @@ pi-ai `KnownProvider`（0.85.1）比插件 `config-validation.ts:12` 的 `BUILT_
 
 ### 3.8 `package.json`
 
-- `@earendil-works/pi-tui`（:29）从 `dependencies` 固定 `0.79.1` 改为 `peerDependencies: {"*"}`（docs/packages.md:171：Pi 内置这些包，插件不得捆绑；`@earendil-works/pi-coding-agent` 也应声明为 peer）。
+- `@earendil-works/pi-tui`（:29）从 `dependencies` 固定 `0.79.1` 改为 `peerDependencies: {"*"}`（docs/packages.md:171：Pi 内置这些包，插件不得捆绑；`@earendil-works/pi-coding-agent` 也应声明为 peer）。pi 侧证据同样明确：托管安装按包管理器传入 `--legacy-peer-deps` / `--omit=peer` / `--config.auto-install-peers=false`（`dist/core/package-manager.js:1459-1479`），注释写明“不要安装或求解宿主提供的 @earendil-works/pi-* peer”，因此声明 peer `"*"` 不会拉入重复副本）。
 - 证据：pi 的扩展加载器把 `@earendil-works/pi-tui`、`@earendil-works/pi-coding-agent` 别名/hook 到**宿主自带模块**（`dist/core/extensions/loader.js:13/40/84-101`），插件自带副本运行时永远不会被加载；它只影响 `npm test` 的类型/行为，导致"测试通过 ≠ 生产版本通过"。
 - 移除 `node_modules/@earendil-works/pi-tui` 本地安装（或保留为 `devDependencies: "0.85.1"` 仅用于测试），并让测试跑在与生产一致的版本上。
 
@@ -164,7 +164,7 @@ pi-ai `KnownProvider`（0.85.1）比插件 `config-validation.ts:12` 的 `BUILT_
 | ------ | ------ | ------ |
 | A | `compat.thinkingTokenBudgetField: "thinking_budget"`（schema 未声明） | ACCEPT（extra props 透传；`openai-completions.js:632/741` 会读取） |
 | B | `compat.vllmPriority: "high"`（类型错） | ACCEPT（OpenAI 组失败，但 Responses/Anthropic 组把它当 extra prop） |
-| C | `chatTemplateKwargs: { thinking: { $var: "thinking.budget" } }` | ACCEPT（同上被 union 放过；schema 只允许 `enabled`/`effort`，语义上不会生效） |
+| C | `chatTemplateKwargs: { thinking: { $var: "thinking.budget" } }` | ACCEPT（引擎支持该变量，见 §3.2 修正；schema 只是漏声明） |
 | D | `chatTemplateArgs: { thinking: { $var: "thinking.enabled" } }` | ACCEPT |
 | E | `models[0].samplingParams = {温度/嵌套任意值}` | ACCEPT |
 | F | `provider.oauth = "radius"` | ACCEPT |
@@ -221,3 +221,38 @@ pi 0.85.1 用 `proper-lockfile` 加锁并"读-改-写"合并（`settings-manager
 - 写一个与 §4 同款的 `ModelConfig.load()` 探针：对插件写出的每个新字段组合断言 `getError() === undefined`。
 - 真机手测：`/model-config` → 新增 `samplingParams`/`oauth`/新 compat → 保存 → `/model` 重载确认模型可用；`tuiMode=fullscreen` 下走一遍面板键盘操作（`tui.select.*`）。
 - 迁移验证：对现网 `models.json`（29 处 `sendSessionIdHeader: true`）执行一次迁移，确认仅删除键、字节级其他内容不变。
+
+---
+
+## 8. 实施记录（已完成）
+
+### 8.1 已改文件
+
+| 文件 | 改动 |
+| ------ | ------ |
+| `package.json` / `package-lock.json` | `@earendil-works/pi-tui` 从 `dependencies@0.79.1` 改为 `peerDependencies:"*"` + `devDependencies@0.85.1`；新增 `@earendil-works/pi-coding-agent` peer；本地测试运行时已对齐 0.85.1 |
+| `types.ts` | `ProviderConfig.oauth`；`ModelConfig/ModelOverrideConfig.samplingParams`；`CompatConfig` 补 §2.3 全部新字段；`API_TYPES` +3 并新增 `API_TYPE_IDS` 单一来源；新增 `JsonValue`、`OAUTH_PROVIDER_TYPES` |
+| `config-validation.ts` | `BUILT_IN_PROVIDERS_PI_0_85_1`（+5 内置 Provider）；`baseten`；新增布尔/枚举/数值/对象校验；`oauth`、`samplingParams` 校验；放开 `$var: thinking.budget` |
+| `compat-settings.ts` | 布尔字段按 API 家族重排并标注；新增 `COMPAT_STRING_FIELDS`、`COMPAT_NUMBER_FIELDS`、`chatTemplateArgs`；`sendSessionIdHeader` 迁移计划与执行函数 |
+| `field-editors.ts` | compat 编辑器支持数值字段、`sessionAffinityFormat`/`deferredToolsMode`/`chatTemplateArgs`，并在检测到遗留键时提供预览迁移；拆分为按组小函数 |
+| `model-editor.ts` | API 列表改为 `API_TYPE_IDS`；override 白名单加 `samplingParams`；Model/Override 新增 `samplingParams` 编辑入口；兼容性编辑器传入有效 API |
+| `provider-editor.ts` | API 列表单一来源；新增 `oauth` 字段与处理；compat/override 编辑器传入 Provider API |
+| `model-fields.ts` | `ModelSubtreeKey` 加 `samplingParams`（复用 `saveModelSubtree` 的乐观基线机制） |
+| `subagent-settings.ts` | thinking 补 `max`；内置 agent 名单对齐 pi-subagents 0.63.0；新增 `listSubagentAgentNames`/`isExternalCliSubagent`；BOM 剥离；settings.json 改为原子写 + 哈希 CAS 重试 |
+| `index.ts` | Subagent 列表用“内置 + 已存储 override 名”并集；外部 CLI runner agent 只提供 `model` 与清理动作 |
+| `config.ts` | `parseModelsDocument` 剥离 BOM（与 pi 一致） |
+| `README.md` / `README-CN.md` | 基线改 Pi 0.85.1，补 `oauth`/`samplingParams`/新 compat 分组与迁移说明 |
+| 测试 | 更新内置 Provider 名单与新旧目录断言、LICENSE 断言改为 CRLF 无关；新增 compat 迁移与新字段正/负例 |
+
+### 8.2 验证证据
+
+- `npm test`：**292 tests / 292 pass / 0 fail**（改动前基线为 289 tests / 288 pass / 1 fail，唯一失败是 `release-docs.test.ts` 对 LICENSE 的 CRLF 断言，已改为先归一化换行）。
+- `npm run check`：全部根模块 `node --experimental-strip-types --check` 通过。
+- 真机探针（`ModelConfig.load()`）：用插件自己的 `serializeModelsDocument` 写出包含 `oauth: "radius"`、`samplingParams`、全部新 compat 字段、`thinkingFormat: "baseten"`、`chatTemplateArgs.$var = thinking.budget` 以及遗留 `sendSessionIdHeader` 的 models.json，pi 0.85.1 返回 `getError() === undefined`，且插件的 JSONC 读取器往返字节一致。
+- 本地测试运行时：`node_modules/@earendil-works/pi-tui` 已由 `npm install` 升级到 **0.85.1**，与宿主相同。
+
+### 8.3 有意不做（保留现状，供确认）
+
+- `zaiToolStream`、`thinkingTokenBudgetField`、`supportsThinkingTokenBudget`：引擎会读取但 models.json schema 未声明（靠额外属性透传）。本次**未**加入 UI，避免超出报告范围；需要时可作为后续增量。
+- 版本号仍为 **1.2.0**（本次不是发布动作；`release-docs.test.ts` 对版本与 README 锚点的断言保持通过）。
+- Subagent 外部 CLI runner 字段策略采用“标注 + 只提供 model 与清理动作”，未按 pi-subagents 版本号硬编码 runner 能力表。

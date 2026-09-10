@@ -117,7 +117,7 @@ test("compat draft patches known fields and preserves future keys at nested leve
   };
   const scripted = createScriptedUi({
     selects: [
-      "[false] supportsStore",
+      "[false] supportsStore (OpenAI)",
       "true",
       "[对象] openRouterRouting",
       "编辑 JSON 对象",
@@ -135,6 +135,36 @@ test("compat draft patches known fields and preserves future keys at nested leve
     },
   });
   assert.deepEqual(existing.openRouterRouting.only, ["old"]);
+});
+
+test("compat draft edits vllmPriority and migrates the removed sendSessionIdHeader", async () => {
+  const scripted = createScriptedUi({
+    selects: [
+      "vllmPriority (OpenAI, vLLM 调度优先级) = (未设置)",
+      "输入数值",
+      "[迁移] 旧字段 sendSessionIdHeader = true",
+      "应用迁移",
+      "保存并返回",
+    ],
+    inputs: ["-1"],
+  });
+  const result = await editCompatDraft(scripted.ctx, "兼容性", { sendSessionIdHeader: true }, "openai-responses");
+  assert.deepEqual(result, { status: "save", value: { vllmPriority: -1 } });
+  scripted.assertExhausted();
+  assert.ok(scripted.calls.some((call) => call.kind === "notify" && call.message.includes("sendSessionIdHeader")));
+});
+
+test("compat draft maps a stored sendSessionIdHeader false to sessionAffinityFormat", async () => {
+  const scripted = createScriptedUi({
+    selects: [
+      "[迁移] 旧字段 sendSessionIdHeader = false",
+      "应用迁移",
+      "保存并返回",
+    ],
+  });
+  const result = await editCompatDraft(scripted.ctx, "兼容性", { sendSessionIdHeader: false }, "openai-completions");
+  assert.deepEqual(result, { status: "save", value: { sessionAffinityFormat: "openai-nosession" } });
+  scripted.assertExhausted();
 });
 
 test("thinking-map draft covers max, warns when inactive, and preserves unknown data", async () => {

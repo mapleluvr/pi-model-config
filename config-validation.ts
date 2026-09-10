@@ -1,4 +1,5 @@
 import { cloneOwnJsonData } from "./own-keys.ts";
+import { OAUTH_PROVIDER_TYPES } from "./types.ts";
 
 export interface ValidationIssue {
   path: string;
@@ -9,11 +10,12 @@ export interface ValidationOptions {
   builtInProviders: ReadonlySet<string>;
 }
 
-export const BUILT_IN_PROVIDERS_PI_0_80_6: ReadonlySet<string> = new Set([
+export const BUILT_IN_PROVIDERS_PI_0_85_1: ReadonlySet<string> = new Set([
   "amazon-bedrock",
   "ant-ling",
   "anthropic",
   "azure-openai-responses",
+  "baseten",
   "cerebras",
   "cloudflare-ai-gateway",
   "cloudflare-workers-ai",
@@ -36,6 +38,10 @@ export const BUILT_IN_PROVIDERS_PI_0_80_6: ReadonlySet<string> = new Set([
   "opencode",
   "opencode-go",
   "openrouter",
+  "qwen-token-plan",
+  "qwen-token-plan-cn",
+  "qwen-token-plan-individual",
+  "radius",
   "together",
   "vercel-ai-gateway",
   "xai",
@@ -47,11 +53,11 @@ export const BUILT_IN_PROVIDERS_PI_0_80_6: ReadonlySet<string> = new Set([
   "zai-coding-cn",
 ]);
 
-const DEFAULT_OPTIONS: ValidationOptions = { builtInProviders: BUILT_IN_PROVIDERS_PI_0_80_6 };
+const DEFAULT_OPTIONS: ValidationOptions = { builtInProviders: BUILT_IN_PROVIDERS_PI_0_85_1 };
 const THINKING_LEVEL_KEYS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const INPUT_TYPES = new Set(["text", "image"]);
 const THINKING_FORMATS = new Set([
-  "openai", "openrouter", "deepseek", "together", "zai", "qwen", "chat-template",
+  "openai", "openrouter", "deepseek", "together", "baseten", "zai", "qwen", "chat-template",
   "qwen-chat-template", "string-thinking", "ant-ling",
 ]);
 const BOOLEAN_COMPAT_FIELDS = [
@@ -59,40 +65,62 @@ const BOOLEAN_COMPAT_FIELDS = [
   "supportsDeveloperRole",
   "supportsReasoningEffort",
   "supportsUsageInStreaming",
+  "supportsFinishReason",
   "requiresToolResultName",
   "requiresAssistantAfterToolResult",
   "requiresThinkingAsText",
   "requiresReasoningContentOnAssistantMessages",
   "supportsStrictMode",
+  "supportsOpenAIGrammarTools",
   "supportsLongCacheRetention",
   "supportsTemperature",
   "zaiToolStream",
-  "sendSessionIdHeader",
+  "supportsAdditionalTools",
+  "supportsToolSearch",
+  "supportsMaxOutputTokens",
   "supportsEagerToolInputStreaming",
   "sendSessionAffinityHeaders",
   "supportsCacheControlOnTools",
   "forceAdaptiveThinking",
   "allowEmptySignature",
+  "supportsStrictTools",
+  "supportsMidConvoEffort",
+  "supportsToolReferences",
 ] as const;
+const SESSION_AFFINITY_FORMATS = new Set(["openai", "openai-nosession", "openrouter"]);
+const DEFERRED_TOOLS_MODES = new Set(["kimi"]);
+/** The engine resolves all three; the models.json TypeBox schema only declares two. */
+const CHAT_TEMPLATE_VARIABLES = new Set([
+  "thinking.enabled", "thinking.effort", "thinking.budget",
+]);
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function hasOwn(object: object, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(object, key);
+/** Raw JSON value read from a candidate document before validation narrows it. */
+type CandidateJson =
+  | string
+  | number
+  | boolean
+  | null
+  | CandidateJson[]
+  | { [key: string]: CandidateJson };
+
+function hasOwn(target: Record<string, unknown>, key: string): boolean {
+  return  Object.hasOwn(target, key);
 }
 
-function getOwn(object: object, key: string): unknown {
-  return hasOwn(object, key) ? (object as Record<string, unknown>)[key] : undefined;
+function getOwn(target: Record<string, unknown>, key: string): CandidateJson | undefined {
+  return hasOwn(target, key) ? (target[key] as CandidateJson) : undefined;
 }
 
 /**
  * Deep own-data-property materialization onto null prototypes.
  * Inherited fields and serialization/accessor hooks are never observed.
  */
-export function materializeOwnOnly(value: unknown): unknown {
-  return cloneOwnJsonData(value, { allowNonFiniteNumbers: true });
+export function materializeOwnOnly(value: unknown): CandidateJson {
+  return cloneOwnJsonData(value, { allowNonFiniteNumbers: true }) as CandidateJson;
 }
 
 function childPath(parent: string, key: string): string {
@@ -194,7 +222,7 @@ function validateFiniteNumber(value: unknown, path: string, issues: ValidationIs
   if (typeof value !== "number" || !Number.isFinite(value)) addIssue(issues, path, "must be a finite number");
 }
 
-function validateChatTemplateKwargs(value: unknown, path: string, issues: ValidationIssue[]): void {
+function validateChatTemplateValues(value: unknown, path: string, issues: ValidationIssue[]): void {
   if (!isObject(value)) {
     addIssue(issues, path, "must be an object");
     return;
@@ -208,8 +236,8 @@ function validateChatTemplateKwargs(value: unknown, path: string, issues: Valida
       addIssue(issues, kwargPath, "must be a scalar or thinking variable object");
       continue;
     }
-    if (kwarg.$var !== "thinking.enabled" && kwarg.$var !== "thinking.effort") {
-      addIssue(issues, childPath(kwargPath, "$var"), "must be thinking.enabled or thinking.effort");
+    if (typeof kwarg.$var !== "string" || !CHAT_TEMPLATE_VARIABLES.has(kwarg.$var)) {
+      addIssue(issues, childPath(kwargPath, "$var"), "must be thinking.enabled, thinking.effort, or thinking.budget");
     }
     if (kwarg.omitWhenOff !== undefined && typeof kwarg.omitWhenOff !== "boolean") {
       addIssue(issues, childPath(kwargPath, "omitWhenOff"), "must be a boolean when present");
@@ -264,15 +292,14 @@ function validateOpenRouterRouting(value: unknown, path: string, issues: Validat
   }
   if (value.max_price !== undefined) {
     const pricePath = childPath(path, "max_price");
-    if (!isObject(value.max_price)) addIssue(issues, pricePath, "must be an object");
-    else {
+    if (isObject(value.max_price)) {
       for (const key of OPEN_ROUTER_PRICE_FIELDS) {
         const price = value.max_price[key];
         if (price !== undefined && typeof price !== "string" && (typeof price !== "number" || !Number.isFinite(price))) {
           addIssue(issues, childPath(pricePath, key), "must be a finite number or string");
         }
       }
-    }
+    } else addIssue(issues, pricePath, "must be an object");
   }
   if (value.preferred_min_throughput !== undefined) {
     validatePercentileOrNumber(value.preferred_min_throughput, childPath(path, "preferred_min_throughput"), issues);
@@ -309,7 +336,21 @@ function validateCompat(value: unknown, path: string, issues: ValidationIssue[])
     addIssue(issues, childPath(path, "cacheControlFormat"), "must be anthropic");
   }
   if (value.chatTemplateKwargs !== undefined) {
-    validateChatTemplateKwargs(value.chatTemplateKwargs, childPath(path, "chatTemplateKwargs"), issues);
+    validateChatTemplateValues(value.chatTemplateKwargs, childPath(path, "chatTemplateKwargs"), issues);
+  }
+  if (value.chatTemplateArgs !== undefined) {
+    validateChatTemplateValues(value.chatTemplateArgs, childPath(path, "chatTemplateArgs"), issues);
+  }
+  if (value.deferredToolsMode !== undefined
+    && (typeof value.deferredToolsMode !== "string" || !DEFERRED_TOOLS_MODES.has(value.deferredToolsMode))) {
+    addIssue(issues, childPath(path, "deferredToolsMode"), "must be kimi");
+  }
+  if (value.sessionAffinityFormat !== undefined
+    && (typeof value.sessionAffinityFormat !== "string" || !SESSION_AFFINITY_FORMATS.has(value.sessionAffinityFormat))) {
+    addIssue(issues, childPath(path, "sessionAffinityFormat"), "must be openai, openai-nosession, or openrouter");
+  }
+  if (value.vllmPriority !== undefined) {
+    validateFiniteNumber(value.vllmPriority, childPath(path, "vllmPriority"), issues);
   }
   if (value.openRouterRouting !== undefined) {
     validateOpenRouterRouting(value.openRouterRouting, childPath(path, "openRouterRouting"), issues);
@@ -338,8 +379,7 @@ function validateModelCost(value: unknown, path: string, issues: ValidationIssue
   for (const key of COST_RATE_KEYS) validateRate(value[key], childPath(path, key), issues);
   if (value.tiers !== undefined) {
     const tiersPath = childPath(path, "tiers");
-    if (!Array.isArray(value.tiers)) addIssue(issues, tiersPath, "must be an array");
-    else value.tiers.forEach((tier, index) => validateCostTier(tier, `${tiersPath}[${index}]`, issues));
+    if (Array.isArray(value.tiers)) value.tiers.forEach((tier, index) => validateCostTier(tier, `${tiersPath}[${index}]`, issues)); else addIssue(issues, tiersPath, "must be an array");
   }
 }
 
@@ -353,8 +393,7 @@ function validateOverrideCost(value: unknown, path: string, issues: ValidationIs
   }
   if (value.tiers !== undefined) {
     const tiersPath = childPath(path, "tiers");
-    if (!Array.isArray(value.tiers)) addIssue(issues, tiersPath, "must be an array");
-    else value.tiers.forEach((tier, index) => validateCostTier(tier, `${tiersPath}[${index}]`, issues));
+    if (Array.isArray(value.tiers)) value.tiers.forEach((tier, index) => validateCostTier(tier, `${tiersPath}[${index}]`, issues)); else addIssue(issues, tiersPath, "must be an array");
   }
 }
 
@@ -384,6 +423,12 @@ function validateModelLikeFields(
   }
   if (hasOwn(value, "headers")) validateHeaders(getOwn(value, "headers"), childPath(path, "headers"), issues);
   if (hasOwn(value, "compat")) validateCompat(getOwn(value, "compat"), childPath(path, "compat"), issues);
+  if (hasOwn(value, "samplingParams")) {
+    const samplingParams = getOwn(value, "samplingParams");
+    if (!isObject(samplingParams)) {
+      addIssue(issues, childPath(path, "samplingParams"), "must be an object");
+    }
+  }
 }
 
 function validateModel(value: unknown, path: string, issues: ValidationIssue[]): Record<string, unknown> | undefined {
@@ -425,6 +470,12 @@ function validateProvider(
     validateOptionalNonEmptyString(value, key, path, issues);
   }
   validateBoolean(value, "authHeader", path, issues);
+  if (hasOwn(value, "oauth")) {
+    const oauth = getOwn(value, "oauth");
+    if (typeof oauth !== "string" || !(OAUTH_PROVIDER_TYPES as readonly string[]).includes(oauth)) {
+      addIssue(issues, childPath(path, "oauth"), "must be radius");
+    }
+  }
   if (hasOwn(value, "headers")) validateHeaders(getOwn(value, "headers"), childPath(path, "headers"), issues);
   if (hasOwn(value, "compat")) validateCompat(getOwn(value, "compat"), childPath(path, "compat"), issues);
 
@@ -432,8 +483,7 @@ function validateProvider(
   const modelsValue = hasOwn(value, "models") ? getOwn(value, "models") : undefined;
   if (modelsValue !== undefined) {
     const modelsPath = childPath(path, "models");
-    if (!Array.isArray(modelsValue)) addIssue(issues, modelsPath, "must be an array");
-    else {
+    if (Array.isArray(modelsValue)) {
       models = modelsValue.map((model, index) => validateModel(model, `${modelsPath}[${index}]`, issues));
       const seenIds = new Set<string>();
       modelsValue.forEach((model, index) => {
@@ -446,21 +496,20 @@ function validateProvider(
           seenIds.add(modelId);
         }
       });
-    }
+    } else addIssue(issues, modelsPath, "must be an array");
   }
 
   let overrideCount = 0;
   if (hasOwn(value, "modelOverrides")) {
     const overridesPath = childPath(path, "modelOverrides");
     const overrides = getOwn(value, "modelOverrides");
-    if (!isObject(overrides)) addIssue(issues, overridesPath, "must be an object");
-    else {
+    if (isObject(overrides)) {
       overrideCount = Object.keys(overrides).filter((key) => hasOwn(overrides, key)).length;
       for (const modelId of Object.keys(overrides)) {
         if (!hasOwn(overrides, modelId)) continue;
         validateOverride(getOwn(overrides, modelId), childPath(overridesPath, modelId), issues);
       }
-    }
+    } else addIssue(issues, overridesPath, "must be an object");
   }
 
   const hasModels = Array.isArray(modelsValue) && modelsValue.length > 0;
@@ -497,20 +546,26 @@ export function validateModelsCandidate(
   const issues: ValidationIssue[] = [];
   let materialized: Record<string, unknown>;
   try {
-    materialized = materializeOwnOnly(candidate) as Record<string, unknown>;
+    const materializedValue = materializeOwnOnly(candidate);
+    if (!isObject(materializedValue)) {
+      addIssue(issues, "$", "must be an object");
+      return issues;
+    }
+    materialized = materializedValue;
   } catch {
     addIssue(issues, "$", "must contain only own JSON data properties");
     return issues;
   }
-  if (!isObject(materialized)) {
-    addIssue(issues, "$", "must be an object");
-    return issues;
-  }
-  if (!hasOwn(materialized, "providers") || !isObject(getOwn(materialized, "providers"))) {
+  if (!hasOwn(materialized, "providers")) {
     addIssue(issues, "$.providers", "must be an object");
     return issues;
   }
-  const providers = getOwn(materialized, "providers") as Record<string, unknown>;
+  const providersValue = getOwn(materialized, "providers");
+  if (!isObject(providersValue)) {
+    addIssue(issues, "$.providers", "must be an object");
+    return issues;
+  }
+  const providers: Record<string, unknown> = providersValue;
   for (const providerId of Object.keys(providers)) {
     if (!hasOwn(providers, providerId)) continue;
     validateProvider(providerId, getOwn(providers, providerId), childPath("$.providers", providerId), options, issues);

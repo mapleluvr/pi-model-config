@@ -29,7 +29,7 @@ test("Model catalog uses the exact stable category and field IDs", () => {
     ["thinking", ["thinkingLevelMap"]],
     ["cost", ["input", "output", "cacheRead", "cacheWrite", "tiers"]],
     ["compatibility", ["compat"]],
-    ["payload", ["payload"]],
+    ["payload", ["samplingParams", "payload"]],
     ["actions", ["copy", "delete"]],
   ]);
 });
@@ -94,6 +94,7 @@ test("Override catalog exposes only the approved restricted surface", () => {
     ["capability", ["reasoning", "input", "contextWindow", "maxTokens"]],
     ["thinking", ["thinkingLevelMap"]],
     ["cost", ["input", "output", "cacheRead", "cacheWrite", "tiers"]],
+    ["sampling", ["samplingParams"]],
     ["headers", ["headers"]],
     ["compatibility", ["compat"]],
   ]);
@@ -213,6 +214,38 @@ test("Model nested conflict retains the draft and original optimistic baseline",
   assert.deepEqual(calls[0]!.baseline, { Existing: "yes" });
   assert.deepEqual(calls[1]!.baseline, { Existing: "yes" });
   assert.deepEqual(calls[1]!.next, { Existing: "yes", "X-Test": "draft" });
+});
+
+test("Model samplingParams draft saves through the native subtree action", async () => {
+  const model = { id: "one", future: { keep: true } };
+  const calls: Array<{ key: string; baseline: unknown; next: unknown }> = [];
+  const actions = {
+    readEditorSnapshot: () => modelSnapshot(model),
+    saveModelSubtree: async (_providerId: string, _modelId: string, key: string, baseline: unknown, next: unknown) => {
+      calls.push({ key, baseline, next });
+      return { type: "success" };
+    },
+  } as any;
+  const panels = [
+    panelResult("open-section", "payload", "samplingParams"),
+    panelResult("back"),
+  ];
+  const selects = ["新增条目", "JSON", "保存并返回"];
+  const inputs = ["temperature"];
+  const editors = ["1"];
+  const ctx = {
+    ui: {
+      select: async () => selects.shift(),
+      input: async () => inputs.shift(),
+      editor: async () => editors.shift(),
+      notify() {},
+    },
+  } as any;
+  await runModelEditor(ctx, "local", "one", { actions, openPanel: async () => panels.shift()! });
+  assert.deepEqual(calls, [{ key: "samplingParams", baseline: undefined, next: { temperature: 1 } }]);
+  assert.deepEqual(selects, []);
+  assert.deepEqual(inputs, []);
+  assert.deepEqual(editors, []);
 });
 
 test("Native optional Model fields can all be restored to absence without touching unknown fields", async () => {
