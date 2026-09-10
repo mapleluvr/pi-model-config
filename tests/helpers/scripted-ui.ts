@@ -4,12 +4,14 @@ export interface ScriptedUiValues {
   selects?: Array<string | undefined>;
   inputs?: Array<string | undefined>;
   editors?: Array<string | undefined>;
+  confirms?: Array<boolean | undefined>;
 }
 
 export type ScriptedUiCall =
   | { kind: "select"; title: string; options: string[]; result: string | undefined }
   | { kind: "input"; title: string; placeholder: string | undefined; result: string | undefined }
   | { kind: "editor"; title: string; initialValue: string | undefined; result: string | undefined }
+  | { kind: "confirm"; title: string; description: string; result: boolean | undefined }
   | { kind: "notify"; message: string; level: string | undefined };
 
 function take<T>(values: T[], kind: string): T {
@@ -25,6 +27,7 @@ export function createScriptedUi(script: ScriptedUiValues = {}): {
   const selects = [...(script.selects ?? [])];
   const inputs = [...(script.inputs ?? [])];
   const editors = [...(script.editors ?? [])];
+  const confirms = [...(script.confirms ?? [])];
   const calls: ScriptedUiCall[] = [];
   const ctx = {
     ui: {
@@ -46,6 +49,11 @@ export function createScriptedUi(script: ScriptedUiValues = {}): {
         calls.push({ kind: "editor", title, initialValue, result });
         return result;
       },
+      confirm: async (title: string, description: string) => {
+        const result = take(confirms, "confirm");
+        calls.push({ kind: "confirm", title, description, result });
+        return result;
+      },
       notify: (message: string, level?: string) => {
         calls.push({ kind: "notify", message, level });
       },
@@ -58,6 +66,7 @@ export function createScriptedUi(script: ScriptedUiValues = {}): {
       assert.equal(selects.length, 0, "unconsumed select results");
       assert.equal(inputs.length, 0, "unconsumed input results");
       assert.equal(editors.length, 0, "unconsumed editor results");
+      assert.equal(confirms.length, 0, "unconsumed confirm results");
     },
   };
 }

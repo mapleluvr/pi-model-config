@@ -412,7 +412,7 @@ export async function editSubagentAgentOverride(
     const overrides = readSubagentAgentOverrides(settingsPath);
     const current = overrides[agentName] ?? {};
     const ignoredNote = externalCli ? "（外部 CLI runner 忽略）" : "";
-    const rejectedNote = "（外部 CLI runner 不支持；残留会使运行被拒绝）";
+    const rejectedNote = "（外部 CLI runner 不支持；残留会使单 agent 运行被拒绝）";
     const currentModel = `当前 model: ${current.model || "(默认 Pi 当前模型)"}${externalCli ? rejectedNote : ""}`;
     const currentThinking = `当前 thinking: ${current.thinking || "(未设置)"}${ignoredNote}`;
     const currentFallback = `当前 fallbackModels: ${formatFallbackModels(current.fallbackModels)}${ignoredNote}`;

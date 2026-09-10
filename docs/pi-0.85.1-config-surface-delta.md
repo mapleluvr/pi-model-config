@@ -190,7 +190,7 @@ pi 解析 `models.json`/`settings.json` 前都 `stripBom`（`dist/core/model-con
 
 pi 0.85.1 用 `proper-lockfile` 加锁并"读-改-写"合并（`settings-manager.js:376-391`）；插件 `subagent-settings.ts` 原为裸 `fs.writeFileSync`。用户按 `/model` `Ctrl+S` 保存默认模型与插件保存 subagent override 并发时会丢更新。
 
-**已实施**：settings.json 改为「每次重读 + 原子替换 + 内容哈希 CAS 重试」，上限 `SETTINGS_WRITE_ATTEMPTS` 次，超限抛出 `concurrent modifications detected` 并保留并发写入者的字节（测试见 §9.2）。
+**已实施**：settings.json 改为「每次重读 + 原子替换 + 内容哈希 CAS 重试」，上限 `SETTINGS_WRITE_ATTEMPTS` 次，超限抛出 `concurrent modifications detected` 并保留并发写入者的字节（测试见 §9.1）。
 
 **未实施（已知残差）**：哈希检查在 `beforeRename` 内、紧邻 `renameSync`，因此“检查通过后、rename 前”落地的并发写仍会被覆盖；要彻底关闭它必须持有 pi 自己的 `proper-lockfile` 锁（本插件不持有），引入 `process-lock.ts` 对 pi 的 settings-manager 无效（它不识别该 IPC 锁），故不引入。代码注释已按此精确表述，不再声称“绝不覆盖”。
 
@@ -243,14 +243,14 @@ pi 0.85.1 用 `proper-lockfile` 加锁并"读-改-写"合并（`settings-manager
 | `provider-editor.ts` | API 列表单一来源；新增 `oauth` 字段与处理；compat/override 编辑器传入 Provider API |
 | `model-fields.ts` | `ModelSubtreeKey` 加 `samplingParams`（复用 `saveModelSubtree` 的乐观基线机制） |
 | `subagent-settings.ts` | thinking 补 `max`；内置 agent 名单对齐 pi-subagents 0.63.0；新增 `listSubagentAgentNames`/`isExternalCliSubagent`；BOM 剥离；settings.json 改为原子写 + 哈希 CAS 重试（含 `SettingsWriteHooks` 测试缝） |
-| `index.ts` | Subagent 列表用“内置 + 已存储 override 名”并集；外部 CLI runner agent 只保留带“忽略”标记的只读行 + 清理动作（不再提供 `设置 model`，见 §9.1） |
+| `index.ts` | Subagent 列表用“内置 + 已存储 override 名”并集；外部 CLI runner agent 只保留带“忽略”标记的只读行 + 清理动作（不再提供 `设置 model`，见 §10.1） |
 | `config.ts` | `parseModelsDocument` 剥离 BOM（与 pi 一致） |
 | `README.md` / `README-CN.md` | 基线改 Pi 0.85.1，补 `oauth`/`samplingParams`/新 compat 分组与迁移说明 |
 | 测试 | 更新内置 Provider 名单与新旧目录断言、LICENSE 断言改为 CRLF 无关；新增 compat 迁移与新字段正/负例；新增 settings.json BOM/CAS 重试/超限、external-CLI 菜单裁剪、models.json BOM、subagent agent 名单用例 |
 
 ### 8.2 验证证据
 
-- `npm test`：**307 tests / 307 pass / 0 fail**（改动前基线为 289 tests / 288 pass / 1 fail，唯一失败是 `release-docs.test.ts` 对 LICENSE 的 CRLF 断言，已改为先归一化换行）。
+- `npm test`：**308 tests / 308 pass / 0 fail**（改动前基线为 289 tests / 288 pass / 1 fail，唯一失败是 `release-docs.test.ts` 对 LICENSE 的 CRLF 断言，已改为先归一化换行）。
 - `npm run check`：全部根模块 `node --experimental-strip-types --check` 通过。
 - 真机探针（`ModelConfig.load()`）：用插件自己的 `serializeModelsDocument` 写出包含 `oauth: "radius"`、`samplingParams`、全部新 compat 字段、`thinkingFormat: "baseten"`、`chatTemplateArgs.$var = thinking.budget` 以及遗留 `sendSessionIdHeader` 的 models.json，pi 0.85.1 返回 `getError() === undefined`，且插件的 JSONC 读取器往返字节一致。
 - 本地测试运行时：`node_modules/@earendil-works/pi-tui` 已由 `npm install` 升级到 **0.85.1**，与宿主相同。
@@ -261,7 +261,7 @@ pi 0.85.1 用 `proper-lockfile` 加锁并"读-改-写"合并（`settings-manager
 - `thinkingTokenBudgetField`、`supportsThinkingTokenBudget`：引擎会读取但 models.json schema 未声明（靠额外属性透传）。本次**未**加入 UI，避免超出报告范围；需要时可作为后续增量。
   （`zaiToolStream` 也属此类，但它在改动前就已存在于 UI，不是本次新增。）
 - 版本号仍为 **1.2.0**（本次不是发布动作；`release-docs.test.ts` 对版本与 README 锚点的断言保持通过）。
-- Subagent 外部 CLI runner 字段策略（round 2 已修正，见 §9.3）：pi-subagents 不接受任何 Pi 原生子代理选项——`model` 残留会使单 agent 运行被拒绝，`thinking`/`fallbackModels`/`tools` 被丢弃；插件只提供标注过的只读行 + 清理动作，不再提供 `设置 model`。
+- Subagent 外部 CLI runner 字段策略（round 2 已修正，见 §10.1）：pi-subagents 不接受任何 Pi 原生子代理选项——`model` 残留会使单 agent 运行被拒绝，`thinking`/`fallbackModels`/`tools` 被丢弃；插件只提供标注过的只读行 + 清理动作，不再提供 `设置 model`。
 
 ---
 
@@ -317,3 +317,13 @@ pi 0.85.1 用 `proper-lockfile` 加锁并"读-改-写"合并（`settings-manager
 
 - 测试空缺项：评审确认新测试驱动的是生产函数（`updateSubagentAgentOverride`/`editSubagentAgentOverride`/`readModelsConfig`），断言可失败，`SettingsWriteHooks` 为可选参数（生产调用方均传 3 参），不会影响生产行为。
 - CAS 注释、`supportsExplicitPromptCacheMode`、compat label 前置条件、`COMPAT_STRING_FIELD_ORDER`、`thinkingFormat` 断言五项均被确认。
+
+---
+
+## 11. 独立评审（round 3，对象 `ac69309`）与处置
+
+结论：**`converged`**（无 must-fix）。三条 report-only P2 已全部处理（措辞/交叉引用/补测试，无行为变更）：
+
+- P2-1：`model` 行的提示原为“残留会使运行被拒绝”，未限定路径。已复核 `async-execution.ts:900/909-910`（chain/task 路径下 agent 级 model/thinking 直接置 `undefined`，只有 step 级 model 会在 `:826` 被拒），改为“残留会使**单 agent** 运行被拒绝”；测试与 README 同步。
+- P2-2：文档交叉引用修正（`§9.2`/`§9.3` → `§9.1`/`§10.1`）。
+- P2-3：补上清理动作的端到端派发测试（`tests/subagent-menu.test.ts`：脚本选中 `清除 model/thinking/fallbackModels（残留会被拒绝）` + 确认，断言存储的 `model` 键被移除）；为此给共享的 scripted UI 助手增加 `confirms` 支持。若 `index.ts` 的前缀派发失效，该测试会因存储未变而失败。

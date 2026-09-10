@@ -49,7 +49,7 @@ test("external CLI agents offer cleanup only, with every Pi-native row marked ig
     assert.ok(
       labels.some(
         (label) => label.startsWith("当前 model:")
-          && label.includes("（外部 CLI runner 不支持；残留会使运行被拒绝）"),
+          && label.includes("（外部 CLI runner 不支持；残留会使单 agent 运行被拒绝）"),
       ),
       "a stale model must be flagged as run-blocking, not merely ignored",
     );
@@ -80,5 +80,30 @@ test("native Pi child agents keep the full override menu without ignore markers"
     assert.equal(labels.some((label) => label.includes("外部 CLI runner")), false);
   } finally {
     fs.rmSync(path.dirname(settingsPath), { recursive: true, force: true });
+  }
+});
+
+test("the external cleanup action removes a stored model that would block the run", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-config-menu-clear-"));
+  const settingsPath = path.join(dir, "settings.json");
+  fs.writeFileSync(settingsPath, JSON.stringify({
+    subagents: { agentOverrides: { "codex-exec": { model: "provider/model", thinking: "high" } } },
+  }), "utf-8");
+  try {
+    const { ctx, assertExhausted } = createScriptedUi({
+      selects: ["清除 model/thinking/fallbackModels（残留会被拒绝）", "返回"],
+      confirms: [true],
+    });
+    await editSubagentAgentOverride(FAKE_PI, ctx, settingsPath, "codex-exec");
+    assertExhausted();
+
+    const written = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+    assert.deepEqual(
+      written.subagents.agentOverrides,
+      {},
+      "the run-blocking model key must be gone once the user clears the fields",
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
