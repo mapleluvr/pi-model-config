@@ -5,7 +5,7 @@
 [![pi-package](https://img.shields.io/badge/pi-package-blue)](https://pi.dev/packages)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Pi Model Config 1.2.0 提供 `/model-config`，用于按字段管理原生 Provider、Model、私有请求 Payload 和 Subagent overrides。插件不会动态注册 Provider；`models.json` 加载和 ModelRegistry 刷新仍由 Pi 负责。
+Pi Model Config 1.2.1 提供 `/model-config`，用于按字段管理原生 Provider、Model、私有请求 Payload 和 Subagent overrides。插件不会动态注册 Provider；`models.json` 加载和 ModelRegistry 刷新仍由 Pi 负责。
 
 English documentation: [README.md](README.md)
 
@@ -120,9 +120,13 @@ Payload 与 API 密钥属于敏感数据。诊断、恢复预览、action result
 
 ## Subagent 配置
 
-Subagent 编辑器写入 `subagents.agentOverrides`，覆盖 pi-subagents 0.63.0 的内置 agent（`advisor`、`delegate`、`oracle`、`researcher`、`reviewer`、`scout`、`worker`，以及外部 CLI runner `claude-code`、`claude-code-writer`、`codex-exec`、`codex-exec-writer`、`cursor-agent`、`cursor-agent-writer`），并额外列出当前文件中已存储的 agent 名，保证历史 override 仍可编辑。外部 CLI runner 不接受任何 Pi 原生子 agent 选项：pi-subagents 的 CLI 适配器完全不读取 `model`，残留的 `model` override 会让单 agent 运行直接失败（`does not support: model override`），而 `thinking`/`fallbackModels`/`tools` 会被丢弃。因此这些 agent 只显示带明确标注的只读行（`model` 行标注“残留会使运行被拒绝”），编辑器不再提供 `model`/`thinking`/`fallbackModels`/`tools` 编辑入口，并用 `清除 model/thinking/fallbackModels（残留会被拒绝）` 移除残留键。
+Subagent 编辑器对齐 pi-subagents 0.68.0 的配置面。内置 agent 包括 `advisor`、`claude-code`、`claude-code-writer`、`codex-exec`、`codex-exec-writer`、`cursor-agent`、`cursor-agent-writer`、`delegate`、`evidence-auditor`、`oracle`、`researcher`、`reviewer`、`scout` 和 `worker`。当前文件中已经存储的其他 agent 名也会继续列出，保证历史 override 可达。
 
-每个 override 可配置 `model`、`thinking`（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）、有序 `fallbackModels` 和 `tools`。Tools 支持 agent 默认策略、可搜索 allowlist、母 Agent 当前 active tools、手动 MCP 或 path-like tool ID，以及用 `false` 禁用全部工具。选择 `subagent` 工具仍会要求确认，因为它允许 nested fanout。
+pi-subagents 接受这些 `subagents.agentOverrides.<name>` 字段：`description`、`machine`、`output`、`outputMode`、`defaultReads`、`model`、`defaultProvider`、`fast`、`thinking`、`systemPromptMode`、`inheritProjectContext`、`inheritGlobalContext`、`inheritSkills`、`defaultContext`、`acceptanceRole`、`disabled`、`systemPrompt`、`skills`、`tools`、`excludeTools`、`allowNestedSubagents`、`extensions`、`subagentOnlyExtensions`、`mutationTools`、`completionGuard` 和 `toolBudget`。编辑器直接管理面向模型的 `model`、`thinking`、`tools` 字段；其他合法字段在定向写入时会保留，可直接在 `settings.json` 中维护。`agentOverridesByProvider` provider-scoped 条目也会保留，但本编辑器写入普通的 `agentOverrides` map。
+
+外部 CLI runner 不应用 Pi 原生子 agent 设置。残留的 `model` override 会让单 agent 运行因 `does not support: model override` 失败；`thinking` 和 `tools` 会被忽略。因此这些 agent 只显示带明确标注的只读行，并只提供清理动作。打开或同步 Subagent 配置时，编辑器会自动删除当前 pi-subagents 版本已经不接受的配置字段。
+
+编辑器可以设置 `model`、`thinking`（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）和 `tools`。Tools 支持 agent 默认策略、让 Pi 使用普通内置工具的显式 `tools: "inherit"`、可搜索 allowlist、母 Agent 当前 active tools、手动 MCP 或 path-like tool ID，以及用 `false` 禁用全部工具。选择 `subagent` 工具仍会要求确认，因为它允许 nested fanout。
 
 项目设置位于 `<project>/.pi/settings.json`，用户设置位于 `~/.pi/agent/settings.json`。同步操作只复制完整 `subagents.agentOverrides` 子树，并保留其他 settings 字段。
 

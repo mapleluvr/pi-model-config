@@ -28,7 +28,7 @@ function menuLabels(calls: ScriptedUiCall[]): string[] {
 test("external CLI agents offer cleanup only, with every Pi-native row marked ignored", async () => {
   const settingsPath = seedSettings();
   try {
-    // pi-subagents never reads model/thinking/fallbackModels/tools for these runners, so the
+    // pi-subagents never reads model/thinking/tools for these runners, so the
     // editor must not pretend the values take effect.
     const { ctx, calls, assertExhausted } = createScriptedUi({ selects: ["返回"] });
     await editSubagentAgentOverride(FAKE_PI, ctx, settingsPath, "codex-exec");
@@ -40,7 +40,7 @@ test("external CLI agents offer cleanup only, with every Pi-native row marked ig
       [],
       `no Pi-native override editor may be offered: ${labels.join(" | ")}`,
     );
-    for (const row of ["当前 thinking:", "当前 fallbackModels:", "当前 tools:"]) {
+    for (const row of ["当前 thinking:", "当前 tools:"]) {
       assert.ok(
         labels.some((label) => label.startsWith(row) && label.includes("（外部 CLI runner 忽略）")),
         `${row} must be shown as ignored`,
@@ -54,7 +54,7 @@ test("external CLI agents offer cleanup only, with every Pi-native row marked ig
       "a stale model must be flagged as run-blocking, not merely ignored",
     );
     assert.ok(
-      labels.some((label) => label.startsWith("清除 model/thinking/fallbackModels（残留会被拒绝）")),
+      labels.some((label) => label.startsWith("清除 model/thinking（残留会被拒绝）")),
       "the cleanup action must point at the run-blocking key",
     );
     assert.ok(labels.includes("删除整个 agent override"));
@@ -74,7 +74,6 @@ test("native Pi child agents keep the full override menu without ignore markers"
     assert.deepEqual(labels.filter((label) => label.startsWith("设置 ")), [
       "设置 model",
       "设置 thinking",
-      "设置 fallbackModels",
       "设置 tools allowlist",
     ]);
     assert.equal(labels.some((label) => label.includes("外部 CLI runner")), false);
@@ -91,7 +90,7 @@ test("the external cleanup action removes a stored model that would block the ru
   }), "utf-8");
   try {
     const { ctx, assertExhausted } = createScriptedUi({
-      selects: ["清除 model/thinking/fallbackModels（残留会被拒绝）", "返回"],
+      selects: ["清除 model/thinking（残留会被拒绝）", "返回"],
       confirms: [true],
     });
     await editSubagentAgentOverride(FAKE_PI, ctx, settingsPath, "codex-exec");

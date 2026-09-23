@@ -8,7 +8,7 @@ import {
   listSubagentAgentNames,
 } from "../subagent-settings.ts";
 
-// pi-subagents 0.63.0 ships these builtins (src/agents/builtin-names.ts); the plugin
+// pi-subagents 0.68.0 ships these builtins (src/agents/builtin-names.ts); the plugin
 // used to hardcode context-builder/planner, which no longer exist.
 test("builtin agent names match the installed pi-subagents surface", () => {
   assert.deepEqual([...BUILTIN_SUBAGENT_NAMES], [
@@ -20,6 +20,7 @@ test("builtin agent names match the installed pi-subagents surface", () => {
     "cursor-agent",
     "cursor-agent-writer",
     "delegate",
+    "evidence-auditor",
     "oracle",
     "researcher",
     "reviewer",
@@ -42,7 +43,7 @@ test("external CLI runners are marked so the editor can drop Pi-native options",
   for (const name of EXTERNAL_CLI_SUBAGENT_NAMES) {
     assert.ok(isExternalCliSubagent(name), `${name} must be treated as an external CLI runner`);
   }
-  for (const name of ["advisor", "delegate", "reviewer", "worker", "planner"]) {
+  for (const name of ["advisor", "delegate", "evidence-auditor", "reviewer", "worker", "planner"]) {
     assert.equal(isExternalCliSubagent(name), false, `${name} is a native Pi child agent`);
   }
 });

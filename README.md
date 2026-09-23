@@ -5,7 +5,7 @@
 [![pi-package](https://img.shields.io/badge/pi-package-blue)](https://pi.dev/packages)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Pi Model Config 1.2.0 adds `/model-config`, a field-oriented terminal editor for native Providers, Models, private request Payloads, and Subagent overrides. It does not register Providers dynamically; Pi continues to own `models.json` loading and ModelRegistry refresh.
+Pi Model Config 1.2.1 adds `/model-config`, a field-oriented terminal editor for native Providers, Models, private request Payloads, and Subagent overrides. It does not register Providers dynamically; Pi continues to own `models.json` loading and ModelRegistry refresh.
 
 Chinese documentation: [README-CN.md](README-CN.md)
 
@@ -120,9 +120,13 @@ Diagnostics can complete unambiguous recovery automatically. Recovery requiring 
 
 ## Subagent configuration
 
-The Subagent editor writes `subagents.agentOverrides` for the pi-subagents 0.63.0 builtin agents (`advisor`, `delegate`, `oracle`, `researcher`, `reviewer`, `scout`, `worker`, and the external CLI runners `claude-code`, `claude-code-writer`, `codex-exec`, `codex-exec-writer`, `cursor-agent`, `cursor-agent-writer`), plus every agent name already stored in the current file so earlier overrides stay reachable. External CLI runners accept no Pi-native child option: pi-subagents' CLI adapters never read a `model`, a leftover `model` override makes a single-agent run fail with `does not support: model override`, and `thinking`/`fallbackModels`/`tools` are dropped. Those agents therefore show read-only rows with an explicit marker (the `model` row states that a leftover value blocks the run), the editor offers no `model`/`thinking`/`fallbackModels`/`tools` editor for them, and the cleanup action `清除 model/thinking/fallbackModels（残留会被拒绝）` removes stale keys.
+The Subagent editor targets the pi-subagents 0.68.0 configuration surface. Builtin agents include `advisor`, `claude-code`, `claude-code-writer`, `codex-exec`, `codex-exec-writer`, `cursor-agent`, `cursor-agent-writer`, `delegate`, `evidence-auditor`, `oracle`, `researcher`, `reviewer`, `scout`, and `worker`. Every agent name already stored in the current file is also listed so existing overrides stay reachable.
 
-Each override can set `model`, `thinking` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), ordered `fallbackModels`, and `tools`. Tools support the agent default, a searchable allowlist, the parent Agent's current active tools, manual MCP or path-like tool IDs, and `false` to disable all tools. Selecting `subagent` asks for confirmation because it permits nested fanout.
+pi-subagents accepts these `subagents.agentOverrides.<name>` fields: `description`, `machine`, `output`, `outputMode`, `defaultReads`, `model`, `defaultProvider`, `fast`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritGlobalContext`, `inheritSkills`, `defaultContext`, `acceptanceRole`, `disabled`, `systemPrompt`, `skills`, `tools`, `excludeTools`, `allowNestedSubagents`, `extensions`, `subagentOnlyExtensions`, `mutationTools`, `completionGuard`, and `toolBudget`. The editor directly manages the model-oriented `model`, `thinking`, and `tools` fields; other valid fields are preserved during targeted writes and can be maintained in `settings.json`. Provider-scoped `agentOverridesByProvider` entries are also preserved, but this editor writes the ordinary `agentOverrides` map.
+
+External CLI runners do not apply native Pi child settings. A stored `model` override makes a single-agent run fail with `does not support: model override`; `thinking` and `tools` are ignored. These agents therefore show read-only rows with explicit markers and offer cleanup actions only. The editor automatically removes configuration fields that the installed pi-subagents version no longer accepts when opening or synchronizing Subagent settings.
+
+The editor can set `model`, `thinking` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), and `tools`. Tools support the agent default, explicit `tools: "inherit"` for Pi's normal builtins, a searchable allowlist, the parent Agent's current active tools, manual MCP or path-like tool IDs, and `false` to disable all tools. Selecting `subagent` asks for confirmation because it permits nested fanout.
 
 Project settings live at `<project>/.pi/settings.json`; user settings live at `~/.pi/agent/settings.json`. Sync actions copy only the complete `subagents.agentOverrides` subtree and preserve other settings fields.
 

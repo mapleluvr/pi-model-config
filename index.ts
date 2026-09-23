@@ -36,7 +36,7 @@ import {
   clearManagedSubagentToolFields,
   deleteSubagentAgentOverride,
   ensureSubagentAgentOverrides,
-  appendSubagentFallbackModel,
+  migrateRemovedSubagentOverrideFields,
   getActiveSubagentSettingsTargetForCwd,
   pullUserSubagentOverridesToProject,
   pushProjectSubagentOverridesToUser,
@@ -55,7 +55,7 @@ const ACTION_MANUAL_MODEL = "__pi_model_config_action:manual_model";
 const ACTION_CLEAR_MODEL = "__pi_model_config_action:clear_model";
 const ACTION_CURRENT_MODEL = "__pi_model_config_action:current_model";
 
-function availableModelOptions(ctx: ExtensionCommandContext, current?: string): SearchableSelectOption[] {
+function availableModelOptions(ctx: ExtensionCommandContext, current?: string | false): SearchableSelectOption[] {
   const registry = (ctx as ExtensionCommandContext & { modelRegistry?: { getAvailable?: () => any[] } }).modelRegistry;
   const models = registry?.getAvailable?.() ?? [];
   const seen = new Set<string>();
@@ -199,34 +199,24 @@ function getCommandCwd(ctx: ExtensionCommandContext): string {
   return (ctx as ExtensionCommandContext & { cwd?: string }).cwd || process.cwd();
 }
 
-function formatFallbackModels(models?: string[]): string {
-  return models && models.length > 0 ? models.join(", ") : "(未设置)";
-}
-
 function overrideSummary(agentName: string, override?: SubagentAgentOverride): string {
   const suffix = isExternalCliSubagent(agentName) ? " [外部 CLI runner]" : "";
   return `${formatSubagentOverrideSummary(agentName, override)}${suffix}`;
 }
 
-function parseFallbackInput(raw: string): string[] {
-  return raw
-    .split(/[\n,]+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 async function chooseModelOverride(
   ctx: ExtensionCommandContext,
   agentName: string,
-  current?: string,
+  current?: string | false,
 ): Promise<string | undefined | "__clear__" | "__cancel__"> {
-  const modelOptions = availableModelOptions(ctx, current);
-  const currentOption: SearchableSelectOption[] = current && !modelOptions.some((option) => option.value === current)
+  const currentModel = typeof current === "string" ? current : undefined;
+  const modelOptions = availableModelOptions(ctx, currentModel);
+  const currentOption: SearchableSelectOption[] = currentModel && !modelOptions.some((option) => option.value === currentModel)
     ? [{
       value: ACTION_CURRENT_MODEL,
-      label: `当前: ${current}`,
+      label: `当前: ${currentModel}`,
       description: "当前 override，不变",
-      searchText: current,
+      searchText: currentModel,
     }]
     : [];
 
@@ -242,7 +232,7 @@ async function chooseModelOverride(
     ],
     {
       maxVisible: 10,
-      initialValue: current,
+      initialValue: currentModel,
       hint: "输入 provider/model 或模型名搜索，↑/↓ 选择，Enter 确认，Esc 返回",
     },
   );
@@ -254,38 +244,9 @@ async function chooseModelOverride(
       ctx,
       `Subagent ${agentName} - 手动 model`,
       "输入 model，建议使用 provider/model 格式，也可带 thinking suffix：\n例如 Mapleluv/gpt-5.5 或 anthropic/claude-sonnet-4:high",
-      current,
+      currentModel,
     );
     return manual || "__cancel__";
-  }
-  return choice;
-}
-
-async function chooseFallbackModelToAppend(
-  ctx: ExtensionCommandContext,
-  agentName: string,
-): Promise<string | undefined> {
-  const choice = await searchableSelect(
-    ctx,
-    `Subagent ${agentName} - 添加 fallback model`,
-    [
-      ...availableModelOptions(ctx),
-      { value: ACTION_MANUAL_MODEL, label: "手动输入 fallback model id", searchText: "manual input 手动 输入 fallback" },
-      { value: ACTION_BACK, label: "返回", searchText: "back return 返回" },
-    ],
-    {
-      maxVisible: 10,
-      hint: "输入 provider/model 或模型名搜索，↑/↓ 选择，Enter 添加，Esc 返回",
-    },
-  );
-
-  if (!choice || choice === ACTION_BACK) return undefined;
-  if (choice === ACTION_MANUAL_MODEL) {
-    return await promptText(
-      ctx,
-      `Subagent ${agentName} - 手动 fallback model`,
-      "输入 fallback model，建议使用 provider/model 格式：\n例如 Mapleluv/deepseek-v4-pro 或 openai/gpt-5-mini",
-    );
   }
   return choice;
 }
@@ -315,6 +276,7 @@ async function editSubagentToolsOverride(
       "设置 allowlist（从母 Agent 当前工具选择）",
       "使用母 Agent 当前工具列表",
       "手动输入工具列表",
+      "使用 Pi 默认 tools（tools=inherit）",
       "使用 agent 默认 tools（删除 override）",
       "禁用所有 tools",
       "返回",
@@ -383,6 +345,12 @@ async function editSubagentToolsOverride(
       continue;
     }
 
+    if (action.startsWith("使用 Pi 默认 tools")) {
+      updateSubagentAgentOverride(settingsPath, agentName, { tools: "inherit" });
+      ctx.ui.notify(`已将 ${agentName} tools 设置为 Pi 默认 tools`, "success");
+      continue;
+    }
+
     if (action.startsWith("使用 agent 默认")) {
       clearManagedSubagentToolFields(settingsPath, agentName);
       ctx.ui.notify(`已删除 ${agentName} tools override，将使用 agent 默认 tools`, "success");
@@ -413,31 +381,29 @@ export async function editSubagentAgentOverride(
     const current = overrides[agentName] ?? {};
     const ignoredNote = externalCli ? "（外部 CLI runner 忽略）" : "";
     const rejectedNote = "（外部 CLI runner 不支持；残留会使单 agent 运行被拒绝）";
-    const currentModel = `当前 model: ${current.model || "(默认 Pi 当前模型)"}${externalCli ? rejectedNote : ""}`;
+    const currentModelLabel = current.model === false
+      ? "(清除模型固定，继承当前模型)"
+      : current.model || "(默认 Pi 当前模型)";
+    const currentModel = `当前 model: ${currentModelLabel}${externalCli ? rejectedNote : ""}`;
     const currentThinking = `当前 thinking: ${current.thinking || "(未设置)"}${ignoredNote}`;
-    const currentFallback = `当前 fallbackModels: ${formatFallbackModels(current.fallbackModels)}${ignoredNote}`;
     const currentTools = `当前 tools: ${formatToolsOverride(current.tools)}${ignoredNote}`;
-    const cleanupModelFields = "清除 model/thinking/fallbackModels";
+    const cleanupModelFields = "清除 model/thinking";
     const cleanupActions = [
       cleanupModelFields,
       "清除 tools override",
       "删除整个 agent override",
       "返回",
     ];
-    // pi-subagents' CLI adapters never read a model, and its single-agent path rejects a run whose
-    // external agent still carries one ("does not support: model override",
-    // runs/background/async-execution.ts:1569); thinking/fallbackModels/tools are silently dropped.
-    // Writing them would be a no-op at best, so only cleanup stays available.
+    // External CLI adapters reject a stored model and ignore native thinking/tools fields.
+    // Keep cleanup available without offering controls that would have no effect.
     const actions = externalCli
-      ? [currentModel, currentThinking, currentFallback, currentTools, `${cleanupModelFields}（残留会被拒绝）`, "清除 tools override", "删除整个 agent override", "返回"]
+      ? [currentModel, currentThinking, currentTools, `${cleanupModelFields}（残留会被拒绝）`, "清除 tools override", "删除整个 agent override", "返回"]
       : [
         currentModel,
         currentThinking,
-        currentFallback,
         currentTools,
         "设置 model",
         "设置 thinking",
-        "设置 fallbackModels",
         "设置 tools allowlist",
         ...cleanupActions,
       ];
@@ -470,48 +436,15 @@ export async function editSubagentAgentOverride(
       continue;
     }
 
-    if (action.startsWith("设置 fallbackModels")) {
-      const fallbackAction = await ctx.ui.select(`Subagent ${agentName} - fallbackModels`, [
-        "从模型选择器添加 fallback model",
-        "手动编辑 fallbackModels",
-        "清除 fallbackModels",
-        "返回",
-      ]);
-      if (!fallbackAction || fallbackAction.startsWith("返回")) continue;
-      if (fallbackAction.startsWith("从模型选择器")) {
-        const selected = await chooseFallbackModelToAppend(ctx, agentName);
-        if (!selected) continue;
-        const fallbackModels = appendSubagentFallbackModel(settingsPath, agentName, selected);
-        ctx.ui.notify(`已添加 ${agentName} fallback model：${selected}（共 ${fallbackModels.length} 个）`, "success");
-        continue;
-      }
-      if (fallbackAction.startsWith("清除")) {
-        updateSubagentAgentOverride(settingsPath, agentName, { fallbackModels: undefined });
-        ctx.ui.notify(`已清除 ${agentName} fallbackModels`, "success");
-        continue;
-      }
-      const raw = await promptText(
-        ctx,
-        `Subagent ${agentName} - fallbackModels`,
-        "输入 fallback model 列表，用逗号或换行分隔：",
-        current.fallbackModels?.join("\n") || "",
-      );
-      if (raw === undefined) continue;
-      const fallbackModels = parseFallbackInput(raw);
-      updateSubagentAgentOverride(settingsPath, agentName, { fallbackModels });
-      ctx.ui.notify(`已更新 ${agentName} fallbackModels (${fallbackModels.length})`, "success");
-      continue;
-    }
-
     if (action.startsWith("设置 tools")) {
       await editSubagentToolsOverride(pi, ctx, settingsPath, agentName, current);
       continue;
     }
 
-    if (action.startsWith("清除 model/thinking/fallbackModels")) {
+    if (action.startsWith("清除 model/thinking")) {
       const ok = await ctx.ui.confirm(
         `清除 ${agentName} 模型相关字段`,
-        "清除 model、thinking、fallbackModels。若该 agent override 没有其他字段，将删除该 agent override。",
+        "清除 model、thinking。若该 agent override 没有其他字段，将删除该 agent override。",
       );
       if (!ok) continue;
       clearManagedSubagentModelFields(settingsPath, agentName);
@@ -603,6 +536,10 @@ async function editSubagentSettingsFile(
   title: string,
   createIfMissing: boolean,
 ): Promise<void> {
+  const removedLegacyFields = migrateRemovedSubagentOverrideFields(settingsPath);
+  if (removedLegacyFields > 0) {
+    ctx.ui.notify(`已清理 ${removedLegacyFields} 个 pi-subagents 已删除的旧字段`, "warning");
+  }
   if (createIfMissing) ensureSubagentAgentOverrides(settingsPath);
   while (true) {
     const overrides = readSubagentAgentOverrides(settingsPath);

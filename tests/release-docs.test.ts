@@ -14,7 +14,7 @@ const RUNTIME_MODULES = fs.readdirSync(PROJECT_ROOT)
 for (const file of ["README.md", "README-CN.md"]) {
   test(`${file} documents the complete 1.2 editor and recovery behavior`, () => {
     const content = fs.readFileSync(path.join(PROJECT_ROOT, file), "utf8");
-    assert.match(content, /1\.2\.0/);
+    assert.match(content, /1\.2\.1/);
     assert.match(content, /JSONC/);
     assert.match(content, /model-config-payloads\.json/);
     assert.match(content, /\[provider, model-id\]/);
@@ -38,6 +38,9 @@ for (const file of ["README.md", "README-CN.md"]) {
     assert.match(content, /before adding a Model or starting endpoint discovery|添加 Model 或启动端点发现之前/i);
     assert.match(content, /Built-in Providers are not subject|内置 Provider 不受此限制/i);
     assert.match(content, /Subagent/);
+    assert.match(content, /pi-subagents 0\.68\.0/);
+    assert.match(content, /evidence-auditor/);
+    assert.doesNotMatch(content, /fallbackModels/);
     assert.doesNotMatch(content, /Register configured providers at Pi startup|启动时从 `models\.json` 注册/);
   });
 }
@@ -45,9 +48,9 @@ for (const file of ["README.md", "README-CN.md"]) {
 test("release metadata, runtime checks, package allowlist, and license are exact", () => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, "package.json"), "utf8"));
   const packageLock = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, "package-lock.json"), "utf8"));
-  assert.equal(packageJson.version, "1.2.0");
-  assert.equal(packageLock.version, "1.2.0");
-  assert.equal(packageLock.packages[""].version, "1.2.0");
+  assert.equal(packageJson.version, "1.2.1");
+  assert.equal(packageLock.version, "1.2.1");
+  assert.equal(packageLock.packages[""].version, "1.2.1");
   assert.deepEqual(packageJson.files, ["*.ts", "README.md", "README-CN.md", "LICENSE"]);
 
   for (const module of RUNTIME_MODULES) {

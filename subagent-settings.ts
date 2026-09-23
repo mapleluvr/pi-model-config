@@ -4,7 +4,9 @@ import * as path from "node:path";
 import { atomicReplace, readArtifact } from "./atomic-file.ts";
 import { deepCloneJson } from "./model-fields.ts";
 
-/** Builtin agent names shipped by pi-subagents 0.63.0. */
+export const PI_SUBAGENTS_VERSION = "0.68.0";
+
+/** Builtin agent names shipped by pi-subagents 0.68.0. */
 export const BUILTIN_SUBAGENT_NAMES = [
   "advisor",
   "claude-code",
@@ -14,6 +16,7 @@ export const BUILTIN_SUBAGENT_NAMES = [
   "cursor-agent",
   "cursor-agent-writer",
   "delegate",
+  "evidence-auditor",
   "oracle",
   "researcher",
   "reviewer",
@@ -22,9 +25,8 @@ export const BUILTIN_SUBAGENT_NAMES = [
 ] as const;
 
 /**
- * Builtin agents whose runner is an external CLI. pi-subagents drops Pi-native child
- * options for them (see `externalRunner` in subagent-executor.ts:2916), so the editor
- * must not offer thinking/fallbackModels/tools overrides.
+ * Builtin agents whose runner is an external CLI. pi-subagents does not apply the
+ * native child model, thinking, or tools settings to these agents.
  */
 export const EXTERNAL_CLI_SUBAGENT_NAMES = [
   "claude-code",
@@ -34,6 +36,77 @@ export const EXTERNAL_CLI_SUBAGENT_NAMES = [
   "cursor-agent",
   "cursor-agent-writer",
 ] as const;
+
+/** Fields accepted by pi-subagents when parsing subagents.agentOverrides entries. */
+export const BUILTIN_SUBAGENT_OVERRIDE_FIELDS = [
+  "description",
+  "machine",
+  "output",
+  "outputMode",
+  "defaultReads",
+  "model",
+  "defaultProvider",
+  "fast",
+  "thinking",
+  "systemPromptMode",
+  "inheritProjectContext",
+  "inheritGlobalContext",
+  "inheritSkills",
+  "defaultContext",
+  "acceptanceRole",
+  "disabled",
+  "systemPrompt",
+  "skills",
+  "tools",
+  "excludeTools",
+  "allowNestedSubagents",
+  "extensions",
+  "subagentOnlyExtensions",
+  "mutationTools",
+  "completionGuard",
+  "toolBudget",
+] as const;
+
+/** Fields removed by pi-subagents and rejected during settings parsing. */
+export const REMOVED_SUBAGENT_OVERRIDE_FIELDS = ["fallbackModels"] as const;
+
+export type SubagentToolBudget = {
+  hard: number;
+  soft?: number;
+  block?: "*" | string[];
+};
+
+export interface SubagentAgentOverride {
+  description?: string;
+  machine?: string | false;
+  output?: string | false;
+  outputMode?: "inline" | "file-only";
+  defaultReads?: string[] | false;
+  model?: string | false;
+  defaultProvider?: string | false;
+  fast?: boolean;
+  thinking?: string | false;
+  systemPromptMode?: "append" | "replace";
+  inheritProjectContext?: boolean;
+  inheritGlobalContext?: boolean;
+  inheritSkills?: boolean;
+  defaultContext?: "fresh" | "fork" | false;
+  acceptanceRole?: "read-only" | "writer" | false;
+  disabled?: boolean;
+  systemPrompt?: string;
+  skills?: string[] | false;
+  tools?: string[] | false | "inherit";
+  excludeTools?: string[] | false;
+  allowNestedSubagents?: boolean;
+  extensions?: string[] | false;
+  subagentOnlyExtensions?: string[] | false;
+  mutationTools?: string[] | false;
+  completionGuard?: boolean;
+  toolBudget?: SubagentToolBudget | false;
+  [key: string]: unknown;
+}
+
+export type SubagentAgentOverrides = Record<string, SubagentAgentOverride>;
 
 export function isExternalCliSubagent(agentName: string): boolean {
   return (EXTERNAL_CLI_SUBAGENT_NAMES as readonly string[]).includes(agentName);
@@ -52,16 +125,6 @@ export const SUBAGENT_THINKING_LEVELS = ["off", "minimal", "low", "medium", "hig
 
 export type SubagentSettingsScope = "project" | "user";
 
-export interface SubagentAgentOverride {
-  model?: string;
-  thinking?: string;
-  fallbackModels?: string[];
-  tools?: string[] | false;
-  [key: string]: unknown;
-}
-
-export type SubagentAgentOverrides = Record<string, SubagentAgentOverride>;
-
 export interface SubagentSettingsTarget {
   scope: SubagentSettingsScope;
   path: string;
@@ -74,13 +137,12 @@ export interface SubagentSettingsPaths {
 }
 
 export interface SubagentOverrideChanges {
-  model?: string;
-  thinking?: string;
-  fallbackModels?: string[];
-  tools?: string[] | false;
+  model?: string | false;
+  thinking?: string | false;
+  tools?: string[] | false | "inherit";
 }
 
-const MANAGED_MODEL_OVERRIDE_FIELDS = ["model", "thinking", "fallbackModels"] as const;
+const MANAGED_MODEL_OVERRIDE_FIELDS = ["model", "thinking"] as const;
 const MANAGED_TOOL_OVERRIDE_FIELDS = ["tools"] as const;
 const MANAGED_AGENT_OVERRIDE_FIELDS = [
   ...MANAGED_MODEL_OVERRIDE_FIELDS,
@@ -184,6 +246,47 @@ function updateSettingsFile(
   throw new Error(`Failed to update ${filePath}: concurrent modifications detected`);
 }
 
+function stripRemovedFieldsFromOverrideMap(value: unknown): number {
+  if (!isRecord(value)) return 0;
+  let removed = 0;
+  for (const [agentName, override] of Object.entries(value)) {
+    if (!isRecord(override)) continue;
+    let removedFromOverride = 0;
+    for (const field of REMOVED_SUBAGENT_OVERRIDE_FIELDS) {
+      if (!Object.hasOwn(override, field)) continue;
+      delete override[field];
+      removed += 1;
+      removedFromOverride += 1;
+    }
+    if (removedFromOverride > 0 && Object.keys(override).length === 0) {
+      delete value[agentName];
+    }
+  }
+  return removed;
+}
+
+function stripRemovedFieldsFromSettings(settings: Record<string, unknown>): number {
+  const subagents = settings.subagents;
+  if (!isRecord(subagents)) return 0;
+  let removed = stripRemovedFieldsFromOverrideMap(subagents.agentOverrides);
+  const providerOverrides = subagents.agentOverridesByProvider;
+  if (isRecord(providerOverrides)) {
+    for (const providerOverridesForAgent of Object.values(providerOverrides)) {
+      removed += stripRemovedFieldsFromOverrideMap(providerOverridesForAgent);
+    }
+  }
+  return removed;
+}
+
+export function migrateRemovedSubagentOverrideFields(settingsPath: string): number {
+  if (!fs.existsSync(settingsPath)) return 0;
+  let removed = 0;
+  updateSettingsFile(settingsPath, (settings) => {
+    removed = stripRemovedFieldsFromSettings(settings);
+  });
+  return removed;
+}
+
 function getOverridesFromSettings(settings: Record<string, unknown>): SubagentAgentOverrides | undefined {
   const subagents = settings.subagents;
   if (!isRecord(subagents)) return undefined;
@@ -193,6 +296,7 @@ function getOverridesFromSettings(settings: Record<string, unknown>): SubagentAg
 }
 
 export function settingsHasSubagentAgentOverrides(settingsPath: string): boolean {
+  migrateRemovedSubagentOverrideFields(settingsPath);
   return getOverridesFromSettings(readJsonObject(settingsPath)) !== undefined;
 }
 
@@ -213,23 +317,28 @@ export function getActiveSubagentSettingsTargetForCwd(cwd: string): SubagentSett
 }
 
 export function readSubagentAgentOverrides(settingsPath: string): SubagentAgentOverrides {
+  migrateRemovedSubagentOverrideFields(settingsPath);
   return getOverridesFromSettings(readJsonObject(settingsPath)) ?? {};
 }
 
 export function ensureSubagentAgentOverrides(settingsPath: string): SubagentAgentOverrides {
   let overrides: SubagentAgentOverrides = {};
   updateSettingsFile(settingsPath, (settings) => {
+    stripRemovedFieldsFromSettings(settings);
     overrides = ensureSettingsOverrides(settings);
   });
   return overrides;
 }
 
 function cloneOverrides(overrides: SubagentAgentOverrides): SubagentAgentOverrides {
-  return deepCloneJson(overrides);
+  const cloned = deepCloneJson(overrides);
+  stripRemovedFieldsFromOverrideMap(cloned);
+  return cloned;
 }
 
 function writeSubagentAgentOverrides(settingsPath: string, overrides: SubagentAgentOverrides): void {
   updateSettingsFile(settingsPath, (settings) => {
+    stripRemovedFieldsFromSettings(settings);
     const subagents = isRecord(settings.subagents) ? settings.subagents : {};
     settings.subagents = subagents;
     subagents.agentOverrides = cloneOverrides(overrides);
@@ -267,6 +376,7 @@ export function updateSubagentAgentOverride(
   hooks: SettingsWriteHooks = {},
 ): void {
   updateSettingsFile(settingsPath, (settings) => {
+    stripRemovedFieldsFromSettings(settings);
     const overrides = ensureSettingsOverrides(settings);
     const existing: SubagentAgentOverride = { ...(overrides[agentName] ?? {}) };
 
@@ -291,6 +401,7 @@ export function updateSubagentAgentOverride(
 
 export function deleteSubagentAgentOverride(settingsPath: string, agentName: string): void {
   updateSettingsFile(settingsPath, (settings) => {
+    stripRemovedFieldsFromSettings(settings);
     const overrides = ensureSettingsOverrides(settings);
     delete overrides[agentName];
   });
@@ -300,7 +411,6 @@ export function clearManagedSubagentModelFields(settingsPath: string, agentName:
   updateSubagentAgentOverride(settingsPath, agentName, {
     model: undefined,
     thinking: undefined,
-    fallbackModels: undefined,
   });
 }
 
@@ -314,34 +424,21 @@ export function clearAllManagedSubagentAgentFields(settingsPath: string, agentNa
   updateSubagentAgentOverride(settingsPath, agentName, {
     model: undefined,
     thinking: undefined,
-    fallbackModels: undefined,
     tools: undefined,
   });
 }
 
 export const clearManagedSubagentAgentFields = clearManagedSubagentModelFields;
 
-export function appendSubagentFallbackModel(settingsPath: string, agentName: string, model: string): string[] {
-  let result: string[] = [];
-  updateSettingsFile(settingsPath, (settings) => {
-    const overrides = ensureSettingsOverrides(settings);
-    const existing: SubagentAgentOverride = { ...(overrides[agentName] ?? {}) };
-    const fallbackModels = Array.isArray(existing.fallbackModels) ? [...existing.fallbackModels] : [];
-    if (!fallbackModels.includes(model)) fallbackModels.push(model);
-    existing.fallbackModels = fallbackModels;
-    overrides[agentName] = existing;
-    result = fallbackModels;
-  });
-  return result;
-}
-
 export function pushProjectSubagentOverridesToUser(projectSettingsPath: string, userSettingsPath: string): number {
+  migrateRemovedSubagentOverrideFields(projectSettingsPath);
   const projectOverrides = requireSubagentAgentOverrides(projectSettingsPath, "Project");
   writeSubagentAgentOverrides(userSettingsPath, projectOverrides);
   return Object.keys(projectOverrides).length;
 }
 
 export function pullUserSubagentOverridesToProject(userSettingsPath: string, projectSettingsPath: string): number {
+  migrateRemovedSubagentOverrideFields(userSettingsPath);
   const userOverrides = requireSubagentAgentOverrides(userSettingsPath, "User");
   writeSubagentAgentOverrides(projectSettingsPath, userOverrides);
   return Object.keys(userOverrides).length;

@@ -9,10 +9,12 @@ import {
   getActiveSubagentSettingsTargetForCwd,
   getProjectSettingsPath,
   ensureSubagentAgentOverrides,
-  appendSubagentFallbackModel,
+  BUILTIN_SUBAGENT_OVERRIDE_FIELDS,
+  migrateRemovedSubagentOverrideFields,
   clearAllManagedSubagentAgentFields,
   clearManagedSubagentModelFields,
   clearManagedSubagentToolFields,
+  deleteSubagentAgentOverride,
   pullUserSubagentOverridesToProject,
   readSubagentAgentOverrides,
   updateSubagentAgentOverride,
@@ -31,6 +33,37 @@ function writeJson(filePath: string, value: unknown): void {
 function readJson(filePath: string): any {
   return JSON.parse(fs.readFileSync(filePath, "utf-8"));
 }
+test("tracks the pi-subagents 0.68.0 builtin override field surface", () => {
+  assert.deepEqual([...BUILTIN_SUBAGENT_OVERRIDE_FIELDS], [
+    "description",
+    "machine",
+    "output",
+    "outputMode",
+    "defaultReads",
+    "model",
+    "defaultProvider",
+    "fast",
+    "thinking",
+    "systemPromptMode",
+    "inheritProjectContext",
+    "inheritGlobalContext",
+    "inheritSkills",
+    "defaultContext",
+    "acceptanceRole",
+    "disabled",
+    "systemPrompt",
+    "skills",
+    "tools",
+    "excludeTools",
+    "allowNestedSubagents",
+    "extensions",
+    "subagentOnlyExtensions",
+    "mutationTools",
+    "completionGuard",
+    "toolBudget",
+  ]);
+});
+
 
 test("finds project settings by walking up from a nested working directory", () => {
   const dir = makeTempDir();
@@ -117,7 +150,7 @@ test("updates one agent override in the active settings file and preserves unrel
     subagents: {
       otherField: true,
       agentOverrides: {
-        reviewer: { model: "old/reviewer", tools: ["read"] },
+        reviewer: { model: "old/reviewer", tools: ["read"], fallbackModels: ["obsolete/reviewer"] },
       },
     },
   });
@@ -125,7 +158,6 @@ test("updates one agent override in the active settings file and preserves unrel
   updateSubagentAgentOverride(settingsPath, "reviewer", {
     model: "new/reviewer",
     thinking: "high",
-    fallbackModels: ["fallback/one", "fallback/two"],
   });
 
   assert.deepEqual(readJson(settingsPath), {
@@ -137,8 +169,27 @@ test("updates one agent override in the active settings file and preserves unrel
           model: "new/reviewer",
           tools: ["read"],
           thinking: "high",
-          fallbackModels: ["fallback/one", "fallback/two"],
         },
+      },
+    },
+  });
+});
+
+test("updates legal false and inherit override values without coercing them", () => {
+  const dir = makeTempDir();
+  const settingsPath = path.join(dir, "settings.json");
+  writeJson(settingsPath, { subagents: { agentOverrides: {} } });
+
+  updateSubagentAgentOverride(settingsPath, "worker", {
+    model: false,
+    thinking: false,
+    tools: "inherit",
+  });
+
+  assert.deepEqual(readJson(settingsPath), {
+    subagents: {
+      agentOverrides: {
+        worker: { model: false, thinking: false, tools: "inherit" },
       },
     },
   });
@@ -260,7 +311,7 @@ test("removes an agent override when all managed model fields are cleared and no
   writeJson(settingsPath, {
     subagents: {
       agentOverrides: {
-        scout: { model: "old/scout", thinking: "low", fallbackModels: ["fallback/scout"] },
+        scout: { model: "old/scout", thinking: "low" },
         reviewer: { model: "keep/reviewer" },
       },
     },
@@ -269,7 +320,6 @@ test("removes an agent override when all managed model fields are cleared and no
   updateSubagentAgentOverride(settingsPath, "scout", {
     model: undefined,
     thinking: undefined,
-    fallbackModels: undefined,
   });
 
   assert.deepEqual(readJson(settingsPath), {
@@ -349,22 +399,112 @@ test("pulls user subagent overrides to project settings while preserving unrelat
   });
 });
 
-test("appends fallback model once and preserves existing fallback order", () => {
+test("does not create directories while migrating an absent settings file", () => {
+  const dir = makeTempDir();
+  const settingsPath = path.join(dir, "missing", "settings.json");
+
+  assert.equal(migrateRemovedSubagentOverrideFields(settingsPath), 0);
+  assert.equal(fs.existsSync(path.dirname(settingsPath)), false);
+});
+
+test("migrates removed fallbackModels from all override scopes", () => {
   const dir = makeTempDir();
   const settingsPath = path.join(dir, "settings.json");
   writeJson(settingsPath, {
     subagents: {
       agentOverrides: {
-        worker: { fallbackModels: ["provider/one"] },
+        worker: { model: "provider/worker", fallbackModels: ["obsolete/worker"] },
+        scout: { fallbackModels: ["obsolete/scout"] },
+      },
+      agentOverridesByProvider: {
+        openai: {
+          reviewer: { thinking: "high", fallbackModels: ["obsolete/reviewer"] },
+        },
       },
     },
   });
 
-  assert.deepEqual(appendSubagentFallbackModel(settingsPath, "worker", "provider/two"), ["provider/one", "provider/two"]);
-  assert.deepEqual(appendSubagentFallbackModel(settingsPath, "worker", "provider/two"), ["provider/one", "provider/two"]);
-  assert.deepEqual(readJson(settingsPath).subagents.agentOverrides.worker.fallbackModels, ["provider/one", "provider/two"]);
+  assert.equal(migrateRemovedSubagentOverrideFields(settingsPath), 3);
+  assert.deepEqual(readJson(settingsPath), {
+    subagents: {
+      agentOverrides: {
+        worker: { model: "provider/worker" },
+      },
+      agentOverridesByProvider: {
+        openai: {
+          reviewer: { thinking: "high" },
+        },
+      },
+    },
+  });
+});
+test("reads and migrates removed fields before returning overrides", () => {
+  const dir = makeTempDir();
+  const settingsPath = path.join(dir, "settings.json");
+  writeJson(settingsPath, {
+    subagents: {
+      agentOverrides: {
+        worker: { model: "provider/worker", fallbackModels: ["obsolete/worker"] },
+        scout: { fallbackModels: ["obsolete/scout"] },
+      },
+    },
+  });
+
+  assert.deepEqual(readSubagentAgentOverrides(settingsPath), {
+    worker: { model: "provider/worker" },
+  });
+  assert.deepEqual(readJson(settingsPath), {
+    subagents: {
+      agentOverrides: {
+        worker: { model: "provider/worker" },
+      },
+    },
+  });
+});
+test("pushes overrides while migrating removed fields from both source and target", () => {
+  const dir = makeTempDir();
+  const source = path.join(dir, "project", ".pi", "settings.json");
+  const target = path.join(dir, "user", "settings.json");
+  writeJson(source, {
+    subagents: { agentOverrides: {
+      worker: { model: "provider/worker", fallbackModels: ["old/model"] },
+      scout: { fallbackModels: ["old/scout"] },
+    } },
+  });
+  writeJson(target, {
+    subagents: {
+      agentOverrides: { reviewer: { model: "provider/reviewer", fallbackModels: ["old/reviewer"] } },
+      agentOverridesByProvider: { openai: { worker: { model: "openai/worker", fallbackModels: ["old/provider"] } } },
+    },
+  });
+
+  assert.equal(pushProjectSubagentOverridesToUser(source, target), 1);
+  assert.deepEqual(readJson(source), {
+    subagents: { agentOverrides: { worker: { model: "provider/worker" } } },
+  });
+  assert.deepEqual(readJson(target), {
+    subagents: {
+      agentOverrides: { worker: { model: "provider/worker" } },
+      agentOverridesByProvider: { openai: { worker: { model: "openai/worker" } } },
+    },
+  });
 });
 
+test("deleting an override also removes legacy fields from other agent and provider entries", () => {
+  const dir = makeTempDir();
+  const settingsPath = path.join(dir, "settings.json");
+  writeJson(settingsPath, { subagents: {
+    agentOverrides: { scout: { model: "provider/scout" }, worker: { fallbackModels: ["old/worker"] } },
+    agentOverridesByProvider: { openai: { reviewer: { model: "openai/reviewer", fallbackModels: ["old/reviewer"] } } },
+  } });
+
+  deleteSubagentAgentOverride(settingsPath, "scout");
+
+  assert.deepEqual(readJson(settingsPath), { subagents: {
+    agentOverrides: {},
+    agentOverridesByProvider: { openai: { reviewer: { model: "openai/reviewer" } } },
+  } });
+});
 test("throws when pushing project overrides but project has no subagents.agentOverrides", () => {
   const dir = makeTempDir();
   const userSettingsPath = path.join(dir, "home", ".pi", "agent", "settings.json");
@@ -378,6 +518,7 @@ test("throws when pushing project overrides but project has no subagents.agentOv
     /Project settings does not contain subagents\.agentOverrides/,
   );
 });
+
 
 test("throws when pulling user overrides but user has no subagents.agentOverrides", () => {
   const dir = makeTempDir();
