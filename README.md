@@ -1,15 +1,39 @@
-# Pi Model Config
+![pi-model-config](assets/pi-model-config-title.png)
 
-> Interactive configuration for Pi's native model system and `nicobailon/pi-subagents`.
+<div align="center">
 
-[![pi-package](https://img.shields.io/badge/pi-package-blue)](https://pi.dev/packages)
-[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+*Field-oriented model configuration with explicit save and recovery boundaries.*
+
+<img src="https://img.shields.io/badge/version-1.2.1-EB0404?labelColor=181818" alt="Version: 1.2.1">
+<img src="https://img.shields.io/badge/type-Pi%20extension-181818" alt="type: Pi extension">
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-FDFDFD?labelColor=181818" alt="License: MIT"></a>
+
+<br>
+<br>
+
+<a href="#quick-start">Quick Start</a> ｜
+<a href="#key-features">Features</a> ｜
+<a href="#project-structure">Structure</a> ｜
+<a href="#support-and-boundaries">Boundaries</a>
+
+<a href="README-CN.md">中文</a>
+
+</div>
+
+---
 
 Pi Model Config 1.2.1 adds `/model-config`, a field-oriented terminal editor for native Providers, Models, private request Payloads, and Subagent overrides. It does not register Providers dynamically; Pi continues to own `models.json` loading and ModelRegistry refresh.
 
-Chinese documentation: [README-CN.md](README-CN.md)
+## Key Features
 
-## Installation
+- Field-oriented Provider, Model, compatibility, cost, thinking and request-parameter editors.
+- Endpoint discovery with explicit Merge / Replace / Cancel previews.
+- Separate private Payload storage with cross-file transaction recovery.
+- Subagent model, thinking and tool overrides that preserve other valid fields.
+
+## Quick Start
+
+### Installation
 
 Install from a checkout:
 
@@ -29,7 +53,9 @@ cp -r pi-model-config .pi/extensions/model-config
 
 Reload Pi after installation. The extension requires an interactive TUI for configuration; non-TUI `/model-config` calls stop before reading or changing model configuration.
 
-## Usage
+`-l` declares a project-local package, loaded only after project trust. For a local checkout, first run `npm ci` in the package directory to install its dependencies.
+
+### Usage
 
 Run:
 
@@ -142,10 +168,13 @@ Project settings live at `<project>/.pi/settings.json`; user settings live at `~
 
 The first three paths use `<PI_CODING_AGENT_DIR>` when that environment variable is set.
 
-## Package tree
+## Project Structure
+
+<a id="package-tree"></a>
 
 ```text
 pi-model-config/
+|-- assets/  # README artwork (repository only)
 |-- index.ts
 |-- atomic-file.ts
 |-- process-lock.ts
@@ -176,6 +205,17 @@ pi-model-config/
 
 The published package contains only root runtime TypeScript modules, the bilingual documentation, license, and package metadata. Tests, `.pi-subagents`, journals, temporary agent data, and generated archives are excluded.
 
+## Support and Boundaries
+
+| Surface | Current boundary |
+| --- | --- |
+| Native model fields and Compat | Documented against Pi 0.85.1; future field compatibility is not assumed |
+| Subagent editor | Documented against pi-subagents 0.68.0; other valid fields are preserved |
+| Interactive configuration | Requires Pi TUI; non-TUI calls stop before model configuration IO |
+| Native configuration | Reads JSONC; successful saves normalize it to JSON |
+| Provider registration | Remains Pi's responsibility; no dynamic registration here |
+| External CLI agents | Native Pi child model / thinking / tools settings do not apply; see the restrictions above |
+
 ## Development
 
 ```bash
@@ -187,3 +227,11 @@ npm pack --dry-run --json | node --experimental-strip-types tests/fixtures/asser
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+---
+
+<div align="center">
+
+**Explicit saves. Preserved boundaries.**
+
+</div>

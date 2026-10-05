@@ -1,15 +1,39 @@
-# Pi Model Config
+![pi-model-config](assets/pi-model-config-title.png)
 
-> 面向 Pi 原生模型系统和 `nicobailon/pi-subagents` 的交互式配置插件。
+<div align="center">
 
-[![pi-package](https://img.shields.io/badge/pi-package-blue)](https://pi.dev/packages)
-[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+*按字段管理模型配置，让变更与恢复都有明确边界。*
+
+<img src="https://img.shields.io/badge/version-1.2.1-EB0404?labelColor=181818" alt="Version: 1.2.1">
+<img src="https://img.shields.io/badge/type-Pi%20extension-181818" alt="type: Pi extension">
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-FDFDFD?labelColor=181818" alt="License: MIT"></a>
+
+<br>
+<br>
+
+<a href="#快速开始">快速开始</a> ｜
+<a href="#当前功能">当前功能</a> ｜
+<a href="#项目结构">项目结构</a> ｜
+<a href="#支持范围">支持范围</a>
+
+<a href="README.md">English</a>
+
+</div>
+
+---
 
 Pi Model Config 1.2.1 提供 `/model-config`，用于按字段管理原生 Provider、Model、私有请求 Payload 和 Subagent overrides。插件不会动态注册 Provider；`models.json` 加载和 ModelRegistry 刷新仍由 Pi 负责。
 
-English documentation: [README.md](README.md)
+## 当前功能
 
-## 安装
+- 按字段编辑 Provider、Model、兼容性、价格、思考映射和请求参数。
+- 从端点发现模型，预览后选择 Merge / Replace / Cancel。
+- 管理独立私有 Payload，并提供跨文件事务恢复。
+- 管理 Subagent 的模型、thinking 与工具覆盖，保留其他合法字段。
+
+## 快速开始
+
+### 安装
 
 从本地 checkout 安装：
 
@@ -29,7 +53,9 @@ cp -r pi-model-config .pi/extensions/model-config
 
 安装后重新加载 Pi。配置命令只支持交互式 TUI；在非 TUI 模式调用 `/model-config` 会在读取或修改模型配置之前停止。
 
-## 使用
+`-l` 使用项目级包声明，加载前需要信任项目；本地 checkout 的依赖请先在包目录运行 `npm ci` 安装。
+
+### 使用
 
 运行：
 
@@ -142,10 +168,13 @@ pi-subagents 接受这些 `subagents.agentOverrides.<name>` 字段：`descriptio
 
 设置 `PI_CODING_AGENT_DIR` 后，前三个路径使用该目录。
 
-## Package tree
+## 项目结构
+
+<a id="package-tree"></a>
 
 ```text
 pi-model-config/
+|-- assets/  # README artwork (repository only)
 |-- index.ts
 |-- atomic-file.ts
 |-- process-lock.ts
@@ -176,6 +205,17 @@ pi-model-config/
 
 发布包只包含根目录 runtime TypeScript、双语文档、LICENSE 和 package metadata。测试、`.pi-subagents`、journal、临时 agent data 和生成的 archive 都被排除。
 
+## 支持范围
+
+| 对象 | 当前边界 |
+| --- | --- |
+| 原生模型字段与 Compat | 文档对齐 Pi 0.85.1 的配置面，不保证未来版本字段不变 |
+| Subagent 编辑 | 文档对齐 pi-subagents 0.68.0；其他合法字段保留 |
+| 交互式配置 | 需要 Pi TUI；非 TUI 在读写模型配置前停止 |
+| 原生配置文件 | 接受 JSONC；成功保存后规范化为 JSON |
+| Provider 注册 | 由 Pi 负责；本插件不动态注册 |
+| 外部 CLI agents | 原生 Pi child 的 model / thinking / tools 设置不适用，见上文限制 |
+
 ## 开发
 
 ```bash
@@ -187,3 +227,11 @@ npm pack --dry-run --json | node --experimental-strip-types tests/fixtures/asser
 ## 许可
 
 MIT，详见 [LICENSE](LICENSE)。
+
+---
+
+<div align="center">
+
+**明确保存语义，保留配置边界。**
+
+</div>
