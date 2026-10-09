@@ -6,7 +6,15 @@ export type ConfigPatch<T extends Record<string, unknown>> = {
 } & Record<string, unknown>;
 
 export type ProviderSubtreeKey = "headers" | "compat" | "modelOverrides";
-export type ModelSubtreeKey = "headers" | "compat" | "thinkingLevelMap" | "cost" | "samplingParams";
+export type ModelSubtreeKey =
+  | "headers"
+  | "compat"
+  | "thinkingLevelMap"
+  | "cost"
+  | "samplingParams"
+  | "samplingParamsByThinkingLevel"
+  | "inputLimits"
+  | "promptCache";
 
 export const THINKING_MAP_INACTIVE_WARNING = "reasoning 为 false 时未启用思考级别映射";
 

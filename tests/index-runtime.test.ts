@@ -92,9 +92,14 @@ async function commandHandler(): Promise<(args: string, ctx: any) => Promise<voi
   return handler;
 }
 
-async function runModelConfigCommand(script: Script, notifications: Array<{ message: string; level: string }> = []): Promise<void> {
+async function runModelConfigCommand(
+  script: Script,
+  notifications: Array<{ message: string; level: string }> = [],
+  extraContext: Record<string, unknown> = {},
+): Promise<void> {
   const handler = await commandHandler();
-  await handler("", scriptedContext(script, notifications));
+  const ctx = { ...scriptedContext(script, notifications), ...extraContext };
+  await handler("", ctx);
   assert.deepEqual(script, { selects: [], inputs: [], editors: [], confirms: [], customs: [] });
 }
 
@@ -603,3 +608,52 @@ for (const diagnostic of [
     });
   });
 }
+
+test("model-config command discovers and migrates legacy Azure provider across user and project settings", async () => {
+  await withRuntimeAgentDir(async (agentDir) => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-proj-"));
+    try {
+      const projectPiDir = path.join(projectDir, ".pi");
+      fs.mkdirSync(projectPiDir, { recursive: true });
+      const projectSettingsPath = path.join(projectPiDir, "settings.json");
+      fs.writeFileSync(projectSettingsPath, JSON.stringify({ defaultProvider: "azure-openai-responses" }, null, 2));
+
+      const userSettingsPath = path.join(agentDir, "settings.json");
+      fs.writeFileSync(userSettingsPath, JSON.stringify({ defaultProvider: "azure-openai-responses" }, null, 2));
+
+      fs.writeFileSync(
+        getModelsPath(agentDir),
+        JSON.stringify({
+          providers: {
+            "azure-openai-responses": {
+              baseUrl: "https://example.invalid",
+              models: [{ id: "m" }],
+            },
+          },
+        }, null, 2),
+      );
+
+      const script: Script = {
+        selects: ["[迁移] 发现旧版 Azure 提供商 (1 模型)，立即升级", "退出"],
+        inputs: [],
+        editors: [],
+        confirms: [true],
+        customs: [],
+      };
+      await runModelConfigCommand(script, [], { cwd: projectDir });
+
+      const updatedModels = readModelsConfig();
+      assert.equal("azure" in updatedModels.providers, true);
+      assert.equal("azure-openai-responses" in updatedModels.providers, false);
+
+      const updatedUser = JSON.parse(fs.readFileSync(userSettingsPath, "utf8"));
+      assert.equal(updatedUser.defaultProvider, "azure");
+
+      const updatedProject = JSON.parse(fs.readFileSync(projectSettingsPath, "utf8"));
+      assert.equal(updatedProject.defaultProvider, "azure");
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+});
+

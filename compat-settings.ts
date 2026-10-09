@@ -22,6 +22,9 @@ export const COMPAT_BOOLEAN_FIELDS = [
   { key: "supportsOpenAIGrammarTools", label: "supportsOpenAIGrammarTools (OpenAI+Responses)" },
   { key: "supportsLongCacheRetention", label: "supportsLongCacheRetention (OpenAI+Responses+Anthropic)" },
   { key: "zaiToolStream", label: "zaiToolStream (OpenAI, z.ai)" },
+  { key: "supportsThinkingTokenBudget", label: "supportsThinkingTokenBudget (OpenAI, thinking_token_budget 别名)" },
+  { key: "supportsMidConvoSystemMessages", label: "supportsMidConvoSystemMessages (OpenAI+Anthropic+Mistral)" },
+  { key: "supportsMidConvoToolAdditions", label: "supportsMidConvoToolAdditions (OpenAI)" },
   // OpenAI Responses
   { key: "supportsAdditionalTools", label: "supportsAdditionalTools (Responses)" },
   { key: "supportsToolSearch", label: "supportsToolSearch (Responses)" },
@@ -37,13 +40,13 @@ export const COMPAT_BOOLEAN_FIELDS = [
   { key: "allowEmptySignature", label: "allowEmptySignature (Anthropic)" },
   { key: "supportsStrictTools", label: "supportsStrictTools (Anthropic)" },
   { key: "supportsMidConvoEffort", label: "supportsMidConvoEffort (Anthropic)" },
-  { key: "supportsToolReferences", label: "supportsToolReferences (Anthropic)" },
+  { key: "supportsMidConvoToolChanges", label: "supportsMidConvoToolChanges (Anthropic)" },
 ] as const;
 
 export const COMPAT_STRING_FIELDS = [
   { key: "maxTokensField", label: "maxTokensField (OpenAI)", values: ["max_completion_tokens", "max_tokens"] },
   { key: "cacheControlFormat", label: "cacheControlFormat (OpenAI)", values: ["anthropic"] },
-  { key: "deferredToolsMode", label: "deferredToolsMode (OpenAI)", values: ["kimi"] },
+  { key: "thinkingTokenBudgetField", label: "thinkingTokenBudgetField (OpenAI)", values: ["thinking_token_budget", "thinking_budget", "thinking_budget_tokens"] },
   { key: "sessionAffinityFormat", label: "sessionAffinityFormat (OpenAI+Responses；OpenAI 系需 sendSessionAffinityHeaders=true 才生效)", values: ["openai", "openai-nosession", "openrouter"] },
 ] as const;
 
@@ -53,6 +56,11 @@ export const COMPAT_JSON_OBJECT_FIELDS = [
   { key: "chatTemplateArgs", label: "chatTemplateArgs (仅 thinkingFormat=baseten 时被读取)" },
   { key: "openRouterRouting", label: "openRouterRouting" },
   { key: "vercelGatewayRouting", label: "vercelGatewayRouting" },
+] as const;
+
+/** Free-form JSON array compat fields. */
+export const COMPAT_JSON_ARRAY_FIELDS = [
+  { key: "allowedFallbackModels", label: "allowedFallbackModels (Anthropic, 服务端 refusal fallback 列表)" },
 ] as const;
 
 export const COMPAT_NUMBER_FIELDS = [
@@ -113,6 +121,18 @@ export function applyCompatObjectPatch(
   return applyCompatObjectChoice(compat, key, mergeObjectPatch(isObject(current) ? current : {}, patch));
 }
 
+/** Deprecated compat keys that have no consumers in Pi 1.0.0+ runtime. */
+export const DEPRECATED_COMPAT_KEYS = ["deferredToolsMode", "supportsToolReferences"] as const;
+
+/** Strips deprecated compat keys while preserving all other properties idempotently. */
+export function stripDeprecatedCompatKeys(compat: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...compat };
+  for (const key of DEPRECATED_COMPAT_KEYS) {
+    deleteOwnKey(next, key);
+  }
+  return next;
+}
+
 /**
  * Pi 0.80.7 removed `compat.sendSessionIdHeader` from models.json in favor of
  * `compat.sessionAffinityFormat`; stored `true` values only restate the default.
@@ -121,6 +141,7 @@ export interface LegacySessionAffinityPlan {
   legacyValue: unknown;
   setSessionAffinityFormat?: (typeof SESSION_AFFINITY_FORMATS)[number];
   reason: string;
+  blocked?: boolean;
 }
 
 export const LEGACY_SESSION_AFFINITY_KEY = "sendSessionIdHeader";
@@ -134,6 +155,30 @@ export function planLegacySessionAffinityMigration(
 ): LegacySessionAffinityPlan | undefined {
   const legacyValue = getOwnValue(compat, LEGACY_SESSION_AFFINITY_KEY);
   if (legacyValue === undefined) return undefined;
+
+  const existingFormat = getOwnValue(compat, "sessionAffinityFormat");
+  if (existingFormat !== undefined) {
+    if (typeof existingFormat === "string" && (SESSION_AFFINITY_FORMATS as readonly string[]).includes(existingFormat)) {
+      return {
+        legacyValue,
+        reason: `已显式配置 sessionAffinityFormat = "${existingFormat}"；直接安全删除旧字段 ${LEGACY_SESSION_AFFINITY_KEY}。`,
+      };
+    }
+    return {
+      legacyValue,
+      reason: `sessionAffinityFormat 当前为非法值 (${String(existingFormat)})；停止自动迁移，请手动检查。`,
+      blocked: true,
+    };
+  }
+
+  if (typeof legacyValue !== "boolean") {
+    return {
+      legacyValue,
+      reason: `${LEGACY_SESSION_AFFINITY_KEY} 值为非布尔类型 (${String(legacyValue)})；停止自动迁移，请手动检查。`,
+      blocked: true,
+    };
+  }
+
   if (legacyValue !== false) {
     return {
       legacyValue,
@@ -155,7 +200,8 @@ export function planLegacySessionAffinityMigration(
   }
   return {
     legacyValue,
-    reason: `无法确定该 Provider/Model 的 API（${api ?? "未设置"}）：该字段自 Pi 0.80.7 起已不再被任何 API 读取，可直接删除；若它原本是 openai-completions/openai-responses 上的 false，删除会丢失“省略 session_id 头部”的意图。`,
+    reason: `无法确定该 Provider/Model 的 API（${api ?? "未设置"}）：API 未知或缺失，停止自动迁移以防丢失“省略 session_id 头部”的意图，请先设置 API 类型。`,
+    blocked: true,
   };
 }
 
@@ -163,6 +209,7 @@ export function applyLegacySessionAffinityMigration(
   compat: Record<string, unknown>,
   plan: LegacySessionAffinityPlan,
 ): Record<string, unknown> {
+  if (plan.blocked) return compat;
   const next = { ...compat };
   deleteOwnKey(next, LEGACY_SESSION_AFFINITY_KEY);
   if (plan.setSessionAffinityFormat !== undefined) {

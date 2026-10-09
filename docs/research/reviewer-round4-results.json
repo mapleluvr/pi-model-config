@@ -1,0 +1,13 @@
+{
+  "case1": {
+    "applyStatus": "aborted",
+    "applySuccess": false,
+    "journalStillExists": true,
+    "journalDeletedByApply": false
+  },
+  "case2": {
+    "planStatus": "conflict",
+    "applyStatus": "aborted",
+    "canonicalOverwrittenByWhitespace": false
+  }
+}

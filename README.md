@@ -79,8 +79,8 @@ Provider ID changes are journaled rename operations. `oauth` accepts the dynamic
 | ---------- | -------------------- |
 | General | Model ID, display name |
 | Endpoint overrides | API type, API Base URL, Headers |
-| Capabilities and limits | Reasoning, input types, Context Window, Maximum Output Tokens |
-| Thinking | `thinkingLevelMap` for `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and mapped `max` values |
+| Capabilities and limits | Reasoning, input types, Context Window, Maximum Output Tokens, Input Limits, Prompt Cache |
+| Thinking | `thinkingLevelMap` (for `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`), `samplingParamsByThinkingLevel` |
 | Cost | Input, Output, Cache Read, Cache Write, and complete `cost.tiers` |
 | Compatibility | Compat field groups for the OpenAI, OpenAI Responses, and Anthropic API families |
 | Request parameters | native `samplingParams`, private Payload |
@@ -102,9 +102,11 @@ Merge and Replace both preview introduced identities and private identity collis
 
 ## Native and private data
 
-Pi Model Config reads Pi 0.85.1 `models.json` as JSONC, including comments and trailing commas. A successful native save emits canonical JSON. Blank, malformed, or schema-invalid native configuration is never replaced.
+Pi Model Config reads Pi 1.1.0 `models.json` as JSONC (compatible with Pi 0.85.1+), including comments and trailing commas. A successful native save emits canonical JSON. Blank, malformed, or schema-invalid native configuration is never replaced.
 
-The Compat editor tracks the Pi 0.85.1 surface. Boolean fields are labeled with the API family that reads them (OpenAI completions, OpenAI Responses, Anthropic Messages), string fields offer `maxTokensField`, `thinkingFormat` including `baseten`, `cacheControlFormat`, `deferredToolsMode`, and `sessionAffinityFormat`, numerics cover `vllmPriority`, and `chatTemplateKwargs`, `chatTemplateArgs`, `openRouterRouting`, and `vercelGatewayRouting` are edited as JSON objects. `thinkingFormat` values and the `$var` thinking variables stay aligned with what Pi resolves at request time. `compat.sessionAffinityFormat` replaces the `sendSessionIdHeader` key that Pi removed in 0.80.7; when a stored file still carries that legacy key the editor offers a previewed migration (`true` deletes it, `false` maps to `sessionAffinityFormat: "openai-nosession"`).
+The Compat editor tracks the Pi 1.1.0 surface. Boolean fields are labeled with the API family that reads them (OpenAI completions, OpenAI Responses, Anthropic Messages), including mid-conversation dynamic controls (`supportsMidConvoSystemMessages`, `supportsMidConvoToolAdditions`, `supportsMidConvoToolChanges`) and `supportsThinkingTokenBudget`. String fields offer `maxTokensField`, `thinkingFormat` including `baseten`, `cacheControlFormat`, `thinkingTokenBudgetField` (`thinking_token_budget`, `thinking_budget`, `thinking_budget_tokens`), and `sessionAffinityFormat`. Numerics cover `vllmPriority`. JSON objects cover `chatTemplateKwargs`, `chatTemplateArgs`, `openRouterRouting`, and `vercelGatewayRouting`, while JSON arrays edit `allowedFallbackModels` (Anthropic server-side refusal fallback targets with cost metadata). Deprecated compat fields without runtime consumers (`deferredToolsMode`, `supportsToolReferences`) are hidden from active menus and cleanly stripped on save. Legacy `compat.sendSessionIdHeader` offers a previewed fail-closed migration.
+
+The Azure provider ID is updated from `azure-openai-responses` to `azure`, with an interactive fail-closed migration available when opening `/model-config`.
 
 The native `samplingParams` object is edited per Model and per Model Override, and Pi merges it verbatim into OpenAI-compatible request bodies. Private request values are stored in `~/.pi/agent/model-config-payloads.json`, or `<PI_CODING_AGENT_DIR>/model-config-payloads.json`. Each key is the JSON encoding of the exact `[provider, model-id]` tuple, so slash characters are unambiguous. The selected Model's object is shallowly merged during `before_provider_request`; unrelated Models are unchanged.
 
@@ -148,6 +150,7 @@ The first three paths use `<PI_CODING_AGENT_DIR>` when that environment variable
 pi-model-config/
 |-- index.ts
 |-- atomic-file.ts
+|-- azure-migration.ts
 |-- process-lock.ts
 |-- config.ts
 |-- config-validation.ts

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   COMPAT_BOOLEAN_FIELDS,
+  COMPAT_JSON_ARRAY_FIELDS,
   COMPAT_JSON_OBJECT_FIELDS,
   COMPAT_NUMBER_FIELDS,
   COMPAT_STRING_FIELDS,
@@ -13,6 +14,7 @@ import {
   applyCompatObjectPatch,
   applyLegacySessionAffinityMigration,
   planLegacySessionAffinityMigration,
+  stripDeprecatedCompatKeys,
 } from "../compat-settings.ts";
 
 test("sets compat boolean fields to explicit true, explicit false, or default deletion", () => {
@@ -32,7 +34,7 @@ test("sets compat boolean fields to explicit true, explicit false, or default de
   );
 });
 
-test("declares every Pi 0.85.1 boolean, object, string, number, and thinking-format option", () => {
+test("declares every Pi 1.1.0 boolean, object, string, number, and thinking-format option", () => {
   const booleanKeys: string[] = COMPAT_BOOLEAN_FIELDS.map((field) => field.key);
   for (const key of [
     "requiresAssistantAfterToolResult",
@@ -49,19 +51,28 @@ test("declares every Pi 0.85.1 boolean, object, string, number, and thinking-for
     "supportsExplicitPromptCacheMode",
     "supportsStrictTools",
     "supportsMidConvoEffort",
-    "supportsToolReferences",
+    "supportsMidConvoSystemMessages",
+    "supportsMidConvoToolAdditions",
+    "supportsMidConvoToolChanges",
+    "supportsThinkingTokenBudget",
   ]) {
     assert.ok(booleanKeys.includes(key), `${key} must be offered`);
   }
   // Pi 0.80.7 removed sendSessionIdHeader; only the previewed migration may touch it.
   assert.equal(booleanKeys.includes("sendSessionIdHeader"), false);
+  // Deprecated fields must not be offered in active UI.
+  assert.equal(booleanKeys.includes("supportsToolReferences"), false);
   assert.deepEqual(
     COMPAT_JSON_OBJECT_FIELDS.map((field) => field.key),
     ["chatTemplateKwargs", "chatTemplateArgs", "openRouterRouting", "vercelGatewayRouting"],
   );
   assert.deepEqual(
+    COMPAT_JSON_ARRAY_FIELDS.map((field) => field.key),
+    ["allowedFallbackModels"],
+  );
+  assert.deepEqual(
     COMPAT_STRING_FIELDS.map((field) => field.key),
-    ["maxTokensField", "cacheControlFormat", "deferredToolsMode", "sessionAffinityFormat"],
+    ["maxTokensField", "cacheControlFormat", "thinkingTokenBudgetField", "sessionAffinityFormat"],
   );
   // Engine-read but schema-undeclared, so the literal list is pinned here rather than derived.
   assert.deepEqual(COMPAT_THINKING_FORMAT_FIELD.values, [
@@ -72,6 +83,22 @@ test("declares every Pi 0.85.1 boolean, object, string, number, and thinking-for
   for (const format of ["zai", "chat-template", "string-thinking", "ant-ling", "baseten"]) {
     assert.ok(THINKING_FORMATS.includes(format as (typeof THINKING_FORMATS)[number]), `${format} must be offered`);
   }
+});
+
+test("strips deprecated compat keys while preserving all other properties idempotently", () => {
+  const withDeprecated = {
+    deferredToolsMode: "kimi",
+    supportsToolReferences: true,
+    supportsStrictMode: true,
+    customField: { nested: 1 },
+  };
+  const stripped = stripDeprecatedCompatKeys(withDeprecated);
+  assert.deepEqual(stripped, {
+    supportsStrictMode: true,
+    customField: { nested: 1 },
+  });
+  // Idempotent
+  assert.deepEqual(stripDeprecatedCompatKeys(stripped), stripped);
 });
 
 test("plans the removed sendSessionIdHeader migration per API family", () => {
@@ -99,7 +126,36 @@ test("plans the removed sendSessionIdHeader migration per API family", () => {
   const unknown = planLegacySessionAffinityMigration({ sendSessionIdHeader: false }, undefined);
   assert.ok(unknown);
   assert.match(unknown.reason, /无法确定该 Provider\/Model 的 API/, "only an absent/unknown API is undetermined");
-  assert.equal(unknown.setSessionAffinityFormat, undefined);
+  assert.equal(unknown.blocked, true, "unknown API must be blocked fail-closed");
+  assert.deepEqual(applyLegacySessionAffinityMigration({ sendSessionIdHeader: false }, unknown), { sendSessionIdHeader: false });
+
+  // Explicit sessionAffinityFormat preservation
+  const explicitRetained = planLegacySessionAffinityMigration(
+    { sendSessionIdHeader: false, sessionAffinityFormat: "openrouter" },
+    "openai-responses",
+  );
+  assert.ok(explicitRetained);
+  assert.equal(explicitRetained.setSessionAffinityFormat, undefined, "must not overwrite explicit sessionAffinityFormat");
+  assert.deepEqual(
+    applyLegacySessionAffinityMigration({ sendSessionIdHeader: false, sessionAffinityFormat: "openrouter" }, explicitRetained),
+    { sessionAffinityFormat: "openrouter" },
+  );
+
+  // Invalid sessionAffinityFormat blocked fail-closed
+  const invalidFormat = planLegacySessionAffinityMigration(
+    { sendSessionIdHeader: false, sessionAffinityFormat: "invalid-val" },
+    "openai-responses",
+  );
+  assert.ok(invalidFormat);
+  assert.equal(invalidFormat.blocked, true);
+
+  // Non-boolean legacy value blocked fail-closed
+  const nonBooleanLegacy = planLegacySessionAffinityMigration(
+    { sendSessionIdHeader: "false" },
+    "openai-responses",
+  );
+  assert.ok(nonBooleanLegacy);
+  assert.equal(nonBooleanLegacy.blocked, true);
 });
 
 test("sets, replaces, and clears compat object fields", () => {

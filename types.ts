@@ -22,6 +22,41 @@ export interface ModelCostTier {
   cacheWrite: number;
 }
 
+export interface ImageResizeConfig {
+  maxWidth?: number;
+  maxHeight?: number;
+  maxBytes?: number;
+  jpegQuality?: number;
+}
+
+export interface ImageInputLimitsConfig {
+  maxPerMessage?: number;
+  maxPerRequest?: number;
+  resize?: ImageResizeConfig;
+}
+
+export interface InputLimitsConfig {
+  maxRequestBytes?: number;
+  images?: ImageInputLimitsConfig;
+}
+
+export interface PromptCacheConfig {
+  short?: number;
+  long?: number;
+}
+
+export interface AllowedFallbackModelConfig {
+  provider: string;
+  model: string;
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    tiers?: ModelCostTier[];
+  };
+}
+
 export interface ProviderConfig {
   [key: string]: unknown;
   /** Display name for the provider in UI */
@@ -65,6 +100,12 @@ export interface ModelOverrideConfig {
   maxTokens?: number;
   /** Default sampling parameters, merged per key with the base model's value */
   samplingParams?: Record<string, unknown>;
+  /** Sampling parameters by thinking level, shallow-overridden per level */
+  samplingParamsByThinkingLevel?: Partial<Record<ThinkingLevel, Record<string, unknown>>>;
+  /** Request size and image resolution limits */
+  inputLimits?: InputLimitsConfig;
+  /** Prompt cache retention durations (seconds) */
+  promptCache?: PromptCacheConfig;
   headers?: Record<string, string>;
   compat?: CompatConfig;
 }
@@ -91,6 +132,12 @@ export interface ModelConfig {
   maxTokens?: number;
   /** Sampling parameters merged verbatim into every OpenAI-compatible request body */
   samplingParams?: Record<string, unknown>;
+  /** Sampling parameters by thinking level, shallow-overridden per level */
+  samplingParamsByThinkingLevel?: Partial<Record<ThinkingLevel, Record<string, unknown>>>;
+  /** Request size and image resolution limits */
+  inputLimits?: InputLimitsConfig;
+  /** Prompt cache retention durations (seconds) */
+  promptCache?: PromptCacheConfig;
   /** Cost per million tokens */
   cost?: {
     input: number;
@@ -131,11 +178,20 @@ export interface CompatConfig {
   zaiToolStream?: boolean;
   chatTemplateKwargs?: Record<string, unknown>;
   chatTemplateArgs?: Record<string, unknown>;
+  /** @deprecated Pi 1.0.0+ 废弃，运行时无消费者 */
   deferredToolsMode?: "kimi";
   sessionAffinityFormat?: "openai" | "openai-nosession" | "openrouter";
   vllmPriority?: number;
   openRouterRouting?: Record<string, unknown>;
   vercelGatewayRouting?: { only?: string[]; order?: string[] };
+  /** Mid-conversation system/developer message support */
+  supportsMidConvoSystemMessages?: boolean;
+  /** Mid-conversation dynamic tool additions (OpenAI Completions) */
+  supportsMidConvoToolAdditions?: boolean;
+  /** Thinking token budget request body field name */
+  thinkingTokenBudgetField?: "thinking_token_budget" | "thinking_budget" | "thinking_budget_tokens";
+  /** Thinking token budget alias (defaults to thinking_token_budget) */
+  supportsThinkingTokenBudget?: boolean;
 
   // ── OpenAI Responses ──
   supportsAdditionalTools?: boolean;
@@ -150,7 +206,12 @@ export interface CompatConfig {
   allowEmptySignature?: boolean;
   supportsStrictTools?: boolean;
   supportsMidConvoEffort?: boolean;
+  /** @deprecated Pi 1.0.0+ 废弃，运行时无消费者 */
   supportsToolReferences?: boolean;
+  /** Mid-conversation dynamic tool changes (Anthropic) */
+  supportsMidConvoToolChanges?: boolean;
+  /** Anthropic server-side refusal fallback targets and local cost metadata */
+  allowedFallbackModels?: AllowedFallbackModelConfig[];
 }
 
 /** API type options */

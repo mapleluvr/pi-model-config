@@ -53,7 +53,58 @@ export const BUILT_IN_PROVIDERS_PI_0_85_1: ReadonlySet<string> = new Set([
   "zai-coding-cn",
 ]);
 
-const DEFAULT_OPTIONS: ValidationOptions = { builtInProviders: BUILT_IN_PROVIDERS_PI_0_85_1 };
+export const BUILT_IN_PROVIDERS_PI_1_1_0: ReadonlySet<string> = new Set([
+  "amazon-bedrock",
+  "ant-ling",
+  "anthropic",
+  "azure",
+  "baseten",
+  "cerebras",
+  "cloudflare-ai-gateway",
+  "cloudflare-workers-ai",
+  "deepseek",
+  "fireworks",
+  "github-copilot",
+  "google",
+  "google-vertex",
+  "groq",
+  "huggingface",
+  "kimi-coding",
+  "meta",
+  "minimax",
+  "minimax-cn",
+  "mistral",
+  "moonshotai",
+  "moonshotai-cn",
+  "nvidia",
+  "openai",
+  "openai-codex",
+  "opencode",
+  "opencode-go",
+  "openrouter",
+  "qwen-token-plan",
+  "qwen-token-plan-cn",
+  "qwen-token-plan-individual",
+  "radius",
+  "together",
+  "typesafe",
+  "vercel-ai-gateway",
+  "xai",
+  "xiaomi",
+  "xiaomi-token-plan-ams",
+  "xiaomi-token-plan-cn",
+  "xiaomi-token-plan-sgp",
+  "zai",
+  "zai-coding-cn",
+]);
+
+/** Permissive set that temporarily recognizes legacy `azure-openai-responses` for migration readability. */
+export const BUILT_IN_PROVIDERS_PERMISSIVE: ReadonlySet<string> = new Set([
+  ...BUILT_IN_PROVIDERS_PI_1_1_0,
+  "azure-openai-responses",
+]);
+
+const DEFAULT_OPTIONS: ValidationOptions = { builtInProviders: BUILT_IN_PROVIDERS_PI_1_1_0 };
 const THINKING_LEVEL_KEYS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const INPUT_TYPES = new Set(["text", "image"]);
 const THINKING_FORMATS = new Set([
@@ -89,9 +140,18 @@ const BOOLEAN_COMPAT_FIELDS = [
   "supportsStrictTools",
   "supportsMidConvoEffort",
   "supportsToolReferences",
+  "supportsMidConvoSystemMessages",
+  "supportsMidConvoToolAdditions",
+  "supportsMidConvoToolChanges",
+  "supportsThinkingTokenBudget",
 ] as const;
 const SESSION_AFFINITY_FORMATS = new Set(["openai", "openai-nosession", "openrouter"]);
 const DEFERRED_TOOLS_MODES = new Set(["kimi"]);
+const THINKING_TOKEN_BUDGET_FIELDS = new Set([
+  "thinking_token_budget",
+  "thinking_budget",
+  "thinking_budget_tokens",
+]);
 /** The engine resolves all three; the models.json TypeBox schema only declares two. */
 const CHAT_TEMPLATE_VARIABLES = new Set([
   "thinking.enabled", "thinking.effort", "thinking.budget",
@@ -348,6 +408,13 @@ function validateCompat(value: unknown, path: string, issues: ValidationIssue[])
     && (typeof value.deferredToolsMode !== "string" || !DEFERRED_TOOLS_MODES.has(value.deferredToolsMode))) {
     addIssue(issues, childPath(path, "deferredToolsMode"), "must be kimi");
   }
+  if (value.thinkingTokenBudgetField !== undefined
+    && (typeof value.thinkingTokenBudgetField !== "string" || !THINKING_TOKEN_BUDGET_FIELDS.has(value.thinkingTokenBudgetField))) {
+    addIssue(issues, childPath(path, "thinkingTokenBudgetField"), "must be thinking_token_budget, thinking_budget, or thinking_budget_tokens");
+  }
+  if (hasOwn(value, "allowedFallbackModels")) {
+    validateAllowedFallbackModels(getOwn(value, "allowedFallbackModels"), childPath(path, "allowedFallbackModels"), issues);
+  }
   if (value.sessionAffinityFormat !== undefined
     && (typeof value.sessionAffinityFormat !== "string" || !SESSION_AFFINITY_FORMATS.has(value.sessionAffinityFormat))) {
     addIssue(issues, childPath(path, "sessionAffinityFormat"), "must be openai, openai-nosession, or openrouter");
@@ -360,6 +427,108 @@ function validateCompat(value: unknown, path: string, issues: ValidationIssue[])
   }
   if (value.vercelGatewayRouting !== undefined) {
     validateVercelGatewayRouting(value.vercelGatewayRouting, childPath(path, "vercelGatewayRouting"), issues);
+  }
+}
+
+function validateAllowedFallbackModels(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (!Array.isArray(value)) {
+    addIssue(issues, path, "must be an array");
+    return;
+  }
+  if (value.length > 3) {
+    addIssue(issues, path, "must contain at most 3 fallback models");
+  }
+  value.forEach((entry, index) => {
+    const entryPath = `${path}[${index}]`;
+    if (!isObject(entry)) {
+      addIssue(issues, entryPath, "must be an object");
+      return;
+    }
+    if (!hasOwn(entry, "provider") || typeof entry.provider !== "string" || entry.provider.trim().length === 0) {
+      addIssue(issues, childPath(entryPath, "provider"), "must be a non-empty string");
+    }
+    if (!hasOwn(entry, "model") || typeof entry.model !== "string" || entry.model.trim().length === 0) {
+      addIssue(issues, childPath(entryPath, "model"), "must be a non-empty string");
+    }
+    if (!hasOwn(entry, "cost") || !isObject(entry.cost)) {
+      addIssue(issues, childPath(entryPath, "cost"), "must be an object");
+    } else {
+      validateModelCost(getOwn(entry, "cost"), childPath(entryPath, "cost"), issues);
+    }
+  });
+}
+
+function validateInputLimits(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (!isObject(value)) {
+    addIssue(issues, path, "must be an object");
+    return;
+  }
+  if (hasOwn(value, "maxRequestBytes")) {
+    validatePositiveInteger(getOwn(value, "maxRequestBytes"), childPath(path, "maxRequestBytes"), issues);
+  }
+  if (hasOwn(value, "images")) {
+    const imagesPath = childPath(path, "images");
+    const images = getOwn(value, "images");
+    if (!isObject(images)) {
+      addIssue(issues, imagesPath, "must be an object");
+      return;
+    }
+    if (hasOwn(images, "maxPerMessage")) {
+      validatePositiveInteger(getOwn(images, "maxPerMessage"), childPath(imagesPath, "maxPerMessage"), issues);
+    }
+    if (hasOwn(images, "maxPerRequest")) {
+      validatePositiveInteger(getOwn(images, "maxPerRequest"), childPath(imagesPath, "maxPerRequest"), issues);
+    }
+    if (hasOwn(images, "resize")) {
+      const resizePath = childPath(imagesPath, "resize");
+      const resize = getOwn(images, "resize");
+      if (!isObject(resize)) {
+        addIssue(issues, resizePath, "must be an object");
+        return;
+      }
+      for (const dim of ["maxWidth", "maxHeight", "maxBytes"] as const) {
+        if (hasOwn(resize, dim)) {
+          validatePositiveInteger(getOwn(resize, dim), childPath(resizePath, dim), issues);
+        }
+      }
+      if (hasOwn(resize, "jpegQuality")) {
+        const quality = getOwn(resize, "jpegQuality");
+        if (typeof quality !== "number" || !Number.isInteger(quality) || quality < 1 || quality > 100) {
+          addIssue(issues, childPath(resizePath, "jpegQuality"), "must be an integer between 1 and 100");
+        }
+      }
+    }
+  }
+}
+
+function validatePromptCache(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (!isObject(value)) {
+    addIssue(issues, path, "must be an object");
+    return;
+  }
+  for (const dur of ["short", "long"] as const) {
+    if (hasOwn(value, dur)) {
+      const val = getOwn(value, dur);
+      if (typeof val !== "number" || !Number.isFinite(val) || val <= 0) {
+        addIssue(issues, childPath(path, dur), "must be a finite number greater than 0");
+      }
+    }
+  }
+}
+
+function validateSamplingParamsByThinkingLevel(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (!isObject(value)) {
+    addIssue(issues, path, "must be an object");
+    return;
+  }
+  for (const [key, params] of Object.entries(value)) {
+    const keyPath = childPath(path, key);
+    if (!THINKING_LEVEL_KEYS.has(key)) {
+      addIssue(issues, keyPath, "must be a valid thinking level");
+    }
+    if (!isObject(params)) {
+      addIssue(issues, keyPath, "must be an object");
+    }
   }
 }
 
@@ -431,6 +600,15 @@ function validateModelLikeFields(
     if (!isObject(samplingParams)) {
       addIssue(issues, childPath(path, "samplingParams"), "must be an object");
     }
+  }
+  if (hasOwn(value, "samplingParamsByThinkingLevel")) {
+    validateSamplingParamsByThinkingLevel(getOwn(value, "samplingParamsByThinkingLevel"), childPath(path, "samplingParamsByThinkingLevel"), issues);
+  }
+  if (hasOwn(value, "inputLimits")) {
+    validateInputLimits(getOwn(value, "inputLimits"), childPath(path, "inputLimits"), issues);
+  }
+  if (hasOwn(value, "promptCache")) {
+    validatePromptCache(getOwn(value, "promptCache"), childPath(path, "promptCache"), issues);
   }
 }
 
@@ -536,9 +714,11 @@ function validateProvider(
   const retainsEmptyProviderData = ownBaseUrl !== undefined
     || hasOwn(value, "headers")
     || hasOwn(value, "compat")
+    || hasOwn(value, "apiKey")
+    || hasOwn(value, "authHeader")
     || overrideCount > 0;
   if (isEmptyProvider && !retainsEmptyProviderData) {
-    addIssue(issues, path, "an empty provider must retain baseUrl, headers, compat, or non-empty modelOverrides");
+    addIssue(issues, path, "an empty provider must retain baseUrl, headers, compat, apiKey, authHeader, or non-empty modelOverrides");
   }
 }
 

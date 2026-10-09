@@ -9,7 +9,8 @@ import {
   type ModelIdentityRequest,
   type PayloadCollisionResolution,
 } from "./config-actions.ts";
-import { BUILT_IN_PROVIDERS_PI_0_85_1 } from "./config-validation.ts";
+import { BUILT_IN_PROVIDERS_PI_1_1_0 } from "./config-validation.ts";
+import { stripDeprecatedCompatKeys } from "./compat-settings.ts";
 import {
   collectNonNegativeRate,
   collectOptionalString,
@@ -17,7 +18,10 @@ import {
   collectRequiredString,
   editCompatDraft,
   editCostDraft,
+  editInputLimitsDraft,
   editPayloadDraft,
+  editPromptCacheDraft,
+  editSamplingParamsByThinkingLevelDraft,
   editStringMapDraft,
   editThinkingMapDraft,
   formatNestedCount,
@@ -32,7 +36,6 @@ import { searchableSelect, type SearchableSelectOption } from "./searchable-sele
 import {
   openSettingsPanel,
   type SettingsCategoryDescriptor,
-  type SettingsPanelResult,
   type SettingsPanelState,
 } from "./settings-panel.ts";
 import type { ModelConfig, ModelOverrideConfig, ModelsConfig } from "./types.ts";
@@ -56,6 +59,9 @@ const OVERRIDE_ALLOWED_KEYS = new Set([
   "contextWindow",
   "maxTokens",
   "samplingParams",
+  "samplingParamsByThinkingLevel",
+  "inputLimits",
+  "promptCache",
   "headers",
   "compat",
 ]);
@@ -139,6 +145,8 @@ export function buildModelCategories(
         { id: "input", label: "输入类型", displayValue: inputDisplay(ownValue(model, "input")), action: "edit-field" },
         { id: "contextWindow", label: "Context Window", displayValue: formatSettingValue(ownValue(model, "contextWindow")), action: "edit-field" },
         { id: "maxTokens", label: "最大输出 Tokens", displayValue: formatSettingValue(ownValue(model, "maxTokens")), action: "edit-field" },
+        { id: "inputLimits", label: "Input Limits", displayValue: formatNestedCount(ownValue(model, "inputLimits"), "项"), action: "open-section" },
+        { id: "promptCache", label: "Prompt Cache", displayValue: formatNestedCount(ownValue(model, "promptCache"), "项"), action: "open-section" },
       ],
     },
     {
@@ -150,6 +158,12 @@ export function buildModelCategories(
           label: "Thinking Map",
           displayValue: formatNestedCount(ownValue(model, "thinkingLevelMap"), "项"),
           warning: nestedWarning(model),
+          action: "open-section",
+        },
+        {
+          id: "samplingParamsByThinkingLevel",
+          label: "Thinking 采样参数",
+          displayValue: formatNestedCount(ownValue(model, "samplingParamsByThinkingLevel"), "档"),
           action: "open-section",
         },
       ],
@@ -216,6 +230,8 @@ export function buildModelOverrideCategories(
         { id: "input", label: "输入类型", displayValue: inputDisplay(ownValue(override, "input"), true), action: "edit-field" },
         { id: "contextWindow", label: "Context Window", displayValue: formatSettingValue(ownValue(override, "contextWindow"), "inherited"), action: "edit-field" },
         { id: "maxTokens", label: "最大输出 Tokens", displayValue: formatSettingValue(ownValue(override, "maxTokens"), "inherited"), action: "edit-field" },
+        { id: "inputLimits", label: "Input Limits", displayValue: formatNestedCount(ownValue(override, "inputLimits"), "项", "inherited"), action: "open-section" },
+        { id: "promptCache", label: "Prompt Cache", displayValue: formatNestedCount(ownValue(override, "promptCache"), "项", "inherited"), action: "open-section" },
       ],
     },
     {
@@ -227,6 +243,12 @@ export function buildModelOverrideCategories(
           label: "Thinking Map",
           displayValue: formatNestedCount(ownValue(override, "thinkingLevelMap"), "项", "inherited"),
           warning: nestedWarning(override as ModelConfig),
+          action: "open-section",
+        },
+        {
+          id: "samplingParamsByThinkingLevel",
+          label: "Thinking 采样参数",
+          displayValue: formatNestedCount(ownValue(override, "samplingParamsByThinkingLevel"), "档", "inherited"),
           action: "open-section",
         },
       ],
@@ -676,10 +698,52 @@ export async function runModelEditor(
     }
 
     const draftKey = `${result.categoryId}:${fieldId}`;
+    if (result.categoryId === "capability" && fieldId === "inputLimits") {
+      const stored = ownValue(model, "inputLimits") as Record<string, unknown> | undefined;
+      const held = retained.get(draftKey);
+      const baseline = held ? held.baseline : stored;
+      const draft = (held?.value ?? stored) as Record<string, unknown> | undefined;
+      const edited = await editInputLimitsDraft(ctx, "Model Input Limits", draft);
+      if (edited.status === "discard") retained.delete(draftKey);
+      else {
+        const next = Object.keys(edited.value).length > 0 ? edited.value : undefined;
+        const saved = didSave(ctx, await actions.saveModelSubtree(providerId, modelId, "inputLimits", baseline, next));
+        if (saved) retained.delete(draftKey); else retained.set(draftKey, { baseline, value: edited.value });
+      }
+      continue;
+    }
+    if (result.categoryId === "capability" && fieldId === "promptCache") {
+      const stored = ownValue(model, "promptCache") as Record<string, unknown> | undefined;
+      const held = retained.get(draftKey);
+      const baseline = held ? held.baseline : stored;
+      const draft = (held?.value ?? stored) as Record<string, unknown> | undefined;
+      const edited = await editPromptCacheDraft(ctx, "Model Prompt Cache", draft);
+      if (edited.status === "discard") retained.delete(draftKey);
+      else {
+        const next = Object.keys(edited.value).length > 0 ? edited.value : undefined;
+        const saved = didSave(ctx, await actions.saveModelSubtree(providerId, modelId, "promptCache", baseline, next));
+        if (saved) retained.delete(draftKey); else retained.set(draftKey, { baseline, value: edited.value });
+      }
+      continue;
+    }
+    if (result.categoryId === "thinking" && fieldId === "samplingParamsByThinkingLevel") {
+      const stored = ownValue(model, "samplingParamsByThinkingLevel") as Record<string, unknown> | undefined;
+      const held = retained.get(draftKey);
+      const baseline = held ? held.baseline : stored;
+      const draft = (held?.value ?? stored) as Record<string, unknown> | undefined;
+      const edited = await editSamplingParamsByThinkingLevelDraft(ctx, "Model Thinking 采样参数", draft);
+      if (edited.status === "discard") retained.delete(draftKey);
+      else {
+        const next = Object.keys(edited.value).length > 0 ? edited.value : undefined;
+        const saved = didSave(ctx, await actions.saveModelSubtree(providerId, modelId, "samplingParamsByThinkingLevel", baseline, next));
+        if (saved) retained.delete(draftKey); else retained.set(draftKey, { baseline, value: edited.value });
+      }
+      continue;
+    }
     if (result.categoryId === "endpoint" && fieldId === "headers") {
       const stored = ownValue(model, "headers") as Record<string, string> | undefined;
       const held = retained.get(draftKey);
-      const baseline = held?.baseline ?? stored;
+      const baseline = held ? held.baseline : stored;
       const draft = (held?.value ?? stored) as Record<string, string> | undefined;
       const edited = await editStringMapDraft(ctx, "Model Headers", draft);
       if (edited.status === "discard") retained.delete(draftKey);
@@ -693,7 +757,7 @@ export async function runModelEditor(
     if (result.categoryId === "thinking" && fieldId === "thinkingLevelMap") {
       const stored = ownValue(model, "thinkingLevelMap") as Record<string, unknown> | undefined;
       const held = retained.get(draftKey);
-      const baseline = held?.baseline ?? stored;
+      const baseline = held ? held.baseline : stored;
       const draft = (held?.value ?? stored) as Record<string, unknown> | undefined;
       const warning = nestedWarning(model);
       const edited = await editThinkingMapDraft(ctx, warning ? `Thinking Map - ${warning}` : "Thinking Map", draft, true);
@@ -708,7 +772,7 @@ export async function runModelEditor(
     if (result.categoryId === "cost" && fieldId === "tiers") {
       const stored = ownValue(model, "cost") as Record<string, unknown> | undefined;
       const held = retained.get(draftKey);
-      const baseline = held?.baseline ?? stored;
+      const baseline = held ? held.baseline : stored;
       const draft = (held?.value ?? stored) as Record<string, unknown> | undefined;
       const action = await ctx.ui.select("Model 成本与分层", ["编辑 Cost 与分层", "清除整个 Cost（使用默认值）", "取消"]);
       if (!action || action === "取消") continue;
@@ -728,7 +792,7 @@ export async function runModelEditor(
     if (result.categoryId === "compatibility" && fieldId === "compat") {
       const stored = ownValue(model, "compat") as Record<string, unknown> | undefined;
       const held = retained.get(draftKey);
-      const baseline = held?.baseline ?? stored;
+      const baseline = held ? held.baseline : stored;
       const draft = (held?.value ?? stored) as Record<string, unknown> | undefined;
       const edited = await editCompatDraft(ctx, "Model Compat", draft, effectiveModelApi(snapshot.native, providerId, model));
       if (edited.status === "discard") retained.delete(draftKey);
@@ -742,7 +806,7 @@ export async function runModelEditor(
     if (result.categoryId === "payload" && fieldId === "samplingParams") {
       const stored = ownValue(model, "samplingParams") as Record<string, unknown> | undefined;
       const held = retained.get(draftKey);
-      const baseline = held?.baseline ?? stored;
+      const baseline = held ? held.baseline : stored;
       const draft = (held?.value ?? stored) as Record<string, unknown> | undefined;
       const edited = await editPayloadDraft(ctx, "Model Sampling Params", draft);
       if (edited.status === "discard") retained.delete(draftKey);
@@ -755,7 +819,7 @@ export async function runModelEditor(
     }
     if (result.categoryId === "payload" && fieldId === "payload") {
       const held = retained.get(draftKey);
-      const baseline = held?.baseline ?? privatePayload;
+      const baseline = held ? held.baseline : privatePayload;
       const draft = (held?.value ?? visiblePayload) as Record<string, unknown> | undefined;
       const edited = await editPayloadDraft(ctx, "Model Payload", draft);
       if (edited.status === "discard") {
@@ -784,7 +848,7 @@ export async function runModelEditor(
 }
 
 export function customProviderNeedsProviderApi(providerId: string, provider: Record<string, unknown>): boolean {
-  return !BUILT_IN_PROVIDERS_PI_0_85_1.has(providerId) && getOwnValue(provider, "api") === undefined;
+  return !BUILT_IN_PROVIDERS_PI_1_1_0.has(providerId) && getOwnValue(provider, "api") === undefined;
 }
 
 export async function createModelAndOpen(
@@ -886,6 +950,13 @@ function setOptionalDraftValue(draft: ModelOverrideConfig, key: string, value: u
   else setOwnValue(draft, key, value);
 }
 
+function finalizeOverrideDraft(draft: ModelOverrideConfig): ModelOverrideConfig {
+  if (draft.compat && typeof draft.compat === "object" && !Array.isArray(draft.compat)) {
+    draft.compat = stripDeprecatedCompatKeys(draft.compat as Record<string, unknown>);
+  }
+  return draft;
+}
+
 function setCostDraftValue(draft: ModelOverrideConfig, key: string, value: unknown | null): void {
   const current = ownValue(draft, "cost");
   const cost = deepCloneJson(current && typeof current === "object" && !Array.isArray(current) ? current : {}) as Record<string, unknown>;
@@ -918,6 +989,7 @@ export async function editModelOverrideEntryDraft(
       continue;
     }
     if (result.type === "back") {
+      finalizeOverrideDraft(draft);
       const unsupportedPaths = unsupportedOverridePaths(draft);
       if (unsupportedPaths.length === 0) return { status: "save", value: draft, unsupportedPaths };
       ctx.ui.notify("Override 包含不支持字段；普通保存不会持久化这些字段", "warning");
@@ -979,8 +1051,17 @@ export async function editModelOverrideEntryDraft(
       continue;
     }
     let edited: DraftEditorResult<Record<string, unknown>> | DraftEditorResult<Record<string, string>> | undefined;
-    let key: "thinkingLevelMap" | "cost" | "headers" | "compat" | "samplingParams" | undefined;
-    if (result.categoryId === "thinking") {
+    let key: "thinkingLevelMap" | "cost" | "headers" | "compat" | "samplingParams" | "samplingParamsByThinkingLevel" | "inputLimits" | "promptCache" | undefined;
+    if (result.categoryId === "capability" && fieldId === "inputLimits") {
+      key = "inputLimits";
+      edited = await editInputLimitsDraft(ctx, "Override Input Limits", ownValue(draft, key) as Record<string, unknown> | undefined);
+    } else if (result.categoryId === "capability" && fieldId === "promptCache") {
+      key = "promptCache";
+      edited = await editPromptCacheDraft(ctx, "Override Prompt Cache", ownValue(draft, key) as Record<string, unknown> | undefined);
+    } else if (result.categoryId === "thinking" && fieldId === "samplingParamsByThinkingLevel") {
+      key = "samplingParamsByThinkingLevel";
+      edited = await editSamplingParamsByThinkingLevelDraft(ctx, "Override Thinking 采样参数", ownValue(draft, key) as Record<string, unknown> | undefined);
+    } else if (result.categoryId === "thinking" && fieldId === "thinkingLevelMap") {
       key = "thinkingLevelMap";
       const warning = nestedWarning(draft as ModelConfig);
       edited = await editThinkingMapDraft(

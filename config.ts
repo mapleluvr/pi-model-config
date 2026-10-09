@@ -4,7 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { parseTree, type Node, type ParseError } from "jsonc-parser";
 import { atomicReplace, readArtifact } from "./atomic-file.ts";
-import { assertValidModelsCandidate } from "./config-validation.ts";
+import {
+  assertValidModelsCandidate,
+  validateModelsCandidate,
+  BUILT_IN_PROVIDERS_PERMISSIVE,
+} from "./config-validation.ts";
 import {
   cloneOwnJsonData,
   deleteOwnKey,
@@ -103,7 +107,10 @@ export function parseModelsDocument(filePath: string, raw: string | Uint8Array):
   try {
     assertValidModelsCandidate(config);
   } catch {
-    throw new ModelsConfigError(filePath, "document does not satisfy the Pi models schema");
+    const issues = validateModelsCandidate(config, { builtInProviders: BUILT_IN_PROVIDERS_PERMISSIVE });
+    if (issues.length > 0) {
+      throw new ModelsConfigError(filePath, "document does not satisfy the Pi models schema");
+    }
   }
   return config;
 }

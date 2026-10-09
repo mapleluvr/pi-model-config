@@ -1,0 +1,68 @@
+{
+  "case1": {
+    "planStatus": "ready",
+    "planChangesIncludeSettings": false,
+    "applyStatus": "aborted",
+    "applyError": "文件 \"C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\rev-case1-3eG4ee\\settings.json\" 在预检后被外部并发创建，迁移中止以防覆盖外部改动",
+    "applyWrittenFiles": [],
+    "postSettingsThinkingLevels": {
+      "azure-openai-responses/m": "low",
+      "azure/m": "high"
+    },
+    "silentOverwriteObserved": false
+  },
+  "case2": {
+    "planStatus": "ready",
+    "migratedSubagentsCount": 2,
+    "applyStatus": "success",
+    "workerOverridePostMigration": {
+      "model": "azure/m",
+      "defaultProvider": "azure"
+    },
+    "modelRemainedOld": false,
+    "defaultProviderRemainedOld": false
+  },
+  "case3": {
+    "planStatus": "conflict",
+    "planConflictReason": "models.json 格式损坏或无法解析: models.json 语法错误或不符合模型配置模式",
+    "applyStatus": "aborted",
+    "applyError": "models.json 格式损坏或无法解析: models.json 语法错误或不符合模型配置模式",
+    "planReasonContainsSentinel": false,
+    "applyErrorContainsSentinel": false,
+    "sentinelLeakedInErrorMessage": false
+  },
+  "caseA": {
+    "finalPromptCache": {
+      "long": 3600
+    },
+    "externalLongLost": false,
+    "onlyShortSaved": false,
+    "notifications": [
+      "该字段已被外部修改；草稿已保留",
+      "该字段已被外部修改；草稿已保留"
+    ]
+  },
+  "caseB": {
+    "readModelsConfigLoaded": true,
+    "planStatus": "ready",
+    "planRejectedLegalJsonc": false
+  },
+  "caseC": {
+    "planStatus": "ready",
+    "applyStatus": "success",
+    "compactionModelOverrides": {
+      "azure/m": {
+        "reserveTokens": 50000
+      }
+    },
+    "oldKeyPreservedUnmigrated": false,
+    "newKeyCreated": true
+  },
+  "caseD": {
+    "lockAcquiredByTest": true,
+    "applyStatusWhileLockHeld": "aborted",
+    "applyBypassedLock": false,
+    "pendingJournalChecked": false,
+    "journalStillExists": true
+  }
+}

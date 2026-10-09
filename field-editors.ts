@@ -2,6 +2,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import {
   COMPAT_BOOLEAN_FIELDS,
+  COMPAT_JSON_ARRAY_FIELDS,
   COMPAT_JSON_OBJECT_FIELDS,
   COMPAT_NUMBER_FIELDS,
   COMPAT_STRING_FIELDS,
@@ -12,6 +13,7 @@ import {
   applyCompatObjectPatch,
   applyLegacySessionAffinityMigration,
   planLegacySessionAffinityMigration,
+  stripDeprecatedCompatKeys,
 } from "./compat-settings.ts";
 import { deepCloneJson, getThinkingMapWarning } from "./model-fields.ts";
 import {
@@ -117,6 +119,23 @@ export async function collectPositiveInteger(
     const value = Number(raw.trim());
     if (Number.isInteger(value) && value > 0) return { status: "value", value };
     ctx.ui.notify("请输入正整数", "error");
+  }
+}
+
+export async function collectPositiveFiniteNumber(
+  ctx: FieldEditorUiContext,
+  title: string,
+  placeholder?: string,
+): Promise<RequiredCollectionResult<number>> {
+  while (true) {
+    const raw = await ctx.ui.input(title, placeholder);
+    if (raw === undefined) return { status: "cancel" };
+    const normalized = raw.trim();
+    if (normalized.length > 0) {
+      const value = Number(normalized);
+      if (Number.isFinite(value) && value > 0) return { status: "value", value };
+    }
+    ctx.ui.notify("请输入大于 0 的有限数值", "error");
   }
 }
 
@@ -329,6 +348,33 @@ async function editCompatObjectField(
   }
 }
 
+async function editCompatArrayField(
+  ctx: FieldEditorUiContext,
+  title: string,
+  draft: Record<string, unknown>,
+  field: (typeof COMPAT_JSON_ARRAY_FIELDS)[number],
+): Promise<CompatFieldEdit> {
+  const action = await ctx.ui.select(`${title} - ${field.label}`, ["编辑 JSON 数组", "清除", "返回"]);
+  if (action === undefined) return { status: "cancel" };
+  if (action === "返回") return UNCHANGED;
+  if (action === "清除") return { status: "value", value: applyCompatObjectChoice(draft, field.key, undefined) };
+  const raw = await ctx.ui.editor(
+    `${title} - ${field.label}`,
+    getOwnValue(draft, field.key) === undefined ? "[]" : stringifyOwnJsonData(getOwnValue(draft, field.key), 2),
+  );
+  if (raw === undefined) return { status: "cancel" };
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error();
+    const next = { ...draft };
+    setOwnValue(next, field.key, deepCloneJson(parsed));
+    return { status: "value", value: next };
+  } catch {
+    ctx.ui.notify("请输入有效的 JSON 数组", "error");
+    return UNCHANGED;
+  }
+}
+
 async function migrateLegacySessionAffinityField(
   ctx: FieldEditorUiContext,
   title: string,
@@ -355,6 +401,7 @@ export async function editCompatDraft(
     const stringLabels = stringFields.map((field) => `${field.label} = ${formatSettingValue(getOwnValue(draft, field.key))}`);
     const numberLabels = COMPAT_NUMBER_FIELDS.map((field) => `${field.label} = ${formatSettingValue(getOwnValue(draft, field.key))}`);
     const objectLabels = COMPAT_JSON_OBJECT_FIELDS.map((field) => `[对象] ${field.label}`);
+    const arrayLabels = COMPAT_JSON_ARRAY_FIELDS.map((field) => `[数组] ${field.label}`);
     const legacyPlan = planLegacySessionAffinityMigration(draft, api);
     const legacyLabel = legacyPlan
       ? `[迁移] 旧字段 ${LEGACY_SESSION_AFFINITY_KEY} = ${formatSettingValue(legacyPlan.legacyValue)}`
@@ -364,12 +411,13 @@ export async function editCompatDraft(
       ...stringLabels,
       ...numberLabels,
       ...objectLabels,
+      ...arrayLabels,
       ...(legacyLabel ? [legacyLabel] : []),
       "保存并返回",
       "放弃更改",
     ]);
     if (choice === undefined || choice === "放弃更改") return { status: "discard" };
-    if (choice === "保存并返回") return { status: "save", value: draft };
+    if (choice === "保存并返回") return { status: "save", value: stripDeprecatedCompatKeys(draft) };
 
     const edit = await dispatchCompatFieldEdit(ctx, title, draft, {
       choice,
@@ -377,6 +425,7 @@ export async function editCompatDraft(
       stringLabels,
       numberLabels,
       objectLabels,
+      arrayLabels,
       legacyLabel,
       legacyPlan,
     });
@@ -391,6 +440,7 @@ interface CompatFieldDispatch {
   stringLabels: string[];
   numberLabels: string[];
   objectLabels: string[];
+  arrayLabels: string[];
   legacyLabel?: string;
   legacyPlan?: NonNullable<ReturnType<typeof planLegacySessionAffinityMigration>>;
 }
@@ -417,6 +467,10 @@ async function dispatchCompatFieldEdit(
   const objectIndex = dispatch.objectLabels.indexOf(dispatch.choice);
   if (objectIndex >= 0) {
     return await editCompatObjectField(ctx, title, draft, COMPAT_JSON_OBJECT_FIELDS[objectIndex]!);
+  }
+  const arrayIndex = dispatch.arrayLabels.indexOf(dispatch.choice);
+  if (arrayIndex >= 0) {
+    return await editCompatArrayField(ctx, title, draft, COMPAT_JSON_ARRAY_FIELDS[arrayIndex]!);
   }
   if (dispatch.legacyPlan && dispatch.choice === dispatch.legacyLabel) {
     return await migrateLegacySessionAffinityField(ctx, title, draft, dispatch.legacyPlan);
@@ -669,5 +723,171 @@ export async function editPayloadDraft(
     const value = await collectPayloadValue(ctx, `${title} - ${key}`, entryType(current), current);
     if (value.status === "cancel") return { status: "discard" };
     setOwnValue(draft, key, value.value);
+  }
+}
+
+export async function editPromptCacheDraft(
+  ctx: FieldEditorUiContext,
+  title: string,
+  existing: Record<string, unknown> | undefined,
+): Promise<DraftEditorResult<Record<string, unknown>>> {
+  const draft = cloneRecord(existing);
+  while (true) {
+    const shortVal = formatSettingValue(getOwnValue(draft, "short"));
+    const longVal = formatSettingValue(getOwnValue(draft, "long"));
+    const choice = await ctx.ui.select(title, [
+      `short (秒) = ${shortVal}`,
+      `long (秒) = ${longVal}`,
+      "保存并返回",
+      "放弃更改",
+    ]);
+    if (choice === undefined || choice === "放弃更改") return { status: "discard" };
+    if (choice === "保存并返回") return { status: "save", value: draft };
+    const isShort = choice.startsWith("short");
+    const key = isShort ? "short" : "long";
+    const action = await ctx.ui.select(`${title} - ${key}`, ["设置秒数", "清除", "返回"]);
+    if (action === undefined || action === "返回") continue;
+    if (action === "清除") {
+      deleteOwnKey(draft, key);
+      continue;
+    }
+    const val = await collectPositiveFiniteNumber(ctx, `${title} - ${key}`, String(getOwnValue(draft, key) ?? ""));
+    if (val.status === "cancel") return { status: "discard" };
+    setOwnValue(draft, key, val.value);
+  }
+}
+
+export async function editInputLimitsDraft(
+  ctx: FieldEditorUiContext,
+  title: string,
+  existing: Record<string, unknown> | undefined,
+): Promise<DraftEditorResult<Record<string, unknown>>> {
+  const draft = cloneRecord(existing);
+  while (true) {
+    const maxReqBytes = formatSettingValue(getOwnValue(draft, "maxRequestBytes"));
+    const images = isPlainObject(getOwnValue(draft, "images")) ? getOwnValue(draft, "images") as Record<string, unknown> : {};
+    const maxPerMsg = formatSettingValue(getOwnValue(images, "maxPerMessage"));
+    const maxPerReq = formatSettingValue(getOwnValue(images, "maxPerRequest"));
+    const resize = isPlainObject(getOwnValue(images, "resize")) ? getOwnValue(images, "resize") as Record<string, unknown> : {};
+    const maxW = formatSettingValue(getOwnValue(resize, "maxWidth"));
+    const maxH = formatSettingValue(getOwnValue(resize, "maxHeight"));
+    const maxB = formatSettingValue(getOwnValue(resize, "maxBytes"));
+    const quality = formatSettingValue(getOwnValue(resize, "jpegQuality"));
+
+    const choice = await ctx.ui.select(title, [
+      `maxRequestBytes = ${maxReqBytes}`,
+      `images.maxPerMessage = ${maxPerMsg}`,
+      `images.maxPerRequest = ${maxPerReq}`,
+      `images.resize.maxWidth = ${maxW}`,
+      `images.resize.maxHeight = ${maxH}`,
+      `images.resize.maxBytes = ${maxB}`,
+      `images.resize.jpegQuality (1-100) = ${quality}`,
+      "编辑完整 JSON 对象",
+      "保存并返回",
+      "放弃更改",
+    ]);
+    if (choice === undefined || choice === "放弃更改") return { status: "discard" };
+    if (choice === "保存并返回") return { status: "save", value: draft };
+    if (choice === "编辑完整 JSON 对象") {
+      const edited = await collectJsonValue(ctx, `${title} - JSON`, draft);
+      if (edited.status === "value" && isPlainObject(edited.value)) {
+        return { status: "save", value: edited.value };
+      }
+      continue;
+    }
+    if (choice.startsWith("maxRequestBytes")) {
+      const action = await ctx.ui.select(`${title} - maxRequestBytes`, ["设置值", "清除", "返回"]);
+      if (action === "清除") deleteOwnKey(draft, "maxRequestBytes");
+      else if (action === "设置值") {
+        const val = await collectPositiveInteger(ctx, "maxRequestBytes", String(getOwnValue(draft, "maxRequestBytes") ?? ""));
+        if (val.status === "value") setOwnValue(draft, "maxRequestBytes", val.value);
+      }
+      continue;
+    }
+    if (choice.startsWith("images.maxPerMessage") || choice.startsWith("images.maxPerRequest")) {
+      const key = choice.startsWith("images.maxPerMessage") ? "maxPerMessage" : "maxPerRequest";
+      const action = await ctx.ui.select(`${title} - ${key}`, ["设置值", "清除", "返回"]);
+      const nextImages = { ...images };
+      if (action === "清除") {
+        deleteOwnKey(nextImages, key);
+      } else if (action === "设置值") {
+        const val = await collectPositiveInteger(ctx, key, String(getOwnValue(images, key) ?? ""));
+        if (val.status === "value") setOwnValue(nextImages, key, val.value);
+      }
+      if (Object.keys(nextImages).length === 0) deleteOwnKey(draft, "images");
+      else setOwnValue(draft, "images", nextImages);
+      continue;
+    }
+    if (choice.startsWith("images.resize")) {
+      let key = "maxWidth";
+      if (choice.includes("maxHeight")) key = "maxHeight";
+      else if (choice.includes("maxBytes")) key = "maxBytes";
+      else if (choice.includes("jpegQuality")) key = "jpegQuality";
+
+      const action = await ctx.ui.select(`${title} - resize.${key}`, ["设置值", "清除", "返回"]);
+      const nextResize = { ...resize };
+      const nextImages = { ...images };
+      if (action === "清除") {
+        deleteOwnKey(nextResize, key);
+      } else if (action === "设置值") {
+        if (key === "jpegQuality") {
+          while (true) {
+            const raw = await ctx.ui.input(`${title} - jpegQuality (1-100)`, String(getOwnValue(resize, "jpegQuality") ?? "85"));
+            if (raw === undefined) break;
+            const n = Number(raw.trim());
+            if (Number.isInteger(n) && n >= 1 && n <= 100) {
+              setOwnValue(nextResize, "jpegQuality", n);
+              break;
+            }
+            ctx.ui.notify("请输入 1 到 100 之间的整数", "error");
+          }
+        } else {
+          const val = await collectPositiveInteger(ctx, key, String(getOwnValue(resize, key) ?? ""));
+          if (val.status === "value") setOwnValue(nextResize, key, val.value);
+        }
+      }
+      if (Object.keys(nextResize).length === 0) deleteOwnKey(nextImages, "resize");
+      else setOwnValue(nextImages, "resize", nextResize);
+
+      if (Object.keys(nextImages).length === 0) deleteOwnKey(draft, "images");
+      else setOwnValue(draft, "images", nextImages);
+      continue;
+    }
+  }
+}
+
+export async function editSamplingParamsByThinkingLevelDraft(
+  ctx: FieldEditorUiContext,
+  title: string,
+  existing: Record<string, unknown> | undefined,
+): Promise<DraftEditorResult<Record<string, unknown>>> {
+  const draft = cloneRecord(existing);
+  while (true) {
+    const labels = THINKING_LEVELS.map((level) => {
+      const val = getOwnValue(draft, level);
+      return `${level} = ${val === undefined ? "(未设置)" : stringifyOwnJsonData(val)}`;
+    });
+    const choice = await ctx.ui.select(title, [
+      ...labels,
+      "保存并返回",
+      "放弃更改",
+    ]);
+    if (choice === undefined || choice === "放弃更改") return { status: "discard" };
+    if (choice === "保存并返回") return { status: "save", value: draft };
+    const levelIndex = labels.indexOf(choice);
+    if (levelIndex < 0) continue;
+    const level = THINKING_LEVELS[levelIndex]!;
+    const current = getOwnValue(draft, level);
+    const action = await ctx.ui.select(`${title} - ${level}`, ["编辑采样参数 (JSON)", "清除当前档位", "返回"]);
+    if (action === undefined || action === "返回") continue;
+    if (action === "清除当前档位") {
+      deleteOwnKey(draft, level);
+      continue;
+    }
+    const edited = await collectJsonValue(ctx, `${title} - ${level}`, current ?? {});
+    if (edited.status === "value" && isPlainObject(edited.value)) {
+      if (Object.keys(edited.value).length === 0) deleteOwnKey(draft, level);
+      else setOwnValue(draft, level, edited.value);
+    }
   }
 }

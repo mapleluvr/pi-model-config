@@ -25,8 +25,8 @@ test("Model catalog uses the exact stable category and field IDs", () => {
   }, undefined)), [
     ["general", ["id", "name"]],
     ["endpoint", ["api", "baseUrl", "headers"]],
-    ["capability", ["reasoning", "input", "contextWindow", "maxTokens"]],
-    ["thinking", ["thinkingLevelMap"]],
+    ["capability", ["reasoning", "input", "contextWindow", "maxTokens", "inputLimits", "promptCache"]],
+    ["thinking", ["thinkingLevelMap", "samplingParamsByThinkingLevel"]],
     ["cost", ["input", "output", "cacheRead", "cacheWrite", "tiers"]],
     ["compatibility", ["compat"]],
     ["payload", ["samplingParams", "payload"]],
@@ -91,8 +91,8 @@ test("Override catalog exposes only the approved restricted surface", () => {
   });
   assert.deepEqual(categories.map((category) => [category.id, category.fields.map((field) => field.id)]), [
     ["general", ["targetId", "name"]],
-    ["capability", ["reasoning", "input", "contextWindow", "maxTokens"]],
-    ["thinking", ["thinkingLevelMap"]],
+    ["capability", ["reasoning", "input", "contextWindow", "maxTokens", "inputLimits", "promptCache"]],
+    ["thinking", ["thinkingLevelMap", "samplingParamsByThinkingLevel"]],
     ["cost", ["input", "output", "cacheRead", "cacheWrite", "tiers"]],
     ["sampling", ["samplingParams"]],
     ["headers", ["headers"]],

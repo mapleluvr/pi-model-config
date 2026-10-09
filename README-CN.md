@@ -79,8 +79,8 @@ cp -r pi-model-config .pi/extensions/model-config
 | ------ | ------------ |
 | General | Model ID、显示名称 |
 | Endpoint overrides | API type、API Base URL、Headers |
-| Capabilities and limits | Reasoning、input types、Context Window、Maximum Output Tokens |
-| Thinking | `thinkingLevelMap`，覆盖 `off`、`minimal`、`low`、`medium`、`high`、`xhigh` 和映射值 `max` |
+| Capabilities and limits | Reasoning、input types、Context Window、Maximum Output Tokens、Input Limits、Prompt Cache |
+| Thinking | `thinkingLevelMap`（覆盖 `off`、`minimal`、`low`、`medium`、`high`、`xhigh` 和映射值 `max`）、`samplingParamsByThinkingLevel` |
 | Cost | Input、Output、Cache Read、Cache Write、完整 `cost.tiers` |
 | Compatibility | 按 OpenAI、OpenAI Responses、Anthropic 三个 API 家族分组的 Compat 字段 |
 | Request parameters | 原生 `samplingParams`、私有 Payload |
@@ -102,9 +102,11 @@ Merge 和 Replace 都会预览新增 identity 与私有 identity 冲突。复用
 
 ## 原生与私有数据
 
-Pi Model Config 按 Pi 0.85.1 读取 JSONC `models.json`，支持注释和尾逗号。成功保存原生配置时写出规范 JSON。空白、损坏或不满足 schema 的原生配置不会被替换。
+Pi Model Config 按 Pi 1.1.0（兼容 Pi 0.85.1+）读取 JSONC `models.json`，支持注释和尾逗号。成功保存原生配置时写出规范 JSON。空白、损坏或不满足 schema 的原生配置不会被替换。
 
-Compat 编辑器跟随 Pi 0.85.1 的配置面。布尔字段标注读取它的 API 家族（OpenAI completions、OpenAI Responses、Anthropic Messages）；字符串字段提供 `maxTokensField`、含 `baseten` 的 `thinkingFormat`、`cacheControlFormat`、`deferredToolsMode`、`sessionAffinityFormat`；数值字段覆盖 `vllmPriority`；`chatTemplateKwargs`、`chatTemplateArgs`、`openRouterRouting`、`vercelGatewayRouting` 按 JSON 对象编辑。`thinkingFormat` 取值与 `$var` 思考变量与 Pi 实际解析保持一致。`compat.sessionAffinityFormat` 取代了 Pi 0.80.7 移除的 `sendSessionIdHeader`；当存储文件仍带该遗留键时，编辑器提供带预览的迁移（`true` 删除，`false` 映射为 `sessionAffinityFormat: "openai-nosession"`）。
+Compat 编辑器跟随 Pi 1.1.0 的配置面。布尔字段标注读取它的 API 家族（OpenAI completions、OpenAI Responses、Anthropic Messages），包含中途动态工具与系统消息控制（`supportsMidConvoSystemMessages`、`supportsMidConvoToolAdditions`、`supportsMidConvoToolChanges`）以及 `supportsThinkingTokenBudget`；字符串字段提供 `maxTokensField`、含 `baseten` 的 `thinkingFormat`、`cacheControlFormat`、`thinkingTokenBudgetField`（`thinking_token_budget`、`thinking_budget`、`thinking_budget_tokens`）、`sessionAffinityFormat`；数值字段覆盖 `vllmPriority`；JSON 对象编辑 `chatTemplateKwargs`、`chatTemplateArgs`、`openRouterRouting`、`vercelGatewayRouting`；JSON 数组编辑 `allowedFallbackModels`（Anthropic 服务端 refusal fallback 列表与本地 cost 元数据）。已废弃无消费者的旧字段（`deferredToolsMode`、`supportsToolReferences`）已从活动菜单隐藏并在保存时自动剥离。遗留的 `compat.sendSessionIdHeader` 提供带预览的 fail-closed 迁移。
+
+内置 Azure 提供商 ID 由 `azure-openai-responses` 升级为 `azure`，并在打开 `/model-config` 命令时自动检测并提供带预览的交互式 fail-closed 迁移。
 
 原生 `samplingParams` 对象可按 Model 和 Model Override 编辑，Pi 会把它原样合并进 OpenAI 兼容请求体。私有请求值保存在 `~/.pi/agent/model-config-payloads.json`，或 `<PI_CODING_AGENT_DIR>/model-config-payloads.json`。每个 key 是精确 `[provider, model-id]` 二元 tuple 的 JSON 编码，因此 ID 中的斜杠不会产生歧义。`before_provider_request` 只把当前所选 Model 的对象浅合并到请求中，其他 Model 不受影响。
 
@@ -148,6 +150,7 @@ pi-subagents 接受这些 `subagents.agentOverrides.<name>` 字段：`descriptio
 pi-model-config/
 |-- index.ts
 |-- atomic-file.ts
+|-- azure-migration.ts
 |-- process-lock.ts
 |-- config.ts
 |-- config-validation.ts

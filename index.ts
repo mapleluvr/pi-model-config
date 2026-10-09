@@ -6,6 +6,10 @@
  * - 本插件负责：可视化编辑 → 写入 models.json → 通知用户重开 /model
  */
 
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as process from "node:process";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { ModelConfigActions } from "./config-actions.ts";
 import { readModelsConfig } from "./config.ts";
@@ -45,6 +49,23 @@ import {
   updateSubagentAgentOverride,
   type SubagentAgentOverride,
 } from "./subagent-settings.ts";
+import {
+  OLD_AZURE_PROVIDER_ID,
+  NEW_AZURE_PROVIDER_ID,
+  planAzureProviderMigration,
+  applyAzureProviderMigration,
+  type AzureMigrationPlan,
+  type AzureMigrationResult,
+} from "./azure-migration.ts";
+
+export {
+  OLD_AZURE_PROVIDER_ID,
+  NEW_AZURE_PROVIDER_ID,
+  planAzureProviderMigration,
+  applyAzureProviderMigration,
+  type AzureMigrationPlan,
+  type AzureMigrationResult,
+};
 
 // ═══════════════════════════════════════════════════════
 // Helpers
@@ -635,12 +656,41 @@ export default async function (pi: ExtensionAPI) {
         return;
       }
 
+      const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+      const cwd = (ctx as ExtensionCommandContext & { cwd?: string }).cwd ?? process.cwd();
+      const projectDir = fs.existsSync(path.join(cwd, ".pi")) ? cwd : undefined;
       let config: ModelsConfig;
       try {
         config = readModelsConfig();
       } catch {
-        ctx.ui.notify("无法读取模型配置；未执行任何更改", "error");
-        return;
+        // If normal read fails, check if an Azure migration plan is ready and offer it
+        const fallbackPlan = planAzureProviderMigration({ agentDir, projectDir });
+        if (fallbackPlan.status === "ready") {
+          const proceed = await ctx.ui.confirm(
+            "Azure 提供商升级迁移",
+            `配置无法以 Pi 1.1.0 标准直接加载，检测到包含旧版 Azure 提供商 (${fallbackPlan.migratedModelsCount} 个模型)。\n是否立即执行升级迁移？`,
+          );
+          if (proceed) {
+            const res = await applyAzureProviderMigration({ agentDir, projectDir }, fallbackPlan);
+            if (res.status === "success") {
+              ctx.ui.notify(res.notice, "info");
+              try {
+                config = readModelsConfig();
+              } catch {
+                ctx.ui.notify("迁移完成，但仍无法读取模型配置；请检查文件格式", "error");
+                return;
+              }
+            } else {
+              ctx.ui.notify(`迁移失败: ${res.error ?? "未知错误"}`, "error");
+              return;
+            }
+          } else {
+            return;
+          }
+        } else {
+          ctx.ui.notify("无法读取模型配置；未执行任何更改", "error");
+          return;
+        }
       }
 
       while (true) {
@@ -648,16 +698,36 @@ export default async function (pi: ExtensionAPI) {
         let mCount = 0;
         for (const provider of Object.values(config.providers)) mCount += (provider.models || []).length;
 
-        const choice = await ctx.ui.select("模型配置编辑器", [
+        const azurePlan = planAzureProviderMigration({ agentDir, projectDir });
+        const azureOption = azurePlan.status === "ready"
+          ? `[迁移] 发现旧版 Azure 提供商 (${azurePlan.migratedModelsCount} 模型)，立即升级`
+          : undefined;
+
+        const menuOptions = [
+          ...(azureOption ? [azureOption] : []),
           `管理 Providers (当前 ${pCount} providers, ${mCount} models)`,
           "Subagent 配置",
           "诊断与事务恢复",
           "提示：保存后关闭并重开 /model (Ctrl+L) 即可看到",
           "退出",
-        ]);
+        ];
+
+        const choice = await ctx.ui.select("模型配置编辑器", menuOptions);
         if (choice === undefined || choice.startsWith("退出")) break;
 
-        if (choice.startsWith("管理 Providers")) {
+        if (azureOption && choice === azureOption) {
+          const preview = azurePlan.changes.map((c) => `- ${c.description}`).join("\n");
+          const confirmed = await ctx.ui.confirm("Azure 提供商升级迁移", `确认将 azure-openai-responses 升级为 azure？\n\n变更清单：\n${preview}`);
+          if (confirmed) {
+            const res = await applyAzureProviderMigration({ agentDir, projectDir }, azurePlan);
+            if (res.status === "success") {
+              ctx.ui.notify(res.notice, "info");
+              try { config = readModelsConfig(); } catch { /* ignore */ }
+            } else {
+              ctx.ui.notify(`迁移失败: ${res.error ?? "未知错误"}`, "error");
+            }
+          }
+        } else if (choice.startsWith("管理 Providers")) {
           const actions = new ModelConfigActions();
           await runProviderList(ctx, { actions });
           const refreshed = actions.readEditorSnapshot();
