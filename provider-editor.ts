@@ -141,7 +141,7 @@ function notifyActionFailure(ctx: ExtensionCommandContext, result: ActionResult)
 
 function didSave(ctx: ExtensionCommandContext, result: ActionResult): boolean {
   if (result.type === "success") {
-    ctx.ui.notify("配置已保存", "success");
+    ctx.ui.notify("配置已保存", "info");
     return true;
   }
   notifyActionFailure(ctx, result);
@@ -465,7 +465,7 @@ export async function runProviderEditor(
       notifyEndpointFailure(ctx, result);
       return null;
     }
-    ctx.ui.notify(`拉取到 ${result.validCount} 个 Model`, "success");
+    ctx.ui.notify(`拉取到 ${result.validCount} 个 Model`, "info");
     return result;
   });
   let providerId = initialProviderId;
