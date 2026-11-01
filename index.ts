@@ -170,7 +170,7 @@ export async function runRecoveryDiagnostics(
       return "ready";
     }
     if (inspected.type === "automatic-recovered") {
-      ctx.ui.notify("配置事务自动恢复完成", "success");
+      ctx.ui.notify("配置事务自动恢复完成", "info");
       return "ready";
     }
     if (inspected.type === "busy" || inspected.type === "collision" || inspected.type === "unsupported" || inspected.type === "blocked") {
@@ -199,7 +199,7 @@ export async function runRecoveryDiagnostics(
       return "cancelled";
     }
     if (applied.type === "recovered") {
-      ctx.ui.notify("配置恢复完成", "success");
+      ctx.ui.notify("配置恢复完成", "info");
       return "ready";
     }
     if (applied.type === "refresh") {
@@ -332,7 +332,7 @@ async function editSubagentToolsOverride(
       }
       if (!await confirmSubagentToolIfNeeded(ctx, selected)) continue;
       updateSubagentAgentOverride(settingsPath, agentName, { tools: selected });
-      ctx.ui.notify(`已更新 ${agentName} tools allowlist (${selected.length})`, "success");
+      ctx.ui.notify(`已更新 ${agentName} tools allowlist (${selected.length})`, "info");
       continue;
     }
 
@@ -343,7 +343,7 @@ async function editSubagentToolsOverride(
       }
       if (!await confirmSubagentToolIfNeeded(ctx, parentToolNames)) continue;
       updateSubagentAgentOverride(settingsPath, agentName, { tools: parentToolNames });
-      ctx.ui.notify(`已将 ${agentName} tools 设置为母 Agent 当前工具列表 (${parentToolNames.length})`, "success");
+      ctx.ui.notify(`已将 ${agentName} tools 设置为母 Agent 当前工具列表 (${parentToolNames.length})`, "info");
       continue;
     }
 
@@ -362,19 +362,19 @@ async function editSubagentToolsOverride(
       }
       if (!await confirmSubagentToolIfNeeded(ctx, tools)) continue;
       updateSubagentAgentOverride(settingsPath, agentName, { tools });
-      ctx.ui.notify(`已更新 ${agentName} tools allowlist (${tools.length})`, "success");
+      ctx.ui.notify(`已更新 ${agentName} tools allowlist (${tools.length})`, "info");
       continue;
     }
 
     if (action.startsWith("使用 Pi 默认 tools")) {
       updateSubagentAgentOverride(settingsPath, agentName, { tools: "inherit" });
-      ctx.ui.notify(`已将 ${agentName} tools 设置为 Pi 默认 tools`, "success");
+      ctx.ui.notify(`已将 ${agentName} tools 设置为 Pi 默认 tools`, "info");
       continue;
     }
 
     if (action.startsWith("使用 agent 默认")) {
       clearManagedSubagentToolFields(settingsPath, agentName);
-      ctx.ui.notify(`已删除 ${agentName} tools override，将使用 agent 默认 tools`, "success");
+      ctx.ui.notify(`已删除 ${agentName} tools override，将使用 agent 默认 tools`, "info");
       continue;
     }
 
@@ -385,7 +385,7 @@ async function editSubagentToolsOverride(
       );
       if (!ok) continue;
       updateSubagentAgentOverride(settingsPath, agentName, { tools: false });
-      ctx.ui.notify(`已禁用 ${agentName} 的所有 tools`, "success");
+      ctx.ui.notify(`已禁用 ${agentName} 的所有 tools`, "info");
     }
   }
 }
@@ -437,7 +437,7 @@ export async function editSubagentAgentOverride(
       updateSubagentAgentOverride(settingsPath, agentName, {
         model: selected === "__clear__" ? undefined : selected,
       });
-      ctx.ui.notify(`已更新 ${agentName} model override`, "success");
+      ctx.ui.notify(`已更新 ${agentName} model override`, "info");
       continue;
     }
 
@@ -453,7 +453,7 @@ export async function editSubagentAgentOverride(
       updateSubagentAgentOverride(settingsPath, agentName, {
         thinking: choice.startsWith("清除") ? undefined : choice.split(" ")[0],
       });
-      ctx.ui.notify(`已更新 ${agentName} thinking override`, "success");
+      ctx.ui.notify(`已更新 ${agentName} thinking override`, "info");
       continue;
     }
 
@@ -469,13 +469,13 @@ export async function editSubagentAgentOverride(
       );
       if (!ok) continue;
       clearManagedSubagentModelFields(settingsPath, agentName);
-      ctx.ui.notify(`已清除 ${agentName} 的 Subagent 模型相关字段`, "success");
+      ctx.ui.notify(`已清除 ${agentName} 的 Subagent 模型相关字段`, "info");
       continue;
     }
 
     if (action.startsWith("清除 tools")) {
       clearManagedSubagentToolFields(settingsPath, agentName);
-      ctx.ui.notify(`已删除 ${agentName} tools override，将使用 agent 默认 tools`, "success");
+      ctx.ui.notify(`已删除 ${agentName} tools override，将使用 agent 默认 tools`, "info");
       continue;
     }
 
@@ -486,7 +486,7 @@ export async function editSubagentAgentOverride(
       );
       if (!ok) continue;
       deleteSubagentAgentOverride(settingsPath, agentName);
-      ctx.ui.notify(`已删除 ${agentName} override`, "success");
+      ctx.ui.notify(`已删除 ${agentName} override`, "info");
     }
   }
 }
@@ -512,7 +512,7 @@ async function syncProjectSubagentConfigToUser(ctx: ExtensionCommandContext, pro
   if (!ok) return;
   try {
     const copied = pushProjectSubagentOverridesToUser(projectSettingsPath, userSettingsPath);
-    ctx.ui.notify(`已用项目配置覆盖公共 Subagent 配置：${copied} 个 agent override`, "success");
+    ctx.ui.notify(`已用项目配置覆盖公共 Subagent 配置：${copied} 个 agent override`, "info");
   } catch (err) {
     ctx.ui.notify(`覆盖失败: ${err instanceof Error ? err.message : String(err)}`, "error");
   }
@@ -539,7 +539,7 @@ async function syncUserSubagentConfigToProject(ctx: ExtensionCommandContext, use
   if (!ok) return;
   try {
     const copied = pullUserSubagentOverridesToProject(userSettingsPath, projectSettingsPath);
-    ctx.ui.notify(`已抓取公共 Subagent 配置到本项目：${copied} 个 agent override`, "success");
+    ctx.ui.notify(`已抓取公共 Subagent 配置到本项目：${copied} 个 agent override`, "info");
   } catch (err) {
     ctx.ui.notify(`抓取失败: ${err instanceof Error ? err.message : String(err)}`, "error");
   }

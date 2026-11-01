@@ -14,7 +14,7 @@ const RUNTIME_MODULES = fs.readdirSync(PROJECT_ROOT)
 for (const file of ["README.md", "README-CN.md"]) {
   test(`${file} documents the complete 1.2 editor and recovery behavior`, () => {
     const content = fs.readFileSync(path.join(PROJECT_ROOT, file), "utf8");
-    assert.match(content, /1\.2\.1/);
+    assert.match(content, /1\.2\.2/);
     assert.match(content, /JSONC/);
     assert.match(content, /model-config-payloads\.json/);
     assert.match(content, /\[provider, model-id\]/);
@@ -48,9 +48,9 @@ for (const file of ["README.md", "README-CN.md"]) {
 test("release metadata, runtime checks, package allowlist, and license are exact", () => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, "package.json"), "utf8"));
   const packageLock = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, "package-lock.json"), "utf8"));
-  assert.equal(packageJson.version, "1.2.1");
-  assert.equal(packageLock.version, "1.2.1");
-  assert.equal(packageLock.packages[""].version, "1.2.1");
+  assert.equal(packageJson.version, "1.2.2");
+  assert.equal(packageLock.version, "1.2.2");
+  assert.equal(packageLock.packages[""].version, "1.2.2");
   assert.deepEqual(packageJson.files, ["*.ts", "README.md", "README-CN.md", "LICENSE"]);
 
   for (const module of RUNTIME_MODULES) {
