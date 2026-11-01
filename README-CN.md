@@ -128,9 +128,11 @@ Merge 和 Replace 都会预览新增 identity 与私有 identity 冲突。复用
 
 ## 原生与私有数据
 
-Pi Model Config 按 Pi 1.1.0（兼容 Pi 0.85.1+）读取 JSONC `models.json`，支持注释和尾逗号。成功保存原生配置时写出规范 JSON。空白、损坏或不满足 schema 的原生配置不会被替换。
+Pi Model Config 以 JSONC 读取 `models.json`，支持注释和尾逗号。校验以适配 Pi 1.1.0 时的聊天配置面为基础，并增加 Pi 1.4.0 分类器图片字段和 `$schema` 类型。成功保存原生配置时写出规范 JSON。空白、损坏或不满足 schema 的原生配置不会被替换。
 
-Compat 编辑器跟随 Pi 1.1.0 的配置面。布尔字段标注读取它的 API 家族（OpenAI completions、OpenAI Responses、Anthropic Messages），包含中途动态工具与系统消息控制（`supportsMidConvoSystemMessages`、`supportsMidConvoToolAdditions`、`supportsMidConvoToolChanges`）以及 `supportsThinkingTokenBudget`；字符串字段提供 `maxTokensField`、含 `baseten` 的 `thinkingFormat`、`cacheControlFormat`、`thinkingTokenBudgetField`（`thinking_token_budget`、`thinking_budget`、`thinking_budget_tokens`）、`sessionAffinityFormat`；数值字段覆盖 `vllmPriority`；JSON 对象编辑 `chatTemplateKwargs`、`chatTemplateArgs`、`openRouterRouting`、`vercelGatewayRouting`；JSON 数组编辑 `allowedFallbackModels`（Anthropic 服务端 refusal fallback 列表与本地 cost 元数据）。已废弃无消费者的旧字段（`deferredToolsMode`、`supportsToolReferences`）已从活动菜单隐藏并在保存时自动剥离。遗留的 `compat.sendSessionIdHeader` 提供带预览的 fail-closed 迁移。
+Compat 编辑器覆盖 Pi 1.1.0 聊天配置面和 Pi 1.4.0 分类器图片设置。布尔字段标注读取它的 API 家族（OpenAI completions、OpenAI Responses、Anthropic Messages），包含中途动态工具与系统消息控制（`supportsMidConvoSystemMessages`、`supportsMidConvoToolAdditions`、`supportsMidConvoToolChanges`）以及 `supportsThinkingTokenBudget`；字符串字段提供 `maxTokensField`、含 `baseten` 的 `thinkingFormat`、`cacheControlFormat`、`thinkingTokenBudgetField`（`thinking_token_budget`、`thinking_budget`、`thinking_budget_tokens`）、`sessionAffinityFormat`；数值字段覆盖 `vllmPriority`；JSON 对象编辑 `chatTemplateKwargs`、`chatTemplateArgs`、`openRouterRouting`、`vercelGatewayRouting`；JSON 数组编辑 `allowedFallbackModels`（Anthropic 服务端 refusal fallback 列表与本地 cost 元数据）。已废弃无消费者的旧字段（`deferredToolsMode`、`supportsToolReferences`）已从活动菜单隐藏并在保存时自动剥离。遗留的 `compat.sendSessionIdHeader` 提供带预览的 fail-closed 迁移。
+
+Provider Compat 还提供 Pi 1.4.0 System One 分类器使用的 `imageInput`（`assets`、`images`、`state-image-urls`）和 `sendImageOptInHeader`。只应为已确认支持相应格式的服务设置；清除设置后由 Pi 使用默认值或自动检测。这些选项作用于 Provider 级，不在 Model 或 Model Override 级提供。
 
 内置 Azure 提供商 ID 由 `azure-openai-responses` 升级为 `azure`，并在打开 `/model-config` 命令时自动检测并提供带预览的交互式 fail-closed 迁移。
 
@@ -212,7 +214,7 @@ pi-model-config/
 
 | 对象 | 当前边界 |
 | --- | --- |
-| 原生模型字段与 Compat | 文档对齐 Pi 0.85.1 的配置面，不保证未来版本字段不变 |
+| 原生模型字段与 Compat | 测试目标为 Pi 1.4.0；包含基于 Pi 1.1.0 适配的聊天配置面及 Pi 1.4.0 分类器图片设置，不保证未来版本字段不变 |
 | Subagent 编辑 | 文档对齐 pi-subagents 0.68.0；其他合法字段保留 |
 | 交互式配置 | 需要 Pi TUI；非 TUI 在读写模型配置前停止 |
 | 原生配置文件 | 接受 JSONC；成功保存后规范化为 JSON |
@@ -221,7 +223,10 @@ pi-model-config/
 
 ## 开发
 
+当前 Pi 测试目标为 **1.4.0**，与本插件的包版本独立。项目跟进新的 Pi 发行版本时，测试依赖（包括 `@earendil-works/pi-tui`、`@earendil-works/pi-coding-agent` 以及直接使用的 `@earendil-works/pi-ai` 等 Pi 包）按该版本对应的上游依赖固定，并同步更新锁文件和相关宿主路径验证。测试依赖锁定不会改变用户的 Pi 运行环境，也不代表所有 Provider 或未来 Pi 版本都已验证。
+
 ```bash
+npm ci
 npm test
 npm run check
 npm pack --dry-run --json | node --experimental-strip-types tests/fixtures/assert-package.ts

@@ -128,9 +128,11 @@ Merge and Replace both preview introduced identities and private identity collis
 
 ## Native and private data
 
-Pi Model Config reads Pi 1.1.0 `models.json` as JSONC (compatible with Pi 0.85.1+), including comments and trailing commas. A successful native save emits canonical JSON. Blank, malformed, or schema-invalid native configuration is never replaced.
+Pi Model Config reads `models.json` as JSONC, including comments and trailing commas. Validation builds on the chat configuration surface adapted for Pi 1.1.0 and adds the Pi 1.4.0 classifier image fields and `$schema` type. A successful native save emits canonical JSON. Blank, malformed, or schema-invalid native configuration is never replaced.
 
-The Compat editor tracks the Pi 1.1.0 surface. Boolean fields are labeled with the API family that reads them (OpenAI completions, OpenAI Responses, Anthropic Messages), including mid-conversation dynamic controls (`supportsMidConvoSystemMessages`, `supportsMidConvoToolAdditions`, `supportsMidConvoToolChanges`) and `supportsThinkingTokenBudget`. String fields offer `maxTokensField`, `thinkingFormat` including `baseten`, `cacheControlFormat`, `thinkingTokenBudgetField` (`thinking_token_budget`, `thinking_budget`, `thinking_budget_tokens`), and `sessionAffinityFormat`. Numerics cover `vllmPriority`. JSON objects cover `chatTemplateKwargs`, `chatTemplateArgs`, `openRouterRouting`, and `vercelGatewayRouting`, while JSON arrays edit `allowedFallbackModels` (Anthropic server-side refusal fallback targets with cost metadata). Deprecated compat fields without runtime consumers (`deferredToolsMode`, `supportsToolReferences`) are hidden from active menus and cleanly stripped on save. Legacy `compat.sendSessionIdHeader` offers a previewed fail-closed migration.
+The Compat editor covers the Pi 1.1.0 chat surface and Pi 1.4.0 classifier image settings. Boolean fields are labeled with the API family that reads them (OpenAI completions, OpenAI Responses, Anthropic Messages), including mid-conversation dynamic controls (`supportsMidConvoSystemMessages`, `supportsMidConvoToolAdditions`, `supportsMidConvoToolChanges`) and `supportsThinkingTokenBudget`. String fields offer `maxTokensField`, `thinkingFormat` including `baseten`, `cacheControlFormat`, `thinkingTokenBudgetField` (`thinking_token_budget`, `thinking_budget`, `thinking_budget_tokens`), and `sessionAffinityFormat`. Numerics cover `vllmPriority`. JSON objects cover `chatTemplateKwargs`, `chatTemplateArgs`, `openRouterRouting`, and `vercelGatewayRouting`, while JSON arrays edit `allowedFallbackModels` (Anthropic server-side refusal fallback targets with cost metadata). Deprecated compat fields without runtime consumers (`deferredToolsMode`, `supportsToolReferences`) are hidden from active menus and cleanly stripped on save. Legacy `compat.sendSessionIdHeader` offers a previewed fail-closed migration.
+
+Provider Compat also exposes `imageInput` (`assets`, `images`, or `state-image-urls`) and `sendImageOptInHeader` for Pi 1.4.0 System One classifiers. Choose these only for a service known to support the format; clearing a setting returns control to Pi's defaults or detection. They are Provider-level overrides, not Model or Model Override controls.
 
 The Azure provider ID is updated from `azure-openai-responses` to `azure`, with an interactive fail-closed migration available when opening `/model-config`.
 
@@ -212,7 +214,7 @@ The published package contains only root runtime TypeScript modules, the bilingu
 
 | Surface | Current boundary |
 | --- | --- |
-| Native model fields and Compat | Documented against Pi 0.85.1; future field compatibility is not assumed |
+| Native model fields and Compat | Pi 1.4.0 test target; chat configuration adapted from Pi 1.1.0 plus Pi 1.4.0 classifier image settings; future field compatibility is not assumed |
 | Subagent editor | Documented against pi-subagents 0.68.0; other valid fields are preserved |
 | Interactive configuration | Requires Pi TUI; non-TUI calls stop before model configuration IO |
 | Native configuration | Reads JSONC; successful saves normalize it to JSON |
@@ -221,7 +223,10 @@ The published package contains only root runtime TypeScript modules, the bilingu
 
 ## Development
 
+The current Pi test target is **1.4.0**, independent of this extension's package version. When the project follows a new Pi release, its test dependencies—including `@earendil-works/pi-tui`, `@earendil-works/pi-coding-agent`, and directly used Pi packages such as `@earendil-works/pi-ai`—are pinned to the corresponding upstream versions, with the lockfile and relevant host-path checks updated together. These test pins do not change the user's Pi runtime or establish compatibility with every provider or future Pi release.
+
 ```bash
+npm ci
 npm test
 npm run check
 npm pack --dry-run --json | node --experimental-strip-types tests/fixtures/assert-package.ts

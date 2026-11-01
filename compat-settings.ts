@@ -1,10 +1,10 @@
 import { cloneOwnJsonData, deleteOwnKey, getOwnValue, setOwnValue } from "./own-keys.ts";
-import { API_TYPE_IDS } from "./types.ts";
+import { API_TYPE_IDS, CLASSIFIER_IMAGE_INPUTS } from "./types.ts";
 
 export type CompatBooleanChoice = "default" | "false" | "true";
 
 /**
- * Boolean compat fields, grouped by the Pi 0.85.1 API family that reads them.
+ * Boolean compat fields, grouped by the API family that reads them.
  * Pi ignores a field that belongs to another family, so the label names the family.
  */
 export const COMPAT_BOOLEAN_FIELDS = [
@@ -29,7 +29,6 @@ export const COMPAT_BOOLEAN_FIELDS = [
   { key: "supportsAdditionalTools", label: "supportsAdditionalTools (Responses)" },
   { key: "supportsToolSearch", label: "supportsToolSearch (Responses)" },
   { key: "supportsMaxOutputTokens", label: "supportsMaxOutputTokens (Responses)" },
-  // Engine-read, but absent from the models.json schema: the value only travels as an extra property.
   { key: "supportsExplicitPromptCacheMode", label: "supportsExplicitPromptCacheMode (Responses)" },
   // Anthropic Messages
   { key: "supportsEagerToolInputStreaming", label: "supportsEagerToolInputStreaming (Anthropic)" },
@@ -42,6 +41,14 @@ export const COMPAT_BOOLEAN_FIELDS = [
   { key: "supportsMidConvoEffort", label: "supportsMidConvoEffort (Anthropic)" },
   { key: "supportsMidConvoToolChanges", label: "supportsMidConvoToolChanges (Anthropic)" },
 ] as const;
+
+export const COMPAT_CLASSIFIER_BOOLEAN_FIELD = {
+  key: "sendImageOptInHeader", label: "sendImageOptInHeader (Classifier)",
+} as const;
+
+export const COMPAT_CLASSIFIER_IMAGE_INPUT_FIELD = {
+  key: "imageInput", label: "imageInput (Classifier)", values: CLASSIFIER_IMAGE_INPUTS,
+} as const;
 
 export const COMPAT_STRING_FIELDS = [
   { key: "maxTokensField", label: "maxTokensField (OpenAI)", values: ["max_completion_tokens", "max_tokens"] },

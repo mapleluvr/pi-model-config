@@ -1,5 +1,5 @@
 import { cloneOwnJsonData } from "./own-keys.ts";
-import { OAUTH_PROVIDER_TYPES } from "./types.ts";
+import { CLASSIFIER_IMAGE_INPUTS, OAUTH_PROVIDER_TYPES } from "./types.ts";
 
 export interface ValidationIssue {
   path: string;
@@ -129,9 +129,8 @@ const BOOLEAN_COMPAT_FIELDS = [
   "supportsAdditionalTools",
   "supportsToolSearch",
   "supportsMaxOutputTokens",
-  // Read by pi-ai's OpenAI Responses builder, but not declared in the models.json schema,
-  // so the value only reaches the request through extra-property pass-through.
   "supportsExplicitPromptCacheMode",
+  "sendImageOptInHeader",
   "supportsEagerToolInputStreaming",
   "sendSessionAffinityHeaders",
   "supportsCacheControlOnTools",
@@ -389,6 +388,12 @@ function validateCompat(value: unknown, path: string, issues: ValidationIssue[])
 
   for (const key of BOOLEAN_COMPAT_FIELDS) validateBoolean(value, key, path, issues);
 
+  if (hasOwn(value, "imageInput")) {
+    const imageInput = getOwn(value, "imageInput");
+    if (typeof imageInput !== "string" || !(CLASSIFIER_IMAGE_INPUTS as readonly string[]).includes(imageInput)) {
+      addIssue(issues, childPath(path, "imageInput"), "must be assets, images, or state-image-urls");
+    }
+  }
   if (value.maxTokensField !== undefined && value.maxTokensField !== "max_completion_tokens" && value.maxTokensField !== "max_tokens") {
     addIssue(issues, childPath(path, "maxTokensField"), "must be max_completion_tokens or max_tokens");
   }
@@ -738,6 +743,9 @@ export function validateModelsCandidate(
   } catch {
     addIssue(issues, "$", "must contain only own JSON data properties");
     return issues;
+  }
+  if (hasOwn(materialized, "$schema") && typeof getOwn(materialized, "$schema") !== "string") {
+    addIssue(issues, "$.$schema", "must be a string when present");
   }
   if (!hasOwn(materialized, "providers")) {
     addIssue(issues, "$.providers", "must be an object");

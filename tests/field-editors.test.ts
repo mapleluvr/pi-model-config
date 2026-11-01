@@ -137,6 +137,44 @@ test("compat draft patches known fields and preserves future keys at nested leve
   assert.deepEqual(existing.openRouterRouting.only, ["old"]);
 });
 
+test("Provider Compat offers every classifier image format and boolean value", async () => {
+  for (const imageInput of ["assets", "images", "state-image-urls"]) {
+    for (const sendImageOptInHeader of [false, true]) {
+      const scripted = createScriptedUi({ selects: [
+        "imageInput (Classifier) = (未设置)", imageInput,
+        "[默认] sendImageOptInHeader (Classifier)", String(sendImageOptInHeader),
+        "保存并返回",
+      ] });
+      const existing = { future: { keep: true } };
+      assert.deepEqual(await editCompatDraft(scripted.ctx, "Provider Compat", existing, undefined, "provider"), {
+        status: "save", value: { future: { keep: true }, imageInput, sendImageOptInHeader },
+      });
+      assert.deepEqual(existing, { future: { keep: true } });
+      scripted.assertExhausted();
+    }
+  }
+});
+
+test("discarding classifier changes leaves the Provider Compat draft untouched", async () => {
+  const existing = { imageInput: "assets", future: { keep: true } };
+  const scripted = createScriptedUi({ selects: [
+    "imageInput (Classifier) = assets", "images", "放弃更改",
+  ] });
+  assert.deepEqual(await editCompatDraft(scripted.ctx, "Provider Compat", existing, undefined, "provider"), { status: "discard" });
+  assert.deepEqual(existing, { imageInput: "assets", future: { keep: true } });
+});
+
+test("Model Compat preserves classifier fields without offering provider-only controls", async () => {
+  const existing = { imageInput: "assets", sendImageOptInHeader: true, future: { keep: true } };
+  const scripted = createScriptedUi({ selects: ["保存并返回"] });
+  assert.deepEqual(await editCompatDraft(scripted.ctx, "Model Compat", existing, "openai-completions"), {
+    status: "save", value: existing,
+  });
+  const menu = scripted.calls.find((call) => call.kind === "select");
+  assert.ok(menu && menu.kind === "select");
+  assert.ok(menu.options.every((option) => !option.includes("imageInput") && !option.includes("sendImageOptInHeader")));
+});
+
 test("compat draft edits vllmPriority and migrates the removed sendSessionIdHeader", async () => {
   const scripted = createScriptedUi({
     selects: [

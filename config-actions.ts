@@ -491,6 +491,7 @@ function cloneBoundData<T>(value: T, ancestors = new Set<object>()): T {
       for (const [key, descriptor] of Object.entries(descriptors)) {
         if (key === "length" || /^(0|[1-9]\d*)$/.test(key) || !descriptor.enumerable) continue;
         if (!("value" in descriptor)) throw new OwnJsonDataError();
+        // SAFETY: output is a fresh array; the filtered key is non-index and setOwnValue defines an own data property.
         setOwnValue(output as unknown as Record<string, unknown>, key, cloneBoundData(descriptor.value, ancestors));
       }
       return output as T;

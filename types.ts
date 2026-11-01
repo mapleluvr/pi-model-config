@@ -9,7 +9,10 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
+export const CLASSIFIER_IMAGE_INPUTS = ["assets", "images", "state-image-urls"] as const;
+
 export interface ModelsConfig {
+  $schema?: string;
   providers: Record<string, ProviderConfig>;
   [key: string]: unknown;
 }
@@ -155,8 +158,13 @@ export interface ModelConfig {
 /** Dynamic OAuth provider types accepted in models.json. */
 export const OAUTH_PROVIDER_TYPES = ["radius"] as const;
 
-/** Compatibility settings for OpenAI / Anthropic APIs (Pi 0.85.1 surface) */
+/** Compatibility settings accepted by Pi models.json. */
 export interface CompatConfig {
+  [key: string]: unknown;
+  // ── System One classifier compat (effective at Provider level) ──
+  imageInput?: (typeof CLASSIFIER_IMAGE_INPUTS)[number];
+  sendImageOptInHeader?: boolean;
+
   // ── OpenAI compat (openai-completions) ──
   supportsStore?: boolean;
   supportsDeveloperRole?: boolean;

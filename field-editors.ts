@@ -2,6 +2,8 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import {
   COMPAT_BOOLEAN_FIELDS,
+  COMPAT_CLASSIFIER_BOOLEAN_FIELD,
+  COMPAT_CLASSIFIER_IMAGE_INPUT_FIELD,
   COMPAT_JSON_ARRAY_FIELDS,
   COMPAT_JSON_OBJECT_FIELDS,
   COMPAT_NUMBER_FIELDS,
@@ -274,7 +276,7 @@ async function editCompatBooleanField(
   ctx: FieldEditorUiContext,
   title: string,
   draft: Record<string, unknown>,
-  field: (typeof COMPAT_BOOLEAN_FIELDS)[number],
+  field: { key: string; label: string },
 ): Promise<CompatFieldEdit> {
   const selected = await ctx.ui.select(`${title} - ${field.label}`, ["使用默认值", "false", "true", "返回"]);
   if (selected === undefined) return { status: "cancel" };
@@ -393,11 +395,13 @@ export async function editCompatDraft(
   title: string,
   existing: Record<string, unknown> | undefined,
   api?: string,
+  scope: "provider" | "model" = "model",
 ): Promise<DraftEditorResult<Record<string, unknown>>> {
   let draft = cloneRecord(existing);
-  const stringFields = COMPAT_STRING_FIELD_ORDER;
+  const booleanFields = scope === "provider" ? [...COMPAT_BOOLEAN_FIELDS, COMPAT_CLASSIFIER_BOOLEAN_FIELD] : COMPAT_BOOLEAN_FIELDS;
+  const stringFields = scope === "provider" ? [...COMPAT_STRING_FIELD_ORDER, COMPAT_CLASSIFIER_IMAGE_INPUT_FIELD] : COMPAT_STRING_FIELD_ORDER;
   while (true) {
-    const booleanLabels = COMPAT_BOOLEAN_FIELDS.map((field) => compatBooleanLabel(draft, field.key, field.label));
+    const booleanLabels = booleanFields.map((field) => compatBooleanLabel(draft, field.key, field.label));
     const stringLabels = stringFields.map((field) => `${field.label} = ${formatSettingValue(getOwnValue(draft, field.key))}`);
     const numberLabels = COMPAT_NUMBER_FIELDS.map((field) => `${field.label} = ${formatSettingValue(getOwnValue(draft, field.key))}`);
     const objectLabels = COMPAT_JSON_OBJECT_FIELDS.map((field) => `[对象] ${field.label}`);
@@ -421,6 +425,8 @@ export async function editCompatDraft(
 
     const edit = await dispatchCompatFieldEdit(ctx, title, draft, {
       choice,
+      booleanFields,
+      stringFields,
       booleanLabels,
       stringLabels,
       numberLabels,
@@ -436,6 +442,8 @@ export async function editCompatDraft(
 
 interface CompatFieldDispatch {
   choice: string;
+  booleanFields: readonly { key: string; label: string }[];
+  stringFields: readonly { key: string; label: string; values: readonly string[] }[];
   booleanLabels: string[];
   stringLabels: string[];
   numberLabels: string[];
@@ -451,14 +459,13 @@ async function dispatchCompatFieldEdit(
   draft: Record<string, unknown>,
   dispatch: CompatFieldDispatch,
 ): Promise<CompatFieldEdit> {
-  const stringFields = COMPAT_STRING_FIELD_ORDER;
   const booleanIndex = dispatch.booleanLabels.indexOf(dispatch.choice);
   if (booleanIndex >= 0) {
-    return await editCompatBooleanField(ctx, title, draft, COMPAT_BOOLEAN_FIELDS[booleanIndex]!);
+    return await editCompatBooleanField(ctx, title, draft, dispatch.booleanFields[booleanIndex]!);
   }
   const stringIndex = dispatch.stringLabels.indexOf(dispatch.choice);
   if (stringIndex >= 0) {
-    return await editCompatStringField(ctx, title, draft, stringFields[stringIndex]!);
+    return await editCompatStringField(ctx, title, draft, dispatch.stringFields[stringIndex]!);
   }
   const numberIndex = dispatch.numberLabels.indexOf(dispatch.choice);
   if (numberIndex >= 0) {

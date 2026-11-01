@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { ModelConfigActions } from "../config-actions.ts";
 import { getModelsPath, readModelsConfig, writeModelsConfig } from "../config.ts";
@@ -102,6 +103,128 @@ async function withAgentDir(run: (agentDir: string, actions: ModelConfigActions)
 function writePayload(payload: any): void {
   fs.writeFileSync(getPayloadConfigPath(), serializePayloadDocument(payload), { mode: 0o600 });
 }
+
+async function editProviderCompat(actions: ModelConfigActions, selections: string[]): Promise<void> {
+  const panels = [panelResult("open-section", "compatibility", "compat"), panelResult("back")];
+  const pending = [...selections];
+  const ctx = {
+    ui: {
+      select: async (_title: string, options: string[]) => {
+        const selection = pending.shift();
+        assert.ok(selection !== undefined, "unexpected compat selection");
+        assert.ok(options.includes(selection), `${selection} must be offered`);
+        return selection;
+      },
+      notify: () => {},
+    },
+  } as any;
+  await runProviderEditor(ctx, "typesafe", { actions, openPanel: async () => panels.shift()! });
+  assert.deepEqual(pending, []);
+}
+
+test("Provider Compat saves classifier image settings without losing unrelated fields", async () => withAgentDir(async (_agentDir, actions) => {
+  writeModelsConfig({
+    $schema: "https://pi.dev/schemas/models.schema.json",
+    futureRoot: { keep: true },
+    providers: { typesafe: { baseUrl: "https://example.invalid/v1", compat: { future: { keep: true } } } },
+  });
+  await editProviderCompat(actions, [
+    "imageInput (Classifier) = (未设置)", "state-image-urls",
+    "[默认] sendImageOptInHeader (Classifier)", "false",
+    "保存并返回",
+  ]);
+  assert.deepEqual(readModelsConfig(), {
+    $schema: "https://pi.dev/schemas/models.schema.json",
+    futureRoot: { keep: true },
+    providers: { typesafe: { baseUrl: "https://example.invalid/v1", compat: {
+      future: { keep: true }, imageInput: "state-image-urls", sendImageOptInHeader: false,
+    } } },
+  });
+}));
+
+test("Provider Compat can restore classifier image fields to inherited defaults", async () => withAgentDir(async (_agentDir, actions) => {
+  writeModelsConfig({
+    providers: { typesafe: { baseUrl: "https://example.invalid/v1", compat: {
+      future: true, imageInput: "assets", sendImageOptInHeader: true,
+    } } },
+  });
+  await editProviderCompat(actions, [
+    "imageInput (Classifier) = assets", "清除",
+    "[true] sendImageOptInHeader (Classifier)", "使用默认值",
+    "保存并返回",
+  ]);
+  assert.deepEqual(readModelsConfig().providers.typesafe!.compat, { future: true });
+}));
+
+test("Pi 1.4.0 uses saved Provider Compat when building a classifier image request", async () => withAgentDir(async (agentDir, actions) => {
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("UNEXPECTED_NETWORK"); };
+  try {
+    writeModelsConfig({ providers: { typesafe: { baseUrl: "https://probe.invalid/v1" } } });
+    await editProviderCompat(actions, [
+      "imageInput (Classifier) = (未设置)", "state-image-urls",
+      "[默认] sendImageOptInHeader (Classifier)", "false",
+      "保存并返回",
+    ]);
+
+    const dist = path.dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+    const { ModelConfig } = await import(pathToFileURL(path.join(dist, "core/model-config.js")).href);
+    const { composeModelProvider } = await import(pathToFileURL(path.join(dist, "core/provider-composer.js")).href);
+    const { typesafeProvider } = await import("@earendil-works/pi-ai/providers/typesafe");
+    const { classify } = await import("@earendil-works/pi-ai/api/typesafe-system-one");
+
+    async function captureRequest() {
+      const snapshot = await ModelConfig.load(path.join(agentDir, "models.json"));
+      assert.equal(snapshot.getError(), undefined);
+      const provider = composeModelProvider("typesafe", typesafeProvider(), snapshot);
+      const classifier = provider.getAllModels().find((item: any) => item.type === "classifier" && item.input.includes("image"));
+      assert.ok(classifier);
+      const requests: Array<{ payload: any; optIn: string | null }> = [];
+      const result = await classify(classifier, {
+        state: { question: "synthetic" },
+        questions: { ok: { type: "bool", instructions: "synthetic", criteria: { true: "yes", false: "no" } } },
+        images: [{ type: "image", data: "AA==", mimeType: "image/png" }],
+      }, {
+        apiKey: "synthetic-key", maxRetries: 0,
+        fetch: async (_url, init) => {
+          let payload: unknown;
+          try {
+            payload = JSON.parse(String(init?.body));
+          } catch (cause) {
+            throw new Error("Expected a JSON classifier request", { cause });
+          }
+          requests.push({ payload, optIn: new Headers(init?.headers).get("TypeSafe-Danger-Zone-Images") });
+          throw new Error("CLASSIFIER_TRANSPORT_INTERCEPTED");
+        },
+      });
+      assert.match(result.errorMessage ?? "", /CLASSIFIER_TRANSPORT_INTERCEPTED/);
+      assert.equal(requests.length, 1);
+      const request = requests[0]!;
+      return {
+        assets: Boolean(request.payload.assets),
+        imageUrl: JSON.stringify(request.payload.state).includes("image_url"),
+        images: request.payload.images ?? null,
+        optIn: request.optIn,
+      };
+    }
+
+    assert.deepEqual(await captureRequest(), { assets: false, imageUrl: true, images: null, optIn: null });
+    await editProviderCompat(actions, [
+      "imageInput (Classifier) = state-image-urls", "images", "保存并返回",
+    ]);
+    assert.deepEqual(await captureRequest(), {
+      assets: false, imageUrl: false, images: ["data:image/png;base64,AA=="], optIn: null,
+    });
+    await editProviderCompat(actions, [
+      "imageInput (Classifier) = images", "清除",
+      "[false] sendImageOptInHeader (Classifier)", "使用默认值",
+      "保存并返回",
+    ]);
+    assert.deepEqual(await captureRequest(), { assets: true, imageUrl: false, images: null, optIn: "true" });
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+}));
 
 async function fakeEndpointDiscovery(provider: any, records: unknown[]): Promise<EndpointDiscoverySuccess | null> {
   const result = await fetchEndpointModels(provider, {

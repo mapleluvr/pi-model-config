@@ -5,7 +5,6 @@ import {
   parseLegacyExtraPayload,
   type ActionResult,
   type EndpointPreviewDescriptor,
-  type FieldPatchOptions,
   type LegacyDiscardResolution,
   type PayloadCollisionResolution,
   type ProviderIdentityRequest,
@@ -557,7 +556,7 @@ export async function runProviderEditor(
       const stored = ownValue(provider, "compat") as Record<string, unknown> | undefined;
       const held = retained.get(draftKey);
       const baseline = held?.baseline ?? stored;
-      const edited = await editCompatDraft(ctx, "Provider Compat", (held?.value ?? stored) as Record<string, unknown> | undefined, typeof ownValue(provider, "api") === "string" ? ownValue(provider, "api") as string : undefined);
+      const edited = await editCompatDraft(ctx, "Provider Compat", (held?.value ?? stored) as Record<string, unknown> | undefined, typeof ownValue(provider, "api") === "string" ? ownValue(provider, "api") as string : undefined, "provider");
       if (edited.status === "discard") retained.delete(draftKey);
       else {
         const next = Object.keys(edited.value).length > 0 ? edited.value : undefined;
