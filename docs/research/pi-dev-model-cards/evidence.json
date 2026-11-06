@@ -1,0 +1,540 @@
+{
+  "checkedAt": "2026-11-06T03:40:56.066Z",
+  "observations": [
+    {
+      "label": "typed-deepseek",
+      "url": "https://pi.dev/api/models/providers/deepseek?pi-version=1.5.0&types=chat,image,classifier",
+      "status": 200,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "public, max-age=60, s-maxage=60",
+        "content-type": "application/json; charset=utf-8",
+        "etag": "W/\"833a51b4211b57d882564ca5f56383e8\"",
+        "last-modified": "Thu, 05 Nov 2026 13:21:30 GMT",
+        "x-pi-model-catalog-minimum-version": "1.2.1",
+        "x-pi-model-catalog-revision": "sha256-5ff8a791cbfd41aff8c125f23ff37d59d03ee4bcfd9c2acdf390d562a0d3acd4"
+      },
+      "bytes": 1319,
+      "shape": "array"
+    },
+    {
+      "label": "invalid-types",
+      "url": "https://pi.dev/api/models/providers/deepseek?types=",
+      "status": 400,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "no-store",
+        "content-type": "application/json"
+      },
+      "bytes": 43,
+      "shape": "object",
+      "error": {
+        "ok": false,
+        "error": "Invalid model types."
+      }
+    },
+    {
+      "label": "legacy-deepseek-1.4",
+      "url": "https://pi.dev/api/models/providers/deepseek?pi-version=1.4.0",
+      "status": 200,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "public, max-age=60, s-maxage=60",
+        "content-type": "application/json; charset=utf-8",
+        "etag": "W/\"bff63d130895f0d43f35dff747454ff4\"",
+        "last-modified": "Thu, 05 Nov 2026 13:21:29 GMT",
+        "x-pi-model-catalog-minimum-version": "1.2.1",
+        "x-pi-model-catalog-revision": "sha256-5ff8a791cbfd41aff8c125f23ff37d59d03ee4bcfd9c2acdf390d562a0d3acd4"
+      },
+      "bytes": 1354,
+      "shape": "object"
+    },
+    {
+      "label": "invalid-version",
+      "url": "https://pi.dev/api/models/providers/deepseek?pi-version=invalid",
+      "status": 400,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "no-store",
+        "content-type": "application/json"
+      },
+      "bytes": 42,
+      "shape": "object",
+      "error": {
+        "ok": false,
+        "error": "Invalid Pi version."
+      }
+    },
+    {
+      "label": "old-version",
+      "url": "https://pi.dev/api/models/providers/deepseek?pi-version=0.1.0",
+      "status": 404,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "public, max-age=60, s-maxage=60",
+        "content-type": "application/json"
+      },
+      "bytes": 84,
+      "shape": "object",
+      "error": {
+        "ok": false,
+        "error": "No compatible model catalog is available for this Pi version."
+      }
+    },
+    {
+      "label": "providers",
+      "url": "https://pi.dev/api/models/providers?pi-version=1.5.0",
+      "status": 200,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "public, max-age=60, s-maxage=60",
+        "content-type": "application/json; charset=utf-8",
+        "etag": "W/\"4d199aa8c85b15d9c0b9467615589066\"",
+        "last-modified": "Thu, 05 Nov 2026 13:21:10 GMT",
+        "x-pi-model-catalog-minimum-version": "1.2.1",
+        "x-pi-model-catalog-revision": "sha256-5ff8a791cbfd41aff8c125f23ff37d59d03ee4bcfd9c2acdf390d562a0d3acd4"
+      },
+      "bytes": 618,
+      "shape": "array"
+    },
+    {
+      "label": "pi-user-agent",
+      "url": "https://pi.dev/api/models/providers/deepseek",
+      "status": 200,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "public, max-age=60, s-maxage=60",
+        "content-type": "application/json; charset=utf-8",
+        "etag": "W/\"bff63d130895f0d43f35dff747454ff4\"",
+        "last-modified": "Thu, 05 Nov 2026 13:21:29 GMT",
+        "vary": "User-Agent",
+        "x-pi-model-catalog-minimum-version": "1.2.1",
+        "x-pi-model-catalog-revision": "sha256-5ff8a791cbfd41aff8c125f23ff37d59d03ee4bcfd9c2acdf390d562a0d3acd4"
+      },
+      "bytes": 1354,
+      "shape": "object"
+    },
+    {
+      "label": "types-chat-openrouter",
+      "url": "https://pi.dev/api/models/providers/openrouter?pi-version=1.5.0&types=chat",
+      "status": 200,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "public, max-age=60, s-maxage=60",
+        "content-type": "application/json; charset=utf-8",
+        "etag": "W/\"1f214ef2e8353e4b916c44c55d338a83\"",
+        "last-modified": "Thu, 05 Nov 2026 13:22:11 GMT",
+        "x-pi-model-catalog-minimum-version": "1.2.1",
+        "x-pi-model-catalog-revision": "sha256-5ff8a791cbfd41aff8c125f23ff37d59d03ee4bcfd9c2acdf390d562a0d3acd4"
+      },
+      "bytes": 274365,
+      "shape": "array"
+    },
+    {
+      "label": "typed-all",
+      "url": "https://pi.dev/api/models?pi-version=1.5.0&types=chat,image,classifier",
+      "status": 200,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "public, max-age=60, s-maxage=60",
+        "content-type": "application/json; charset=utf-8",
+        "etag": "W/\"b8c3c42ccea7316cd7961305868ef20c\"",
+        "last-modified": "Thu, 05 Nov 2026 13:21:09 GMT",
+        "x-pi-model-catalog-minimum-version": "1.2.1",
+        "x-pi-model-catalog-revision": "sha256-5ff8a791cbfd41aff8c125f23ff37d59d03ee4bcfd9c2acdf390d562a0d3acd4"
+      },
+      "bytes": 957611,
+      "shape": "object"
+    },
+    {
+      "label": "legacy-all",
+      "url": "https://pi.dev/api/models?pi-version=1.5.0",
+      "status": 200,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "public, max-age=60, s-maxage=60",
+        "content-type": "application/json; charset=utf-8",
+        "etag": "W/\"5a119b6aa39ed3307f04312ffbdf778a\"",
+        "last-modified": "Thu, 05 Nov 2026 13:21:06 GMT",
+        "x-pi-model-catalog-minimum-version": "1.2.1",
+        "x-pi-model-catalog-revision": "sha256-5ff8a791cbfd41aff8c125f23ff37d59d03ee4bcfd9c2acdf390d562a0d3acd4"
+      },
+      "bytes": 951138,
+      "shape": "object"
+    },
+    {
+      "label": "unknown-provider",
+      "url": "https://pi.dev/api/models/providers/pi-model-config-nonexistent",
+      "status": 404,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "public, max-age=60, s-maxage=60",
+        "content-type": "application/json"
+      },
+      "bytes": 48,
+      "shape": "object",
+      "error": {
+        "ok": false,
+        "error": "Model provider not found."
+      }
+    },
+    {
+      "label": "conditional-deepseek",
+      "url": "https://pi.dev/api/models/providers/deepseek?pi-version=1.4.0",
+      "status": 304,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "etag,last-modified",
+        "cache-control": "public, max-age=60, s-maxage=60",
+        "etag": "\"bff63d130895f0d43f35dff747454ff4\"",
+        "last-modified": "Thu, 05 Nov 2026 13:21:29 GMT",
+        "x-pi-model-catalog-minimum-version": "1.2.1",
+        "x-pi-model-catalog-revision": "sha256-5ff8a791cbfd41aff8c125f23ff37d59d03ee4bcfd9c2acdf390d562a0d3acd4"
+      },
+      "bytes": 0,
+      "shape": "string"
+    }
+  ],
+  "summary": {
+    "providers": 43,
+    "legacyChatModels": 1616,
+    "typedModels": 1741,
+    "types": {
+      "chat": 1616,
+      "classifier": 59,
+      "image": 66
+    },
+    "typesChatQueryActuallyReturns": {
+      "chat": 391,
+      "image": 66,
+      "classifier": 35
+    },
+    "keysByType": {
+      "chat": {
+        "id": 1616,
+        "name": 1616,
+        "api": 1616,
+        "provider": 1616,
+        "baseUrl": 1616,
+        "reasoning": 1616,
+        "input": 1616,
+        "cost": 1616,
+        "contextWindow": 1616,
+        "maxTokens": 1616,
+        "inputLimits": 1190,
+        "type": 1616,
+        "compat": 1409,
+        "thinkingLevelMap": 862,
+        "promptCache": 25,
+        "headers": 47,
+        "lab": 34,
+        "enabled": 34,
+        "providers": 34,
+        "free": 1
+      },
+      "image": {
+        "type": 66,
+        "id": 66,
+        "name": 66,
+        "api": 66,
+        "provider": 66,
+        "baseUrl": 66,
+        "input": 66,
+        "output": 66,
+        "cost": 66,
+        "inputLimits": 65
+      },
+      "classifier": {
+        "type": 59,
+        "id": 59,
+        "name": 59,
+        "api": 59,
+        "provider": 59,
+        "baseUrl": 59,
+        "input": 59,
+        "cost": 59,
+        "contextWindow": 59,
+        "compat": 41,
+        "headers": 1
+      }
+    },
+    "crossTypeDuplicateIdentityCount": 6,
+    "crossTypeDuplicateExamples": [
+      [
+        "openai/gpt-6-luna",
+        [
+          "chat",
+          "classifier"
+        ]
+      ],
+      [
+        "openrouter/google/gemini-3-pro-image",
+        [
+          "chat",
+          "image"
+        ]
+      ],
+      [
+        "openrouter/google/gemini-nano-banana-2.1",
+        [
+          "chat",
+          "image"
+        ]
+      ],
+      [
+        "openrouter/openrouter/auto",
+        [
+          "chat",
+          "image"
+        ]
+      ]
+    ],
+    "currentNormalizer": {
+      "legacySupported": false,
+      "typedResult": [
+        {
+          "id": "deepseek-flash",
+          "name": "DeepSeek V4.1 Flash"
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro"
+        }
+      ]
+    }
+  },
+  "samples": {
+    "deepseek": {
+      "id": "deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro",
+      "api": "openai-completions",
+      "baseUrl": "https://api.deepseek.com",
+      "provider": "deepseek",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": 1.32,
+        "output": 3.96,
+        "cacheRead": 0.044,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 384000,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "maxTokensField": "max_tokens",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "thinkingFormat": "deepseek",
+        "supportsStrictMode": true,
+        "supportsMidConvoSystemMessages": true
+      },
+      "thinkingLevelMap": {
+        "minimal": null,
+        "low": null,
+        "medium": null,
+        "high": "high",
+        "max": "max"
+      },
+      "type": "chat"
+    },
+    "tiered": {
+      "id": "claude-haiku-5-5",
+      "name": "Claude Haiku 5.5",
+      "api": "anthropic-messages",
+      "provider": "anthropic",
+      "baseUrl": "https://api.anthropic.com",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.1,
+        "output": 0.5,
+        "cacheRead": 0.01,
+        "cacheWrite": 0.125,
+        "tiers": [
+          {
+            "inputTokensAbove": 100000,
+            "input": 0.5,
+            "output": 2.5,
+            "cacheRead": 0.05,
+            "cacheWrite": 0.625
+          }
+        ]
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "minimal": null,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max"
+      },
+      "compat": {
+        "forceAdaptiveThinking": true,
+        "supportsTemperature": false,
+        "supportsMidConvoEffort": true,
+        "supportsMidConvoSystemMessages": true,
+        "supportsMidConvoToolChanges": true,
+        "supportsStrictTools": true
+      },
+      "promptCache": {
+        "short": 300,
+        "long": 3600
+      },
+      "inputLimits": {
+        "maxRequestBytes": 33554432,
+        "images": {
+          "maxPerRequest": 600,
+          "resize": {
+            "maxWidth": 2000,
+            "maxHeight": 2000,
+            "maxBytes": 4718592,
+            "jpegQuality": 80
+          }
+        }
+      },
+      "type": "chat"
+    },
+    "cache": {
+      "id": "claude-fable-5",
+      "name": "Claude Fable 5",
+      "api": "anthropic-messages",
+      "provider": "anthropic",
+      "baseUrl": "https://api.anthropic.com",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 10,
+        "output": 50,
+        "cacheRead": 1,
+        "cacheWrite": 12.5
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "off": null,
+        "xhigh": "xhigh",
+        "max": "max"
+      },
+      "compat": {
+        "forceAdaptiveThinking": true,
+        "supportsMidConvoSystemMessages": true,
+        "supportsMidConvoToolChanges": true,
+        "supportsStrictTools": true,
+        "allowedFallbackModels": [
+          {
+            "provider": "anthropic",
+            "model": "claude-opus-4-8",
+            "cost": {
+              "input": 5,
+              "output": 25,
+              "cacheRead": 0.5,
+              "cacheWrite": 6.25
+            }
+          },
+          {
+            "provider": "anthropic",
+            "model": "claude-opus-5",
+            "cost": {
+              "input": 5,
+              "output": 25,
+              "cacheRead": 0.5,
+              "cacheWrite": 6.25
+            }
+          }
+        ]
+      },
+      "promptCache": {
+        "short": 300,
+        "long": 3600
+      },
+      "inputLimits": {
+        "maxRequestBytes": 33554432,
+        "images": {
+          "maxPerRequest": 600,
+          "resize": {
+            "maxWidth": 2000,
+            "maxHeight": 2000,
+            "maxBytes": 4718592,
+            "jpegQuality": 80
+          }
+        }
+      },
+      "type": "chat"
+    },
+    "image": {
+      "type": "image",
+      "id": "black-forest-labs/flux-3-image",
+      "name": "Black Forest Labs: FLUX 3 Image",
+      "api": "openrouter-images",
+      "provider": "openrouter",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "image"
+      ],
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "inputLimits": {
+        "images": {
+          "resize": {
+            "maxWidth": 2000,
+            "maxHeight": 2000,
+            "maxBytes": 4718592,
+            "jpegQuality": 80
+          }
+        }
+      }
+    },
+    "classifier": {
+      "type": "classifier",
+      "id": "@cf/cloudflare/clef",
+      "name": "Clef",
+      "api": "cloudflare-workers-ai-system-one",
+      "provider": "cloudflare-workers-ai",
+      "baseUrl": "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai",
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.24,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "contextWindow": 65536,
+      "compat": {
+        "imageInput": "images"
+      }
+    }
+  }
+}

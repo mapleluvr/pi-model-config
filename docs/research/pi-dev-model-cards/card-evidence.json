@@ -1,0 +1,71 @@
+{
+  "checkedAt": "2026-11-06T03:41:31.460Z",
+  "url": "https://pi.dev/models/deepseek/deepseek-v4-pro",
+  "title": "DeepSeek V4 Pro · Models · Pi",
+  "headings": [
+    "DeepSeek V4 Pro",
+    "Model details",
+    "Pricing",
+    "Session cost calculator",
+    "Compatibility flags",
+    "More",
+    "Also available from other providers"
+  ],
+  "configuration": [
+    "{\n  \"providers\": {\n    \"deepseek\": {\n      \"apiKey\": \"YOUR_API_KEY\",\n      \"models\": [\n        {\n          \"id\": \"deepseek-v4-pro\",\n          \"name\": \"DeepSeek V4 Pro\",\n          \"reasoning\": true,\n          \"input\": [\n            \"text\"\n          ],\n          \"thinkingLevelMap\": {\n            \"minimal\": null,\n            \"low\": null,\n            \"medium\": null,\n            \"high\": \"high\",\n            \"max\": \"max\"\n          },\n          \"contextWindow\": 1000000,\n          \"maxTokens\": 384000,\n          \"cost\": {\n            \"input\": 1.32,\n            \"output\": 3.96,\n            \"cacheRead\": 0.044,\n            \"cacheWrite\": 0\n          },\n          \"compat\": {\n            \"supportsStore\": false,\n            \"supportsDeveloperRole\": false,\n            \"maxTokensField\": \"max_tokens\",\n            \"requiresReasoningContentOnAssistantMessages\": true,\n            \"thinkingFormat\": \"deepseek\",\n            \"supportsStrictMode\": true,\n            \"supportsMidConvoSystemMessages\": true\n          }\n        }\n      ],\n      \"api\": \"openai-completions\",\n      \"baseUrl\": \"https://api.deepseek.com\"\n    }\n  }\n}"
+  ],
+  "tables": [
+    "Pricing rates for DeepSeek V4 Pro\nREQUEST INPUT\tINPUT\tOUTPUT\tCACHE READ\tCACHE WRITE\nAll requests\t$1.32\t$3.96\t$0.044\t$0",
+    "Effective compatibility flags for DeepSeek V4 Pro\nFEATURE\tVALUE\nsupportsStore\tNo\nsupportsDeveloperRole\tNo\nsupportsReasoningEffort\tYes\nsupportsUsageInStreaming\tYes\nmaxTokensField\tmax_tokens\nrequiresToolResultName\tNo\nrequiresAssistantAfterToolResult\tNo\nrequiresThinkingAsText\tNo\nrequiresReasoningContentOnAssistantMessages\tYes\nthinkingFormat\tdeepseek\nopenRouterRouting\tEmpty\nvercelGatewayRouting\tEmpty\nchatTemplateKwargs\tEmpty\nzaiToolStream\tNo\nsupportsStrictMode\tYes\ncacheControlFormat\tNONE\nsendSessionAffinityHeaders\tNo\nsupportsLongCacheRetention\tYes\nsupportsMidConvoSystemMessages\tYes"
+  ],
+  "links": [
+    {
+      "text": "Models",
+      "href": "https://pi.dev/models"
+    },
+    {
+      "text": "Models→",
+      "href": "https://pi.dev/models"
+    },
+    {
+      "text": "Models",
+      "href": "https://pi.dev/models"
+    },
+    {
+      "text": "azure · deepseek-v4-pro",
+      "href": "https://pi.dev/models/azure/deepseek-v4-pro"
+    },
+    {
+      "text": "huggingface · deepseek-ai/DeepSeek-V4-Pro",
+      "href": "https://pi.dev/models/huggingface/deepseek-ai-deepseek-v4-pro"
+    },
+    {
+      "text": "opencode · deepseek-v4-pro",
+      "href": "https://pi.dev/models/opencode/deepseek-v4-pro"
+    },
+    {
+      "text": "opencode-go · deepseek-v4-pro",
+      "href": "https://pi.dev/models/opencode-go/deepseek-v4-pro"
+    },
+    {
+      "text": "qwen-token-plan · deepseek-v4-pro",
+      "href": "https://pi.dev/models/qwen-token-plan/deepseek-v4-pro"
+    },
+    {
+      "text": "qwen-token-plan-cn · deepseek-v4-pro",
+      "href": "https://pi.dev/models/qwen-token-plan-cn/deepseek-v4-pro"
+    },
+    {
+      "text": "qwen-token-plan-individual · deepseek-v4-pro",
+      "href": "https://pi.dev/models/qwen-token-plan-individual/deepseek-v4-pro"
+    },
+    {
+      "text": "qwen-token-plan-individual-cn · deepseek-v4-pro",
+      "href": "https://pi.dev/models/qwen-token-plan-individual-cn/deepseek-v4-pro"
+    },
+    {
+      "text": "vercel-ai-gateway · deepseek/deepseek-v4-pro",
+      "href": "https://pi.dev/models/vercel-ai-gateway/deepseek-deepseek-v4-pro"
+    }
+  ]
+}
