@@ -7,6 +7,7 @@ import {
   filterSearchableOptions,
   getVisibleRange,
   renderSearchableOptionLine,
+  searchableSelect,
   type SearchableSelectOption,
 } from "../searchable-select.ts";
 
@@ -48,11 +49,54 @@ test("filters options using native-style fuzzy token matching across value, labe
   );
 });
 
+test("ID-only search retains provider variants without matching display/provider text", () => {
+  const options = [
+    { value: "azure:astra", label: "Azure", searchText: "gpt-6-astra" },
+    { value: "openai:astra", label: "OpenAI", searchText: "gpt-6-astra" },
+    { value: "bedrock:astra", label: "Amazon Bedrock", searchText: "openai.gpt-6-astra-v1:0" },
+    { value: "other", label: "GPT-6 Astra", searchText: "unrelated-model" },
+  ];
+  assert.deepEqual(filterSearchableOptions(options, "gpt6 astra", { searchTextOnly: true }).map(item => item.value), [
+    "azure:astra", "openai:astra", "bedrock:astra",
+  ]);
+  assert.deepEqual(filterSearchableOptions(options, "Azure", { searchTextOnly: true }), []);
+});
+
 test("keeps an empty query in original option order", () => {
   assert.deepEqual(
     filterSearchableOptions(modelOptions, "   ").map((item) => item.value),
     modelOptions.map((item) => item.value),
   );
+});
+
+test("the real picker starts with the model ID query, renders provider variants, and selects the filtered row", async () => {
+  const selected = await searchableSelect({ ui: {
+    custom: async (factory: any) => {
+      let result: string | undefined;
+      const component = factory({}, { fg: (_color: string, value: string) => value }, {
+        matches: (data: string, action: string) => data === ({
+          "tui.select.down": "DOWN", "tui.select.confirm": "OK",
+        } as Record<string, string>)[action],
+      }, (value: string | undefined) => { result = value; });
+      component.focused = true;
+      for (const width of [40, 100]) {
+        const lines = component.render(width);
+        assert.ok(lines.every((line: string) => visibleWidth(line) <= width));
+        assert.match(lines.join("\n"), /2\/3/);
+        assert.match(lines.join("\n"), /Azure/);
+        assert.match(lines.join("\n"), /OpenAI/);
+        assert.doesNotMatch(lines.join("\n"), /Unrelated/);
+      }
+      component.handleInput("DOWN");
+      component.handleInput("OK");
+      return result;
+    },
+  } } as any, "Metadata", [
+    { value: "unrelated", label: "Unrelated", searchText: "not-the-query" },
+    { value: "azure", label: "Azure · gpt-6-astra", searchText: "gpt-6-astra" },
+    { value: "openai", label: "OpenAI · gpt-6-astra", searchText: "gpt-6-astra" },
+  ], { initialQuery: "gpt-6-astra", searchTextOnly: true });
+  assert.equal(selected, "openai");
 });
 
 test("centers the selected item inside a bounded visible window", () => {

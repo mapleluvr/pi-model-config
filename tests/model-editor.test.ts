@@ -30,7 +30,7 @@ test("Model catalog uses the exact stable category and field IDs", () => {
     ["cost", ["input", "output", "cacheRead", "cacheWrite", "tiers"]],
     ["compatibility", ["compat"]],
     ["payload", ["samplingParams", "payload"]],
-    ["actions", ["copy", "delete"]],
+    ["actions", ["metadata", "copy", "delete"]],
   ]);
 });
 

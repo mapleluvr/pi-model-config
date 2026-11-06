@@ -110,9 +110,11 @@ cp -r pi-model-config .pi/extensions/model-config
 | Cost | Input、Output、Cache Read、Cache Write、完整 `cost.tiers` |
 | Compatibility | 按 OpenAI、OpenAI Responses、Anthropic 三个 API 家族分组的 Compat 字段 |
 | Request parameters | 原生 `samplingParams`、私有 Payload |
-| Actions | Copy Model、Delete Model |
+| Actions | Copy Model、搜索模型元数据（`pi.dev`，按 Model ID）、Delete Model |
 
 `false` 和 `0` 会按字面显示。缺失值根据字段语义显示 inherited 或 not set。API 密钥字面值会被遮罩，也不会预填到输入框。替换密钥时会先提示 Pi 原生输入在输入期间可见，然后打开空输入框。
+
+`搜索模型元数据` 会向 `https://pi.dev/api/models` 发起一次不带凭据、按当前运行 Pi 版本限定的请求。列表只按 Model ID 做 fuzzy search；同一 ID 在不同 Provider 下会保留为独立候选，例如 Azure 与 OpenAI。选择后进入可滚动的完整字段预览，按 Enter 应用、按 Esc 取消。写回只替换模型元数据字段（名称、能力/限制、价格、Thinking/采样参数和 Compat）；所选目录条目缺少的字段会被清除。目标 Provider、Model ID、API、Base URL、认证、Headers、未知字段和私有 Payload 均保留。预览会提示协议不一致，因为官方目录元数据不能证明用户实际端点可用。网络或校验失败时模型不变。
 
 ## 端点发现
 
@@ -192,6 +194,8 @@ pi-model-config/
 |-- settings-panel.ts
 |-- provider-editor.ts
 |-- model-editor.ts
+|-- model-metadata.ts
+|-- model-metadata-preview.ts
 |-- field-editors.ts
 |-- model-fields.ts
 |-- compat-settings.ts
@@ -215,6 +219,7 @@ pi-model-config/
 | 对象 | 当前边界 |
 | --- | --- |
 | 原生模型字段与 Compat | 测试目标为 Pi 1.4.0；包含基于 Pi 1.1.0 适配的聊天配置面及 Pi 1.4.0 分类器图片设置，不保证未来版本字段不变 |
+| 模型元数据搜索 | 已在 Pi 1.4.0、1.5.0 的实际扩展加载器/命令路径验证；采用脚本驱动组件渲染，不代表全面适配 Pi 1.5.0，见[验证记录](docs/model-metadata-search.md) |
 | Subagent 编辑 | 文档对齐 pi-subagents 0.68.0；其他合法字段保留 |
 | 交互式配置 | 需要 Pi TUI；非 TUI 在读写模型配置前停止 |
 | 原生配置文件 | 接受 JSONC；成功保存后规范化为 JSON |

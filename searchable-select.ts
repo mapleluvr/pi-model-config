@@ -14,6 +14,9 @@ export interface SearchableSelectConfig {
   hint?: string;
   emptyMessage?: string;
   initialValue?: string;
+  initialQuery?: string;
+  /** Match only each option's searchText, keeping display labels out of the query. */
+  searchTextOnly?: boolean;
 }
 
 interface RenderSearchableOptionLineOptions {
@@ -36,10 +39,13 @@ function getSearchableText(option: SearchableSelectOption): string {
 export function filterSearchableOptions(
   options: SearchableSelectOption[],
   query: string,
+  config: Pick<SearchableSelectConfig, "searchTextOnly"> = {},
 ): SearchableSelectOption[] {
   const trimmed = query.trim();
   if (!trimmed) return options;
-  return fuzzyFilter(options, trimmed, getSearchableText);
+  return fuzzyFilter(options, trimmed, config.searchTextOnly
+    ? (option) => option.searchText ?? ""
+    : getSearchableText);
 }
 
 export function getVisibleRange(
@@ -80,6 +86,7 @@ class SearchableSelectComponent implements Component, Focusable {
   private readonly title: string;
   private readonly hint: string;
   private readonly emptyMessage: string;
+  private readonly searchTextOnly: boolean;
   private readonly theme: Theme;
   private readonly keybindings: KeybindingsManager;
   private readonly done: (result: string | undefined) => void;
@@ -104,7 +111,9 @@ class SearchableSelectComponent implements Component, Focusable {
   ) {
     this.title = title;
     this.options = options;
-    this.filteredOptions = options;
+    this.searchTextOnly = config.searchTextOnly ?? false;
+    this.searchInput.setValue(config.initialQuery ?? "");
+    this.filteredOptions = filterSearchableOptions(options, this.searchInput.getValue(), config);
     this.theme = theme;
     this.keybindings = keybindings;
     this.done = done;
@@ -113,7 +122,7 @@ class SearchableSelectComponent implements Component, Focusable {
     this.emptyMessage = config.emptyMessage ?? "无匹配选项";
 
     const initialIndex = config.initialValue
-      ? this.options.findIndex((option) => option.value === config.initialValue)
+      ? this.filteredOptions.findIndex((option) => option.value === config.initialValue)
       : -1;
     this.selectedIndex = initialIndex >= 0 ? initialIndex : 0;
     this.searchInput.onSubmit = () => this.selectCurrent();
@@ -202,7 +211,9 @@ class SearchableSelectComponent implements Component, Focusable {
   }
 
   private applyFilter(): void {
-    this.filteredOptions = filterSearchableOptions(this.options, this.searchInput.getValue());
+    this.filteredOptions = filterSearchableOptions(this.options, this.searchInput.getValue(), {
+      searchTextOnly: this.searchTextOnly,
+    });
     if (this.filteredOptions.length === 0) {
       this.selectedIndex = 0;
       return;

@@ -44,7 +44,8 @@ export type SettingsPanelResult =
       categoryId: string;
       fieldId: string;
     })
-  | (SettingsPanelBaseResult & { type: "search" | "back" });
+  | (SettingsPanelBaseResult & { type: "search" })
+  | (SettingsPanelBaseResult & { type: "back" });
 
 export interface SettingsPanelModel {
   title: string;

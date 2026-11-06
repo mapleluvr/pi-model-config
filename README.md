@@ -110,9 +110,11 @@ Provider ID changes are journaled rename operations. `oauth` accepts the dynamic
 | Cost | Input, Output, Cache Read, Cache Write, and complete `cost.tiers` |
 | Compatibility | Compat field groups for the OpenAI, OpenAI Responses, and Anthropic API families |
 | Request parameters | native `samplingParams`, private Payload |
-| Actions | Copy Model, Delete Model |
+| Actions | Copy Model, Search Model Metadata (`pi.dev`, by Model ID), Delete Model |
 
 False and zero are displayed literally. Absent values are shown as inherited or not set according to field semantics. API key literals are masked and never pre-filled. Replacing a key opens an empty native input after warning that Pi's input is visible while typing.
+
+`Search Model Metadata` performs one credential-free request to `https://pi.dev/api/models`, scoped to the running Pi version. The searchable list filters only by fuzzy Model ID and keeps same-ID results under different Providers as separate choices (for example, Azure and OpenAI). Choosing a row opens a scrollable full-field preview; Enter applies and Esc cancels. The import replaces only the model metadata fields (`name`, capabilities/limits, cost, thinking/sampling values and Compat); a field missing from the selected catalog entry is cleared. The target Provider, model ID, API, base URL, authentication, Headers, unknown fields, and private Payload stay unchanged. A protocol mismatch is called out in the preview because catalog metadata does not verify the user's actual endpoint. Network or validation failures leave the model untouched.
 
 ## Endpoint discovery
 
@@ -192,6 +194,8 @@ pi-model-config/
 |-- settings-panel.ts
 |-- provider-editor.ts
 |-- model-editor.ts
+|-- model-metadata.ts
+|-- model-metadata-preview.ts
 |-- field-editors.ts
 |-- model-fields.ts
 |-- compat-settings.ts
@@ -215,6 +219,7 @@ The published package contains only root runtime TypeScript modules, the bilingu
 | Surface | Current boundary |
 | --- | --- |
 | Native model fields and Compat | Pi 1.4.0 test target; chat configuration adapted from Pi 1.1.0 plus Pi 1.4.0 classifier image settings; future field compatibility is not assumed |
+| Model metadata search | Actual extension-loader/command paths checked with Pi 1.4.0 and 1.5.0; scripted component rendering only, not general Pi 1.5.0 compatibility; see [verification](docs/model-metadata-search.md) |
 | Subagent editor | Documented against pi-subagents 0.68.0; other valid fields are preserved |
 | Interactive configuration | Requires Pi TUI; non-TUI calls stop before model configuration IO |
 | Native configuration | Reads JSONC; successful saves normalize it to JSON |

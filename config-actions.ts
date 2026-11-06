@@ -33,8 +33,6 @@ import {
   describeSubtreePresence,
   mergeModelConfig,
   mergeProviderConfig,
-  readModelSubtree,
-  readProviderSubtree,
   subtreePresenceEqual,
   writeModelSubtree,
   writeProviderSubtree,
@@ -272,8 +270,6 @@ interface BoundIdentityPreview {
   descriptor: IdentityPreviewDescriptor;
   createdAt: number;
 }
-
-type SimpleActionKind = "create-provider" | "create-model" | "patch-provider-models" | "patch-model";
 
 type SimpleBoundRequest =
   | { action: "create-provider"; providerId: string; config: ProviderConfig }
@@ -2346,7 +2342,7 @@ export class ModelConfigActions {
   }
 
   private inspectPatchModel(
-    snapshot: CoordinatedSnapshot,
+    _snapshot: CoordinatedSnapshot,
     providerId: string,
     modelId: string,
     existing: ModelConfig,

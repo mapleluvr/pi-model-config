@@ -29,6 +29,8 @@ import {
   type DraftEditorResult,
 } from "./field-editors.ts";
 import { deepCloneJson } from "./model-fields.ts";
+import { buildModelMetadataPatch, loadModelMetadataCatalog, MODEL_METADATA_FIELDS } from "./model-metadata.ts";
+import { confirmModelMetadata } from "./model-metadata-preview.ts";
 import { getOwnValue, hasOwnKey, setOwnValue, deleteOwnKey } from "./own-keys.ts";
 import { lookupModelPayload } from "./payload-config.ts";
 import { searchableMultiSelect } from "./searchable-multi-select.ts";
@@ -202,6 +204,7 @@ export function buildModelCategories(
       id: "actions",
       label: "操作",
       fields: [
+        { id: "metadata", label: "搜索模型元数据", displayValue: "pi.dev · 按 Model ID", action: "run-action", searchText: "fuzzy 模糊搜索 官方 元数据 覆盖" },
         { id: "copy", label: "复制 Model", displayValue: "", action: "run-action" },
         { id: "delete", label: "删除 Model", displayValue: "", action: "run-action" },
       ],
@@ -553,6 +556,59 @@ async function editInputTypes(
   return { status: "value", value: supported };
 }
 
+async function applyModelMetadata(
+  ctx: ExtensionCommandContext,
+  actions: ModelConfigActions,
+  providerId: string,
+  model: ModelConfig,
+  targetApi: string | undefined,
+  search: typeof searchableSelect,
+): Promise<boolean> {
+  ctx.ui.notify("正在读取 pi.dev 模型元数据…", "info");
+  let entries: Awaited<ReturnType<typeof loadModelMetadataCatalog>>;
+  try {
+    entries = await loadModelMetadataCatalog();
+  } catch (error) {
+    ctx.ui.notify(error instanceof Error ? error.message : "无法读取 pi.dev 模型目录", "error");
+    return false;
+  }
+  const options = entries.map((entry) => ({
+    value: JSON.stringify([entry.provider, entry.model.id]),
+    label: `${entry.provider} · ${entry.model.id}`,
+    description: `${entry.api} · context ${entry.model.contextWindow ?? "?"} · output ${entry.model.maxTokens ?? "?"}`,
+    searchText: entry.model.id,
+  }));
+  const selected = await search(ctx, "搜索模型元数据 · pi.dev", options, {
+    initialQuery: model.id,
+    searchTextOnly: true,
+    maxVisible: 12,
+    hint: "按 Model ID 模糊搜索，选择 Provider 版本；Enter 预览覆盖，Esc 返回",
+  });
+  if (selected === undefined) return false;
+  const source = entries.find(entry => JSON.stringify([entry.provider, entry.model.id]) === selected);
+  if (!source) return false;
+  const { patch, fieldBaselines, changes } = buildModelMetadataPatch(model, source.model);
+  if (changes.length === 0) {
+    ctx.ui.notify("模型元数据已与所选来源一致", "info");
+    return false;
+  }
+  const description = [
+    `来源: ${source.provider}/${source.model.id}`,
+    `目标: ${providerId}/${model.id}`,
+    `来源 API: ${source.api}；目标 API: ${targetApi ?? "继承/未知"}`,
+    ...(source.api !== targetApi ? ["注意：来源与目标 API 不同或目标未知，Compat/Thinking/采样设置可能不适用。"] : []),
+    "只覆盖元数据；保留目标 ID、Provider、API、地址、Headers 和私有 Payload。",
+    "来源缺省的元数据字段将清除；价格与兼容能力仍需按实际端点核对。Cost 单位：USD / 百万 token。",
+    ...changes,
+  ].join("\n");
+  if (!await confirmModelMetadata(ctx, description)) return false;
+  const first = await actions.patchModel(providerId, model.id, patch, { fieldBaselines });
+  const result = await completeSimpleAction(ctx, actions, first, (resolution) => (
+    actions.patchModel(providerId, model.id, patch, { fieldBaselines, ...resolution })
+  ));
+  return didSave(ctx, result);
+}
+
 function defaultModel(modelId: string): ModelConfig {
   return {
     id: modelId,
@@ -674,6 +730,17 @@ export async function runModelEditor(
       continue;
     }
 
+    if (result.categoryId === "actions" && fieldId === "metadata") {
+      const api = effectiveModelApi(snapshot.native, providerId, model)
+        ?? ctx.modelRegistry?.find(providerId, modelId)?.api;
+      if (await applyModelMetadata(ctx, actions, providerId, model, api, search)) {
+        for (const key of retained.keys()) {
+          const [category, field] = key.split(":");
+          if (category === "cost" || MODEL_METADATA_FIELDS.some(metadataKey => metadataKey === field)) retained.delete(key);
+        }
+      }
+      continue;
+    }
     if (result.categoryId === "actions" && fieldId === "copy") {
       const raw = await ctx.ui.editor("复制 Model - 新 ID", `${modelId}-copy`);
       const target = raw?.trim();
